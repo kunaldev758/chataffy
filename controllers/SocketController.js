@@ -121,7 +121,6 @@ SocketController.handleSocketEvents = (io) => {
     if(socket.type == "client") {
       socket.on("client-connect", async (data) => {
         const userId = socket.userId;
-        // console.log("New User Connect With socket ID", socket.id, " User ID", userId);
         socket.join("user" + userId);
         socket.emit("client-connect-response", {
           response: "Received data from message",
@@ -211,6 +210,30 @@ SocketController.handleSocketEvents = (io) => {
           });
         });
       }
+
+               // New Event: Client sends a response to a visitor
+  socket.on('client-send-message', async (data, callback) => {
+    const userId = socket.userId;
+    const { message, conversationId } = data;
+    try {
+      // Save the client message in the chat history
+      const chatMessage = await OpenaiChatMessageController.createChatMessage(conversationId, userId, 'agent', message);
+      chatMessages = await OpenaiChatMessageController.getAllChatMessages(conversationId);
+      const div = document.createElement('div');
+      div.innerHTML = chatMessage;
+
+      
+
+      // Emit the message to the visitor and other participants in the conversation
+      io.to("conversation" + conversationId).emit('conversation-append-message', { "chatMessage": chatMessage });
+
+    } catch (error) {
+      // Handle client-send-message error
+      console.log('client-send-message-error:', error.message);
+      socket.emit('client-send-message-error', error.message);
+    }
+  });
+
       /*----------------*/
       socket.on("disconnect", () => {
         // console.log("A client disconnected.", socket.id);
@@ -432,27 +455,6 @@ SocketController.handleSocketEvents = (io) => {
           }
         });
 
-          // New Event: Client sends a response to a visitor
-  socket.on('client-send-message', async (data, callback) => {
-    
-    const { message, conversationId, visitorId } = data;
-    console.log(message,"clinet msg")
-    try {
-      // Save the client message in the chat history
-      const chatMessage = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'client', message);
-
-      // Emit the message to the visitor and other participants in the conversation
-      io.to("conversation" + conversationId).emit('conversation-append-message', { "chatMessage": chatMessage });
-
-      // Execute the callback to confirm that the message was processed
-      if (callback) callback({ chatMessage });
-
-    } catch (error) {
-      // Handle client-send-message error
-      console.log('client-send-message-error:', error.message);
-      socket.emit('client-send-message-error', error.message);
-    }
-  });
 
         // When disconnect socket
         socket.on("disconnect", () => {

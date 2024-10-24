@@ -8,6 +8,17 @@ const conversationSchema = new Schema({
     type: String,
     required: true,
   }],
+  conversationOpenStatus:{
+    type: String,
+    enum: ['open','close'],
+    default:'open',
+    required: true,
+  },
+  conversationTag:{ type: mongoose.Schema.Types.ObjectId, ref: "ConversationTag" },
+  isArchived:{
+    type: Boolean,
+    default:false,
+  },
   createdAt: {
     type: Date,
     default: Date.now,

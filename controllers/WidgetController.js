@@ -57,7 +57,110 @@ WidgetController.getBasicInfo = async (req, res) => {
         throw new Error(`No widget found with the given userId:${userId}`)
       }
     }else{
-      throw new Error(`No widget found with the given userId:${userId}`)
+      throw new Error(`No user found with the given userId:${userId}`)
+    }
+  } catch (error) {
+     commonHelper.logErrorToFile(error);
+    res.status(500).json({ status: false, message: "Something went wrong please try again!" });
+  }
+};
+
+
+WidgetController.getThemeSettings = async (req, res) => {
+  try {
+    const {userId} = req.params;
+    if(userId){
+      const widget = await Widget.findOne({ userId });
+      if(widget){
+        res.status(200).json({ status_code: 200, data: {
+          "logo": widget.logo,
+          "titleBar": widget.titleBar,
+          "welcomeMessage": widget.welcomeMessage,
+          "showLogo": widget.showLogo,
+          "isPreChatFormEnabled": widget.isPreChatFormEnabled,
+          "fields":widget.fields,
+          "colorFields":widget.colorFields
+        }});
+      }      
+      else{
+        throw new Error(`No widget found with the given userId:${userId}`)
+      }
+    }else{
+      throw new Error(`No user found with the given userId:${userId}`)
+    }
+  } catch (error) {
+     commonHelper.logErrorToFile(error);
+    res.status(500).json({ status: false, message: "Something went wrong please try again!" });
+  }
+};
+
+WidgetController.updateThemeSettings = async (req, res) => {
+  try {
+    const {userId,themeSettings} = req.body;
+    if(userId){
+      const widget = await Widget.findOne({ userId });
+      if(widget){
+        await Widget.updateOne({userId},{ logo:themeSettings.logo,
+          titleBar : themeSettings.titleBar,
+          welcomeMessage : themeSettings.welcomeMessage,
+          showLogo : themeSettings.showLogo,
+          isPreChatFormEnabled : themeSettings.isPreChatFormEnabled,
+          fields : themeSettings.fields,
+          colorFields : themeSettings.colorFields})
+        res.status(200).json({ status_code: 200, data: {
+          "logo": themeSettings.logo,
+          "titleBar": themeSettings.titleBar,
+          "welcomeMessage": themeSettings.welcomeMessage,
+          "showLogo": themeSettings.showLogo,
+          "isPreChatFormEnabled": themeSettings.isPreChatFormEnabled,
+          "fields":themeSettings.fields,
+          "colorFields":themeSettings.colorFields
+        }});
+      }      
+      else{
+        throw new Error(`No widget found with the given userId:${userId}`)
+      }
+    }else{
+      throw new Error(`No user found with the given userId:${userId}`)
+    }
+  } catch (error) {
+     commonHelper.logErrorToFile(error);
+    res.status(500).json({ status: false, message: "Something went wrong please try again!" });
+  }
+};
+
+WidgetController.uploadLogo = async (req, res) => {
+  try {
+    const {userId} = req.body;
+    const logoFile = req.file;
+  if (!logoFile) {
+    return res.status(400).send('No file uploaded.');
+  }
+    if(userId){
+      const widget = await Widget.findOne({ userId });
+      if(widget){
+        await Widget.updateOne({userId},{ logo:themeSettings.logo,
+          titleBar : themeSettings.titleBar,
+          welcomeMessage : themeSettings.welcomeMessage,
+          showLogo : themeSettings.showLogo,
+          isPreChatFormEnabled : themeSettings.isPreChatFormEnabled,
+          fields : themeSettings.fields,
+          colorFields : themeSettings.colorFields})
+        res.status(200).json({ status_code: 200, data: {
+          "logo": themeSettings.logo,
+          "titleBar": themeSettings.titleBar,
+          "welcomeMessage": themeSettings.welcomeMessage,
+          "showLogo": themeSettings.showLogo,
+          "isPreChatFormEnabled": themeSettings.isPreChatFormEnabled,
+          "fields":themeSettings.fields,
+          "colorFields":themeSettings.colorFields
+        }});
+      }      
+      else{
+        throw new Error(`No widget found with the given userId:${userId}`)
+      }
+    }else{
+      throw new Error(`No user found with the given userId:${userId}`)
     }
   } catch (error) {
      commonHelper.logErrorToFile(error);
