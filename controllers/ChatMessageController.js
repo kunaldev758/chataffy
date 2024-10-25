@@ -133,6 +133,69 @@ ChatMessageController.updateChatMessageById = async (req, res) => {
   }
 };
 
+//mark conversation as note
+ChatMessageController.addNoteToChat = async (req, res) => {
+  const { sender, sender_type, message, conversation_id } = req.body;
+  try {
+    // const chatMessage = await createChatMessage(conversation_id, sender, sender_type, message);
+    const chatMessage = new ChatMessage({
+      sender,
+      sender_type,
+      message,
+      conversation_id,
+      infoSources: undefined,
+      is_note: true
+    });
+    // console.log("chatMessage",chatMessage);
+    await chatMessage.save();
+    // return chatMessage;
+    res.status(201).json(chatMessage);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create chat message' });
+  }
+};
+
+//get all notes of conversation
+ChatMessageController.getAllChatNotesMessages = async (conversation_id) => {
+  try {
+    let chatMessagesNotes;
+    if(conversation_id) {
+      chatMessagesNotes = await ChatMessage.find({conversation_id,is_note:true})
+    }
+    return chatMessagesNotes;
+  } catch (error) {
+    throw error;
+  }
+};
+
+
+//get all notes of conversation
+ChatMessageController.getAllOldChats = async (conversation_id) => {
+  try {
+    let chatMessagesNotes;
+    if(conversation_id) {
+      chatMessagesNotes = await ChatMessage.find({conversation_id,is_note:true})
+    }
+    return chatMessagesNotes;
+  } catch (error) {
+    throw error;
+  }
+};
+
+//get all notes of conversation
+ChatMessageController.createTag = async (conversation_id) => {
+  try {
+    let chatMessagesNotes;
+    if(conversation_id) {
+      chatMessagesNotes = await ChatMessage.find({conversation_id,is_note:true})
+    }
+    return chatMessagesNotes;
+  } catch (error) {
+    throw error;
+  }
+};
+
+
 // Delete an existing chat message by ID
 ChatMessageController.deleteChatMessageById = async (req, res) => {
   const { id } = req.params;

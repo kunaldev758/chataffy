@@ -11,6 +11,10 @@ const chatMessageSchema = new Schema({
     enum: ['visitor', 'agent', 'bot', 'bot-error', 'system'],
     required: true,
   },
+  is_note:{
+    type:String,
+    default:false
+  },
   message: {
     type: String,
     required: true,
