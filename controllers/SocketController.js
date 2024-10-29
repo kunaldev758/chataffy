@@ -12,6 +12,7 @@ const OpenaiTrainingListController = require("../controllers/OpenaiTrainingListC
 // const ChatMessageController = require('../controllers/ChatMessageController');
 const TensorflowChatMessageController = require('../controllers/TensorflowChatMessageController');
 const OpenaiChatMessageController = require('../controllers/OpenaiChatMessageController');
+const ChatMessageController = require('../controllers/ChatMessageController')
 const VisitorController = require('../controllers/VisitorController');
 const User = require('../models/User');
 const Widget = require('../models/Widget');
@@ -218,6 +219,28 @@ SocketController.handleSocketEvents = (io) => {
     try {
       // Save the client message in the chat history
       const chatMessage = await OpenaiChatMessageController.createChatMessage(conversationId, userId, 'agent', message);
+      chatMessages = await OpenaiChatMessageController.getAllChatMessages(conversationId);
+      const div = document.createElement('div');
+      div.innerHTML = chatMessage;
+
+      
+
+      // Emit the message to the visitor and other participants in the conversation
+      io.to("conversation" + conversationId).emit('conversation-append-message', { "chatMessage": chatMessage });
+
+    } catch (error) {
+      // Handle client-send-message error
+      console.log('client-send-message-error:', error.message);
+      socket.emit('client-send-message-error', error.message);
+    }
+  });
+
+  socket.on('client-send-add-note', async (data, callback) => {
+    const userId = socket.userId;
+    const { message, conversationId } = data;
+    try {
+      // Save the client message in the chat history
+      const chatMessage = await ChatMessageController.addNoteToChat(userId,'agent' , message,conversationId);
       chatMessages = await OpenaiChatMessageController.getAllChatMessages(conversationId);
       const div = document.createElement('div');
       div.innerHTML = chatMessage;

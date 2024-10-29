@@ -63,5 +63,6 @@ router.get('/open-ai-usages-total-cost', OpenAIUsageController.sumTotalCost);
 //chat theme settings
 router.get('/getThemeSettings/:userId',WidgetController.getThemeSettings);
 router.post('/updateThemeSettings',upload.single('logo'),WidgetController.updateThemeSettings);
+router.get('/getAllNoteToConveration/:id',ChatMessageController.getAllChatNotesMessages)
 
 module.exports = router;

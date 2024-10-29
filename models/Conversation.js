@@ -1,9 +1,9 @@
 const mongoose = require('mongoose');
 const {Schema} = mongoose;
-const {dbName} = require('../../config/database');
-const db = mongoose.connection.useDb(dbName);
+// const {dbName} = require('../../config/database');
+// const db = mongoose.connection.useDb(dbName);
 
-const conversationSchema = new Schema({
+const conversationSchema = new mongoose.Schema({
   participants: [{
     type: String,
     required: true,
@@ -14,7 +14,6 @@ const conversationSchema = new Schema({
     default:'open',
     required: true,
   },
-  conversationTag:{ type: mongoose.Schema.Types.ObjectId, ref: "ConversationTag" },
   isArchived:{
     type: Boolean,
     default:false,
@@ -31,4 +30,5 @@ const conversationSchema = new Schema({
 { timestamps: true }
 );
 
-module.exports = db.model('Conversation', conversationSchema);
+const Converation = mongoose.model('Conversation', conversationSchema);
+module.exports =  Converation;

@@ -1,13 +1,14 @@
 const mongoose = require('mongoose');
 const {Schema} = mongoose;
-const {dbName} = require('../../config/database');
-const db = mongoose.connection.useDb(dbName);
+// const {dbName} = require('../../config/database');
+// const db = mongoose.connection.useDb(dbName);
 
-const conversationTagSchema = new Schema({
+const conversationTagSchema = new mongoose.Schema({
   tagName: [{
     type: String,
     required: true,
   }],
+  conversation:{ type: mongoose.Schema.Types.ObjectId, ref: "Conversation" },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -20,4 +21,5 @@ const conversationTagSchema = new Schema({
 { timestamps: true }
 );
 
-module.exports = db.model('ConversationTag', conversationTagSchema);
+const ConversationTag = mongoose.model('ConversationTag', conversationTagSchema);
+module.exports = ConversationTag ;

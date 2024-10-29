@@ -9,6 +9,7 @@ const RelatedTrainingList = require("../models/RelatedTrainingList");
 
 const tfjs = require('@tensorflow/tfjs');
 const use = require('@tensorflow-models/universal-sentence-encoder');
+const Conversation = require('../models/Conversation');
 
 const ChatMessageController = {};
 
@@ -134,8 +135,8 @@ ChatMessageController.updateChatMessageById = async (req, res) => {
 };
 
 //mark conversation as note
-ChatMessageController.addNoteToChat = async (req, res) => {
-  const { sender, sender_type, message, conversation_id } = req.body;
+ChatMessageController.addNoteToChat = async (sender, sender_type, message, conversation_id) => {
+  // const { sender, sender_type, message, conversation_id } = req.body;
   try {
     // const chatMessage = await createChatMessage(conversation_id, sender, sender_type, message);
     const chatMessage = new ChatMessage({
@@ -156,44 +157,48 @@ ChatMessageController.addNoteToChat = async (req, res) => {
 };
 
 //get all notes of conversation
-ChatMessageController.getAllChatNotesMessages = async (conversation_id) => {
+ChatMessageController.getAllChatNotesMessages = async (req, res) => {
+  const { id } = req.params;
   try {
     let chatMessagesNotes;
-    if(conversation_id) {
-      chatMessagesNotes = await ChatMessage.find({conversation_id,is_note:true})
+    if(id) {
+      chatMessagesNotes = await ChatMessage.find({conversation_id:id,is_note:"true"})
     }
-    return chatMessagesNotes;
+    res.status(201).json(chatMessagesNotes);
   } catch (error) {
     throw error;
   }
 };
 
 
-//get all notes of conversation
-ChatMessageController.getAllOldChats = async (conversation_id) => {
+//get all old conversation
+// ChatMessageController.getAllOldChats = async (req, res) => {
+//   const { visitor_id } = req.params;
+//   try {
+//     let chatMessagesNotesList = [];
+//     if(visitor_id) {
+//       let conversation = await Conversation.find({participants:{ $in: [visitor_id] }})
+//       for(let conv of conversation){
+//        let chatMessagesNotes = await ChatMessage.find({conversation_id:conv.conversation_id}).sort({ createdAt: -1 }).limit(1).exec();
+//        chatMessagesNotesList.push(...chatMessagesNotes);
+//       }
+//     }
+//     res.status(200).json(chatMessagesNotesList);
+//   } catch (error) {
+//     res.status(500).json({ error: 'An error occurred while fetching chat messages' });
+//   }
+// };
+
+ChatMessageController.getTotalChats = async (req, res) => {
   try {
-    let chatMessagesNotes;
-    if(conversation_id) {
-      chatMessagesNotes = await ChatMessage.find({conversation_id,is_note:true})
-    }
-    return chatMessagesNotes;
-  } catch (error) {
-    throw error;
+    const chatCount = await ChatMessage.find({}).countDocuments();
+    res.status(200).json(chatCount);
+  } catch (err) {
+    throw err;
   }
 };
 
-//get all notes of conversation
-ChatMessageController.createTag = async (conversation_id) => {
-  try {
-    let chatMessagesNotes;
-    if(conversation_id) {
-      chatMessagesNotes = await ChatMessage.find({conversation_id,is_note:true})
-    }
-    return chatMessagesNotes;
-  } catch (error) {
-    throw error;
-  }
-};
+
 
 
 // Delete an existing chat message by ID
