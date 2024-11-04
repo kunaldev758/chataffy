@@ -24,11 +24,11 @@ ConversationController.getAllOldConversations = async (req, res) => {
     let chatMessagesNotesList = [];
     if (visitor_id) {
       let conversation = await Conversation.find({
-        participants: { $in: [visitor_id] },
+        visitor: visitor_id,
       });
       for (let conv of conversation) {
         let chatMessagesNotes = await ChatMessage.find({
-          conversation_id: conv.conversation_id,
+          conversation_id: conv.visitor_id,
         })
           .sort({ createdAt: -1 })
           .limit(1)
@@ -43,6 +43,27 @@ ConversationController.getAllOldConversations = async (req, res) => {
       .json({ error: "An error occurred while fetching chat messages" });
   }
 };
+
+ConversationController.createConversation = async (visitorId) => {
+  try{
+    const result = await Conversation.insertOne({
+      visitor: visitorId,
+    });
+    return result;
+  }catch(err){
+    throw err ;
+  }
+}
+ConversationController.findConversation = async (visitorId) => {
+  try{
+    const result = await Conversation.findOne({
+      visitor: visitorId,
+    });
+    return result;
+  }catch(err){
+    throw err ;
+  }
+}
 
 //Add Conversation to Archive
 ConversationController.AddConversationToArchive = async (req, res) => {
@@ -113,43 +134,43 @@ ConversationController.getTotalConversation = async (req, res) => {
 };
 
 // Get a single visitor by ID
-ConversationController.getTagById = async (req, res) => {
-  const { id } = req.params;
-  try {
-    const tag = await ConversationTag.findById(id);
-    if (!tag) {
-      return res.status(404).json({ error: "Tag not found" });
-    }
-    res.json(tag);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch Tag" });
-  }
-};
+// ConversationController.getTagById = async (req, res) => {
+//   const { id } = req.params;
+//   try {
+//     const tag = await ConversationTag.findById(id);
+//     if (!tag) {
+//       return res.status(404).json({ error: "Tag not found" });
+//     }
+//     res.json(tag);
+//   } catch (error) {
+//     res.status(500).json({ error: "Failed to fetch Tag" });
+//   }
+// };
 
 // Create a new tag
-const createTag = async (name, conversationId) => {
-  try {
-    if (!name || !conversationId) {
-      throw error;
-    }
-    const conversation = await Conversation.findById(conversationId);
-    const tag = new ConversationTag({ name, conversation });
-    await tag.save();
-    return tag;
-  } catch (error) {
-    throw error;
-  }
-};
-ConversationController.createTag = createTag;
-ConversationController.createTagAPI = async (req, res) => {
-  const { name, conversationId } = req.body;
-  try {
-    const tag = await createTag(name, conversationId);
-    res.status(201).json(tag);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to create tag" });
-  }
-};
+// const createTag = async (name, conversationId) => {
+//   try {
+//     if (!name || !conversationId) {
+//       throw error;
+//     }
+//     const conversation = await Conversation.findById(conversationId);
+//     const tag = new ConversationTag({ name, conversation });
+//     await tag.save();
+//     return tag;
+//   } catch (error) {
+//     throw error;
+//   }
+// };
+// ConversationController.createTag = createTag;
+// ConversationController.createTagAPI = async (req, res) => {
+//   const { name, conversationId } = req.body;
+//   try {
+//     const tag = await createTag(name, conversationId);
+//     res.status(201).json(tag);
+//   } catch (error) {
+//     res.status(500).json({ error: "Failed to create tag" });
+//   }
+// };
 
 // Update an existing visitor by ID
 // ConversationController.updateVisitorById = async (req, res) => {
@@ -171,17 +192,17 @@ ConversationController.createTagAPI = async (req, res) => {
 // };
 
 // Delete an existing visitor by ID
-ConversationController.deleteTagById = async (req, res) => {
-  const { id } = req.params;
-  try {
-    const tag = await ConversationTag.findByIdAndDelete(id);
-    if (!tag) {
-      return res.status(404).json({ error: "tag not found" });
-    }
-    res.sendStatus(204);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to delete tag" });
-  }
-};
+// ConversationController.deleteTagById = async (req, res) => {
+//   const { id } = req.params;
+//   try {
+//     const tag = await ConversationTag.findByIdAndDelete(id);
+//     if (!tag) {
+//       return res.status(404).json({ error: "tag not found" });
+//     }
+//     res.sendStatus(204);
+//   } catch (error) {
+//     res.status(500).json({ error: "Failed to delete tag" });
+//   }
+// };
 
 module.exports = ConversationController;

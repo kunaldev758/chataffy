@@ -65,4 +65,5 @@ router.get('/getThemeSettings/:userId',WidgetController.getThemeSettings);
 router.post('/updateThemeSettings',upload.single('logo'),WidgetController.updateThemeSettings);
 router.get('/getAllNoteToConveration/:id',ChatMessageController.getAllChatNotesMessages)
 
+router.post('/getOldConversationMessages', ChatMessageController.getAllOldChatMessagesAPI);
 module.exports = router;

@@ -4,10 +4,10 @@ const {Schema} = mongoose;
 // const db = mongoose.connection.useDb(dbName);
 
 const conversationSchema = new mongoose.Schema({
-  participants: [{
+  visitor: {
     type: String,
     required: true,
-  }],
+  },
   conversationOpenStatus:{
     type: String,
     enum: ['open','close'],

@@ -46,15 +46,15 @@ const getRecentChatMessages = async (conversation_id, chat_message) => {
   }
 };
 // Get all chat messages
-const getAllChatMessages = async (conversation_id) => {
-  // console.log("getAllChatMessages",conversationId);
+const getAllChatMessages = async (visitor_id) => {
   try {
     let chatMessages;
-    if(conversation_id) {
+    if(visitor_id) {
+      const conversation_id = await Conversation.findOne({visitor:visitor_id ,conversationOpenStatus:'open'})
       chatMessages = await ChatMessage.find({conversation_id})
     }
     else {
-      chatMessages = await ChatMessage.find();
+      throw new error;
     }
     return chatMessages;
   } catch (error) {
@@ -70,6 +70,34 @@ ChatMessageController.getAllChatMessagesAPI = async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch chat messages' });
   }
 };
+
+
+// Get all chat messages
+const getAllOldChatMessages = async (conversation_id) => {
+  try {
+    let chatMessages;
+    if(conversation_id) {
+      // const conversation_id = await Conversation.findOne({visitor:visitor_id ,conversationOpenStatus:'open'})
+      chatMessages = await ChatMessage.find({conversation_id})
+    }
+    else {
+      throw new error;
+    }
+    return chatMessages;
+  } catch (error) {
+    throw error;
+  }
+};
+ChatMessageController.getAllOldChatMessages = getAllOldChatMessages;
+ChatMessageController.getAllOldChatMessagesAPI = async (req, res) => {
+  try {
+    const chatMessages = await getAllOldChatMessages(req.body.id); //conversationId
+    res.json(chatMessages);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch chat messages' });
+  }
+};
+
 
 // Get a single chat message by ID
 ChatMessageController.getChatMessageById = async (req, res) => {
