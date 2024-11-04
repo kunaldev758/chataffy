@@ -23,7 +23,8 @@ const UserController = require('../controllers/UserController');
 const CreditsController = require('../controllers/CreditsController');
 const WidgetController = require('../controllers/WidgetController');
 const OpenAIUsageController = require('../controllers/OpenAIUsageController');
-// const VisitorController = require('../controllers/VisitorController');
+const VisitorController = require('../controllers/VisitorController');
+const ConversationTagController = require('../controllers/ConversationTagController');
 const middleware = require('../middleware/authMiddleware');
 /* Without middleware */
 router.post('/login', UserController.loginUser);
@@ -60,10 +61,16 @@ router.post('/getUserCredits', CreditsController.getUserCredits);
 
 router.get('/open-ai-usages-total-cost', OpenAIUsageController.sumTotalCost);
 
-//chat theme settings
+
 router.get('/getThemeSettings/:userId',WidgetController.getThemeSettings);
 router.post('/updateThemeSettings',upload.single('logo'),WidgetController.updateThemeSettings);
 router.get('/getAllNoteToConveration/:id',ChatMessageController.getAllChatNotesMessages)
+router.get('/getAllOldConversationOfVisitor/:id',ChatMessageController.getAllOldConversations)
+router.get('/getVisitorDetails/:id',VisitorController.getVisitorById)
+
+router.get('/getConversationTags/:id',ConversationTagController.getAllTagsOfConversation)
+router.get('/removeTagFromConversation/:id',ConversationTagController.deleteTagById)
+router.post('/addTagToConversation/:id',ConversationTagController.createTagAPI)
 
 router.post('/getOldConversationMessages', ChatMessageController.getAllOldChatMessagesAPI);
 module.exports = router;
