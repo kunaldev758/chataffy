@@ -1,5 +1,6 @@
 const ChatMessage = require('../models/ChatMessage');
 const Visitor = require('../models/Visitor');
+const Conversation = require('../models/Conversation');
 const asyncHandler = require('express-async-handler');
 
 const OpenAIController = require("./OpenAIController");
@@ -53,7 +54,8 @@ const getAllChatMessages = async (conversation_id) => {
       chatMessages = await ChatMessage.find({conversation_id})
     }
     else {
-      chatMessages = await ChatMessage.find();
+      // chatMessages = await ChatMessage.find();
+      throw new Error("No Conversation Id found")
     }
     return chatMessages;
   } catch (error) {
@@ -100,8 +102,9 @@ const createChatMessage = async(conversation_id, sender, sender_type, message, s
     await chatMessage.save();
     const validSenderTypes = ['visitor', 'bot', 'agent'];
     if (validSenderTypes.includes(sender_type)) {
+      const conversation = await Conversation.find({id:conversation_id})
       await Visitor.updateOne(
-        { _id: conversation_id },
+        { _id: conversation.visitor },
         { $set: { lastMessage: message } }
       );
     }
@@ -604,7 +607,8 @@ ${previous_conversation}</previous_conversation>`}];
             break;
             case "gibberish": 
               enquiries.push({"enquiry_text":enquiry.enquiry_text, "potential_information": [], "enquiry_guidelines": "Politely deny that you couldn't understand and ask to rewrite the enquiry."});
-            break;
+              //add to fallback message
+              break;
             case "unclear": 
               enquiries.push({"enquiry_text":enquiry.enquiry_text, "potential_information": [], "enquiry_guidelines": "Politely ask to clarify the enquiry and ask to provide more detail."});
             break;

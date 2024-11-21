@@ -1,21 +1,27 @@
 const commonHelper = require("../helpers/commonHelper.js");
-const TrainingList = require('../models/TrainingList');
-const ObjectId  = require('mongoose').Types.ObjectId;
+const Client = require("../models/Client.js");
+const TrainingList = require("../models/TrainingList");
+const ObjectId = require("mongoose").Types.ObjectId;
+const TrainingListController = {};
 
 exports.getTrainingListDetail = async (req, res) => {
   try {
     const userId = req.body.userId;
-    const {id} = req.body;
+    const { id } = req.body;
     const trainingList = await TrainingList.findById(id);
-    if(!trainingList) {
-      res.status(200).json({ status: false, message: "No matching record found" });    
-      return;  
+    if (!trainingList) {
+      res
+        .status(200)
+        .json({ status: false, message: "No matching record found" });
+      return;
     }
-    if(trainingList.userId != userId) {
-      res.status(200).json({ status: false, message: "Not authorised for this training" });    
-      return;  
+    if (trainingList.userId != userId) {
+      res
+        .status(200)
+        .json({ status: false, message: "Not authorised for this training" });
+      return;
     }
-    switch(trainingList.type) {
+    switch (trainingList.type) {
       case 0:
         res.status(200).json({
           title: trainingList.title,
@@ -29,14 +35,14 @@ exports.getTrainingListDetail = async (req, res) => {
             metaDescription: trainingList.webPage.metaDescription,
             content: trainingList.webPage.content,
             crawlingStatus: trainingList.webPage.crawlingStatus,
-            sourceCode: trainingList.webPage.sourceCode
+            sourceCode: trainingList.webPage.sourceCode,
           },
           mapping: {
-            mappingStatus: trainingList.mapping.mappingStatus
-          }
+            mappingStatus: trainingList.mapping.mappingStatus,
+          },
         });
         break;
-        
+
       case 1:
         res.status(200).json({
           title: trainingList.title,
@@ -44,18 +50,18 @@ exports.getTrainingListDetail = async (req, res) => {
           timeUsed: trainingList.timeUsed,
           lastEdit: trainingList.lastEdit,
           isActive: trainingList.isActive,
-          file: { 
-            fileName: trainingList.file.fileName, 
+          file: {
+            fileName: trainingList.file.fileName,
             originalFileName: trainingList.file.originalFileName,
             path: trainingList.file.path,
             content: trainingList.file.content,
-          },                  
+          },
           mapping: {
-            mappingStatus: trainingList.mapping.mappingStatus
-          }
+            mappingStatus: trainingList.mapping.mappingStatus,
+          },
         });
         break;
-        
+
       case 2:
         res.status(200).json({
           title: trainingList.title,
@@ -68,11 +74,11 @@ exports.getTrainingListDetail = async (req, res) => {
             content: trainingList.snippet.content,
           },
           mapping: {
-            mappingStatus: trainingList.mapping.mappingStatus
-          }
+            mappingStatus: trainingList.mapping.mappingStatus,
+          },
         });
         break;
-        
+
       case 3:
         res.status(200).json({
           title: trainingList.title,
@@ -85,17 +91,38 @@ exports.getTrainingListDetail = async (req, res) => {
             answer: trainingList.faq.answer,
           },
           mapping: {
-            mappingStatus: trainingList.mapping.mappingStatus
-          }
+            mappingStatus: trainingList.mapping.mappingStatus,
+          },
         });
         break;
-      
+
       default:
-        res.status(201).json({ status_code: 500, message: "Something went wrong please try again!" });
+        res.status(201).json({
+          status_code: 500,
+          message: "Something went wrong please try again!",
+        });
     }
-      
   } catch (error) {
-     commonHelper.logErrorToFile(error);
-    res.status(500).json({ status: false, message: "Something went wrong please try again!" });
+    commonHelper.logErrorToFile(error);
+    res.status(500).json({
+      status: false,
+      message: "Something went wrong please try again!",
+    });
   }
 };
+
+TrainingListController.getTrainingStatus = async (req, res) => {
+  const clientId = req.body.userId;
+  try {
+    const data = await Client.findOne({ userId: clientId });
+    res.status(200).send({
+      webpageStatus: data.webPageAdded,
+      faqStatus: data.faqAdded,
+      docSnippetStatus: data.docSnippetAdded,
+    });
+  } catch (err) {
+    throw err;
+  }
+};
+
+module.exports = TrainingListController;

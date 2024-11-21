@@ -16,7 +16,7 @@ const upload = multer({ storage });
 
 // const ScraperController = require('../controllers/ScraperController');
 // const TrainingListController = require('../controllers/TrainingListController');
-const TensorflowTrainingListController = require('../controllers/TensorflowTrainingListController');
+// const TensorflowTrainingListController = require('../controllers/TensorflowTrainingListController');
 const OpenaiTrainingListController = require('../controllers/OpenaiTrainingListController');
 const ChatMessageController = require('../controllers/ChatMessageController');
 const UserController = require('../controllers/UserController');
@@ -25,6 +25,8 @@ const WidgetController = require('../controllers/WidgetController');
 const OpenAIUsageController = require('../controllers/OpenAIUsageController');
 const VisitorController = require('../controllers/VisitorController');
 const ConversationTagController = require('../controllers/ConversationTagController');
+const ConversatinController = require('../controllers/ConversationController');
+const TrainingListController =  require('../controllers/TrainingListController');
 const middleware = require('../middleware/authMiddleware');
 /* Without middleware */
 router.post('/login', UserController.loginUser);
@@ -36,17 +38,17 @@ router.post('/verifyEmail', UserController.verifyEmail);
 router.post('/openaiCreateSnippet', upload.single('file'), middleware, OpenaiTrainingListController.createSnippet);
 router.use(middleware);
 // router.post('/scrape', ScraperController.scrape);
-router.post('/tensorflowScrape', TensorflowTrainingListController.scrape);
+// router.post('/tensorflowScrape', TensorflowTrainingListController.scrape);
 router.post('/openaiScrape', OpenaiTrainingListController.scrape);
-router.post('/tensorflowCreateSnippet', TensorflowTrainingListController.createSnippet);
-router.post('/tensorflowCreateFaq', TensorflowTrainingListController.createFaq);
+// router.post('/tensorflowCreateSnippet', TensorflowTrainingListController.createSnippet);
+// router.post('/tensorflowCreateFaq', TensorflowTrainingListController.createFaq);
 router.post('/openaiCreateFaq', OpenaiTrainingListController.createFaq);
-router.post('/tensorflowToggleActiveStatus', TensorflowTrainingListController.toggleActiveStatus);
+// router.post('/tensorflowToggleActiveStatus', TensorflowTrainingListController.toggleActiveStatus);
 router.post('/openaiToggleActiveStatus', OpenaiTrainingListController.toggleActiveStatus);
 router.post('/getWidgetToken', WidgetController.getWidgetToken);
 router.post('/logout', UserController.logoutUser);
 // router.post('/getTrainingListDetail', TrainingListController.getTrainingListDetail);
-router.post('/getTensorflowTrainingListDetail', TensorflowTrainingListController.getTrainingListDetail);
+// router.post('/getTensorflowTrainingListDetail', TensorflowTrainingListController.getTrainingListDetail);
 router.post('/getOpenaiTrainingListDetail', OpenaiTrainingListController.getTrainingListDetail);
 router.post('/getConversationMessages', ChatMessageController.getAllChatMessagesAPI);
 router.post('/getMessageSources', ChatMessageController.getMessageSources);
@@ -63,14 +65,29 @@ router.get('/open-ai-usages-total-cost', OpenAIUsageController.sumTotalCost);
 
 
 router.get('/getThemeSettings/:userId',WidgetController.getThemeSettings);
-router.post('/updateThemeSettings',upload.single('logo'),WidgetController.updateThemeSettings);
-router.get('/getAllNoteToConveration/:id',ChatMessageController.getAllChatNotesMessages)
-router.get('/getAllOldConversationOfVisitor/:id',ChatMessageController.getAllOldConversations)
-router.get('/getVisitorDetails/:id',VisitorController.getVisitorById)
+router.post('/updateThemeSettings',WidgetController.updateThemeSettings);
+router.post('/getAllNoteToConveration',ChatMessageController.getAllChatNotesMessages)
+router.post('/getAllOldConversationOfVisitor',ConversatinController.getAllOldConversations)
+router.post('/getVisitorDetails',VisitorController.getVisitorById)
 
-router.get('/getConversationTags/:id',ConversationTagController.getAllTagsOfConversation)
-router.get('/removeTagFromConversation/:id',ConversationTagController.deleteTagById)
-router.post('/addTagToConversation/:id',ConversationTagController.createTagAPI)
+router.post('/getConversationTags',ConversationTagController.getAllTagsOfConversation)
+router.post('/removeTagFromConversation',ConversationTagController.deleteTagById)
+router.post('/addTagToConversation',ConversationTagController.createTagAPI)
+
+
+//dashboard Apis
+router.post('/getTotalMessages',ChatMessageController.getTotalChats);
+router.post('/getTotalChats',ConversatinController.getTotalConversation);
+router.post('/getSearchConversationList',ConversatinController.searchByTagOrName);
+router.post('/addConversationToArchive',ConversatinController.AddConversationToArchive);
+// router.post('/getTotalFallbackMessages',ConversatinController.getTotalFallbackMessages);
+router.post('/getTrainingStatus',TrainingListController.getTrainingStatus);
+
+router.post('/getCsatPercent',ChatMessageController.getCSAT);
+router.post('/saveVisitorDetails',VisitorController.updateVisitorById);
+router.post('/getIsVisitorExists',VisitorController.getIsVisitorExists);
+router.post('/blockVisitor',VisitorController.blockVisitor);
+
 
 router.post('/getOldConversationMessages', ChatMessageController.getAllOldChatMessagesAPI);
 module.exports = router;

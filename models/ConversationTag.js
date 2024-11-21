@@ -4,10 +4,10 @@ const {Schema} = mongoose;
 // const db = mongoose.connection.useDb(dbName);
 
 const conversationTagSchema = new mongoose.Schema({
-  tagName: [{
+  name: {
     type: String,
     required: true,
-  }],
+  },
   conversation:{ type: mongoose.Schema.Types.ObjectId, ref: "Conversation" },
   createdAt: {
     type: Date,

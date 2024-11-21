@@ -10,8 +10,8 @@ const ConversationTagController = {};
 
 ConversationTagController.getAllTagsOfConversation = async (req, res) => {
   try {
-    const conversationId = req.params.id;
-    const tags = await ConversationTag.find({conversation:{id:conversationId}});
+    const conversationId = req.body.basicInfo.conversationId;
+    const tags = await ConversationTag.find({conversation:conversationId});
     res.json(tags);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch tags' });
@@ -48,7 +48,7 @@ const createTag = async (name,conversationId) => {
   };
   ConversationTagController.createTag = createTag;
 ConversationTagController.createTagAPI = async (req, res) => {
-  const { name,conversationId } = req.body;
+  const { name,conversationId } = req.body.basicInfo;
   try {
     const tag = await createTag(name,conversationId);
     res.status(201).json(tag);
@@ -78,7 +78,7 @@ ConversationTagController.createTagAPI = async (req, res) => {
 
 // Delete an existing visitor by ID
 ConversationTagController.deleteTagById = async (req, res) => {
-  const { id } = req.params;
+  const { id } = req.body.basicInfo;
   try {
     const tag = await ConversationTag.findByIdAndDelete(id);
     if (!tag) {

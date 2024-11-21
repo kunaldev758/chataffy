@@ -6,17 +6,15 @@ const { Node, document } = new JSDOM("").window;
 
 const SocketController = {};
 const CreditsController = require("../controllers/CreditsController");
-// const ScraperController = require("../controllers/ScraperController");
-const TensorflowTrainingListController = require("../controllers/TensorflowTrainingListController");
 const OpenaiTrainingListController = require("../controllers/OpenaiTrainingListController");
-// const ChatMessageController = require('../controllers/ChatMessageController');
-const TensorflowChatMessageController = require("../controllers/TensorflowChatMessageController");
 const OpenaiChatMessageController = require("../controllers/OpenaiChatMessageController");
 const ChatMessageController = require("../controllers/ChatMessageController");
 const VisitorController = require("../controllers/VisitorController");
+const ConversationController = require("../controllers/ConversationController");
 const User = require("../models/User");
 const Widget = require("../models/Widget");
 const Visitor = require("../models/Visitor");
+const Conversation = require("../models/Conversation");
 
 const verifyToken = (token) => {
   return new Promise((resolve, reject) => {
@@ -172,30 +170,47 @@ SocketController.handleSocketEvents = (io) => {
           const userId = socket.userId;
           const visitors = await Visitor.find({
             userId,
-            lastMessage: { $exists: true },
+            // lastMessage: { $exists: true },
           }).sort({ createdAt: -1 });
+          const updatedVisitors = await Promise.all(
+            visitors.map(async (visitorDoc) => {
+              const visitor = visitorDoc.toObject(); // Convert to plain object
+              const conv = await Conversation.findOne({
+                visitor: visitor._id,
+                conversationOpenStatus: "open",
+              });
+              visitor["conversation"] = conv;
+              // console.log(visitor,"visitor data list")
+              return visitor; // Return modified visitor
+            })
+          );
+          console.log(updatedVisitors, "Visitors List");
           socket.emit("get-conversations-list-response", {
             response: "Received data from message",
-            data: visitors,
+            data: updatedVisitors,
           });
         });
       }
 
       // New Event: Client sends a response to a visitor
       socket.on("client-send-message", async (data, callback) => {
-        const userId = socket.userId;
+        // const conversationId = socket.conversationId;
         const { message, visitorId } = data;
+        let conversation = await ConversationController.getOpenConversation(
+          visitorId
+        );
+        let conversationId = conversation._id ? conversation._id : null;
         try {
           // Save the client message in the chat history
           const chatMessage =
             await OpenaiChatMessageController.createChatMessage(
+              conversationId,
               visitorId,
-              userId,
               "agent",
               message
             );
           chatMessages = await OpenaiChatMessageController.getAllChatMessages(
-            visitorId
+            conversationId
           );
           const div = document.createElement("div");
           div.innerHTML = chatMessage;
@@ -214,17 +229,17 @@ SocketController.handleSocketEvents = (io) => {
 
       socket.on("client-send-add-note", async (data, callback) => {
         const userId = socket.userId;
-        const { message, visitorId } = data;
+        const { message, visitorId, conversationId } = data;
         try {
           // Save the client message in the chat history
           const chatMessage = await ChatMessageController.addNoteToChat(
-            userId,
+            visitorId,
             "agent",
             message,
-            visitorId
+            conversationId
           );
           chatMessages = await OpenaiChatMessageController.getAllChatMessages(
-            visitorId
+            conversationId
           );
           const div = document.createElement("div");
           div.innerHTML = chatMessage;
@@ -253,15 +268,24 @@ SocketController.handleSocketEvents = (io) => {
       if (socket.embedType == "openai") {
         socket.on("visitor-connect", async (data) => {
           try {
-            let visitorId = socket.visitorId,
-              chatMessages = [];
-            chatMessages = await OpenaiChatMessageController.getAllChatMessages(
+            let visitorId = socket.visitorId;
+            let conversation = await ConversationController.getOpenConversation(
               visitorId
             );
+            let conversationId = conversation != null ? conversation.id : null;
+
+            if (!conversationId) {
+              conversation = await ConversationController.createConversation(
+                visitorId
+              );
+              conversationId = conversation._id;
+            }
+
+            chatMessages = [];
+            chatMessages = await OpenaiChatMessageController.getAllChatMessages(
+              conversationId
+            );
             if (!chatMessages.length) {
-              const conversation =
-                await ConversationController.createConversation(visitorId);
-              conversationId = conversation.id;
               const chatMessage =
                 await OpenaiChatMessageController.createChatMessage(
                   conversationId,
@@ -271,12 +295,7 @@ SocketController.handleSocketEvents = (io) => {
                 );
 
               chatMessages = [chatMessage];
-            } else {
-              const conversation =
-                await ConversationController.findConversation(visitorId);
-              conversationId = conversation.id;
             }
-
             socket.visitorId = visitorId;
             socket.conversationId = conversationId;
             socket.type = "visitor";
@@ -284,7 +303,7 @@ SocketController.handleSocketEvents = (io) => {
             socket.join("conversation" + conversationId);
             socket.emit("visitor-connect-response", {
               visitorId,
-              conversationId,
+              conversationId: conversationId,
               chatMessages,
             });
           } catch (error) {
@@ -295,8 +314,7 @@ SocketController.handleSocketEvents = (io) => {
         // Handle events when a client sends a message
         socket.on("visitor-send-message", async (data, callback) => {
           const { message, id } = data;
-          const visitorId = socket.visitorId;
-          const conversationId = socket.conversationId;
+          const { visitorId, conversationId } = socket;
           const encodedMessage = encode(message);
           let response_data,
             chatMessage = null;
@@ -307,7 +325,7 @@ SocketController.handleSocketEvents = (io) => {
               "visitor",
               "<p>" + encodedMessage + "</p>"
             );
-            io.to("conversation" + socket.conversationId).emit(
+            io.to("conversation" + conversationId).emit(
               "conversation-append-message",
               { chatMessage: chatMessage, id }
             );
@@ -321,20 +339,26 @@ SocketController.handleSocketEvents = (io) => {
           }
 
           try {
+            let conv = await Conversation.findOne({_id:conversationId});
+            if(!conv.aiChat){
+
+            }else{
             response_data =
               await OpenaiChatMessageController.chat_message_response(
                 chatMessage,
-                socket.visitorId,
-                socket.conversationId,
+                visitorId,
+                conversationId,
                 io,
                 socket.userId
               );
+            }
             // console.log("response_data", response_data);
           } catch (error) {
             console.log("newChatMessageError");
             socket.emit("newChatMessageError", error.message);
           }
           try {
+            if(conv.aiChat){
             const div = document.createElement("div");
             div.innerHTML = response_data.reply;
 
@@ -367,7 +391,7 @@ SocketController.handleSocketEvents = (io) => {
                   "bot-error",
                   "Error in response"
                 );
-              io.to("conversation" + socket.conversationId).emit(
+              io.to("conversation" + conversationId).emit(
                 "conversation-append-message",
                 { chatMessage: chatMessageResponse }
               );
@@ -381,7 +405,7 @@ SocketController.handleSocketEvents = (io) => {
                   response_data.reply,
                   response_data.infoSources
                 );
-              io.to("conversation" + socket.conversationId).emit(
+              io.to("conversation" + conversationId).emit(
                 "conversation-append-message",
                 {
                   chatMessage: chatMessageResponse,
@@ -390,9 +414,51 @@ SocketController.handleSocketEvents = (io) => {
               );
               // io.to(conversationId).emit('newChatMessage', chatMessage);
             }
+          }
           } catch (error) {
             console.log("Response error:- ", error.message);
             socket.emit("newChatMessageError", error.message);
+          }
+        });
+
+        socket.on("message-feedback", async (data, callback) => {
+          const { messageId, feedback } = data; // `messageId` is the ID of the message, `feedback` is "like" or "dislike"
+          try {
+            // Update the message feedback in the database
+            const updatedMessage = await ChatMessageController.updateFeedback(
+              messageId,
+              feedback
+            );
+        
+            // Notify clients (if needed) about the feedback update
+            // io.to("conversation" + updatedMessage.conversationId).emit(
+            //   "message-feedback-updated",
+            //   { messageId, feedback }
+            // );
+        
+            // Respond to the frontend with success
+            if (callback) {
+              callback({ success: true, updatedMessage });
+            }
+          } catch (error) {
+            console.error("Error updating message feedback:", error.message);
+            // Respond with error to the frontend
+            if (callback) {
+              callback({ success: false, error: error.message });
+            }
+          }
+        });
+        
+
+        socket.on("close-conversation", async (data) => {
+          const { conversationId, status } = data;
+          try {
+            await ConversationController.UpdateConversationStatusOpenClose(
+              conversationId,
+              status
+            );
+          } catch (err) {
+            throw err;
           }
         });
 

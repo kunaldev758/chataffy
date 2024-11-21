@@ -68,9 +68,10 @@ WidgetController.getBasicInfo = async (req, res) => {
 
 WidgetController.getThemeSettings = async (req, res) => {
   try {
-    const {userId} = req.params;
+    const userId = req.body.userId;
+    const widgetId = req.body.widgetId;
     if(userId){
-      const widget = await Widget.findOne({ userId });
+      const widget = await Widget.findOne({ userId:userId });
       if(widget){
         res.status(200).json({ status_code: 200, data: {
           "logo": widget.logo,
@@ -82,6 +83,22 @@ WidgetController.getThemeSettings = async (req, res) => {
           "colorFields":widget.colorFields
         }});
       }      
+      else{
+        throw new Error(`No widget found with the given userId:${userId}`)
+      }
+    }else if(widgetId){
+      const widget = await Widget.findOne({ _id:widgetId });
+      if(widget){
+        res.status(200).json({ status_code: 200, data: {
+          "logo": widget.logo,
+          "titleBar": widget.titleBar,
+          "welcomeMessage": widget.welcomeMessage,
+          "showLogo": widget.showLogo,
+          "isPreChatFormEnabled": widget.isPreChatFormEnabled,
+          "fields":widget.fields,
+          "colorFields":widget.colorFields
+        }});
+      } 
       else{
         throw new Error(`No widget found with the given userId:${userId}`)
       }
