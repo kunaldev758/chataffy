@@ -6,8 +6,8 @@ const ChatMessage = require("../models/ChatMessage");
 const ConversationController = {};
 
 //get all old conversation
-ConversationController.getAllOldConversations = async (req, res) => {
-  const { visitor_id } = req.body.basicInfo;
+ConversationController.getAllOldConversations = async (visitor_id) => {
+  // const { visitor_id } = req.body.basicInfo;
   try {
     let chatMessagesNotesList = [];
     if (visitor_id) {
@@ -25,11 +25,9 @@ ConversationController.getAllOldConversations = async (req, res) => {
         chatMessagesNotesList.push(...chatMessagesNotes);
       }
     }
-    res.status(200).json(chatMessagesNotesList);
+    return chatMessagesNotesList;
   } catch (error) {
-    res
-      .status(500)
-      .json({ error: "An error occurred while fetching chat messages" });
+   return error;
   }
 };
 
@@ -115,9 +113,12 @@ ConversationController.UpdateConversationStatusOpenClose = async (
   }
 };
 
-ConversationController.searchByTagOrName = async (req, res) => {
-  const query = req.body.basicInfo;
-  const userId = req.body.userId;
+ConversationController.searchByTagOrName = async (query, userId) => {
+  // const query = req.body.basicInfo;
+  // const userId = req.body.userId;
+  // return Conversations.find({ name: { $regex: query, $options: "i" } }).limit(
+  //   10
+  // );
   const visitor = await Visitor.find({ name: query, userId: userId });
   const tag = await ConversationTag.find({ name: query });
   if (visitor) {

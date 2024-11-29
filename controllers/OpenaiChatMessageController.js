@@ -87,11 +87,12 @@ ChatMessageController.getChatMessageById = async (req, res) => {
 };
 
 // Create a new chat message
-const createChatMessage = async(conversation_id, sender, sender_type, message, sources=undefined) => {
+const createChatMessage = async(conversation_id, sender, sender_type, message,userId, sources=undefined) => {
   try {
     // console.log({ sender, sender_type, message, conversation_id });
     console.log("sources", sources);
     const chatMessage = new ChatMessage({
+      userId:userId,
       sender,
       sender_type,
       message,
@@ -116,9 +117,9 @@ const createChatMessage = async(conversation_id, sender, sender_type, message, s
 };
 ChatMessageController.createChatMessage = createChatMessage;
 ChatMessageController.createChatMessageAPI = async (req, res) => {
-  const { sender, sender_type, message, conversation_id } = req.body;
+  const { sender, sender_type, message, conversation_id ,userId} = req.body;
   try {
-    const chatMessage = await createChatMessage(conversation_id, sender, sender_type, message);
+    const chatMessage = await createChatMessage(conversation_id, sender, sender_type, message,userId);
     res.status(201).json(chatMessage);
   } catch (error) {
     res.status(500).json({ error: 'Failed to create chat message' });

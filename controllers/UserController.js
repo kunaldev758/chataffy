@@ -103,7 +103,7 @@ UserController.loginUser = async (req, res) => {
     const token = user.generateAuthToken();
     user.auth_token = token;
     await user.save();
-    res.json({ status_code: 200, status: true, token, message: 'Login successful' });
+    res.json({ status_code: 200, status: true, token,userId:user?._id, message: 'Login successful' });
   } catch (error) {
     commonHelper.logErrorToFile(error);
     res.status(500).json({ status_code: 500, status: false, message: 'Login failed' });

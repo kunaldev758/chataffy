@@ -3,14 +3,19 @@ const http = require('http');
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const path = require('path');
-const socketIo = require('socket.io');
+const {Server } = require('socket.io');
 const apiRoutes = require('./routes/');
 const SocketController = require('./controllers/SocketController');
 const cors = require('cors')
 dotenv.config();
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, {cors: {origin: "*"}});
+const io = new Server(server, {
+  cors: {
+    origin: process.env.CLIENT_URL, // Replace with your frontend's URL
+    methods: ["GET", "POST"],
+  },
+});
 
 mongoose.connect(process.env.MONGODB_URI);
 

@@ -8,13 +8,14 @@ const Conversation = require('../models/Conversation');
 const ConversationTagController = {};
 
 
-ConversationTagController.getAllTagsOfConversation = async (req, res) => {
+ConversationTagController.getAllTagsOfConversation = async (conversationId) => {
   try {
-    const conversationId = req.body.basicInfo.conversationId;
-    const tags = await ConversationTag.find({conversation:conversationId});
-    res.json(tags);
+    // const conversationId = req.body.basicInfo.conversationId;
+    const tags = await ConversationTag.find({ conversation: conversationId.conversationId });
+    return tags;
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch tags' });
+    // res.status(500).json({ error: 'Failed to fetch tags' });
+    return error;
   }
 };
 
@@ -33,16 +34,19 @@ ConversationTagController.getTagById = async (req, res) => {
 };
 
 // Create a new tag
-const createTag = async (name,conversationId) => {
+const createTag = async (data) => {
     try {
+      const {name,conversationId} = data;
       if(!name || !conversationId) {
         throw error;
       }
       const conversation = await Conversation.findById(conversationId)
       const tag = new ConversationTag({  name,conversation });
       await tag.save();
-      return tag;
-    } catch (error) {
+      const tags = await ConversationTag.find({ conversation:{_id:conversation._id} });
+    return tags;
+      // return tag;
+    } catch(error) {
       throw error;
     }
   };
@@ -77,16 +81,16 @@ ConversationTagController.createTagAPI = async (req, res) => {
 // };
 
 // Delete an existing visitor by ID
-ConversationTagController.deleteTagById = async (req, res) => {
-  const { id } = req.body.basicInfo;
+ConversationTagController.deleteTagById = async (id) => {
+  // const { id } = req.body.basicInfo;
   try {
     const tag = await ConversationTag.findByIdAndDelete(id);
     if (!tag) {
       return res.status(404).json({ error: 'tag not found' });
     }
-    res.sendStatus(204);
+   return tag;
   } catch (error) {
-    res.status(500).json({ error: 'Failed to delete tag' });
+    return error;
   }
 };
 

@@ -215,9 +215,9 @@ VisitorController.createVisitorAPI = async (req, res) => {
 };
 
 // Update an existing visitor by ID
-VisitorController.updateVisitorById = async (req, res) => {
+VisitorController.updateVisitorById = async ({id, location, ip, visitorDetails}) => {
   // const { id } = req.params;
-  const { id, userId, location, ip, visitorDetails } = req.body.basicInfo;
+  // const { id, userId, location, ip, visitorDetails } = req.body.basicInfo;
   try {
     const visitor = await Visitor.findByIdAndUpdate(
       id,
@@ -227,9 +227,9 @@ VisitorController.updateVisitorById = async (req, res) => {
     if (!visitor) {
       return res.status(404).json({ error: "Visitor not found" });
     }
-    res.json(visitor);
+    return visitor;
   } catch (error) {
-    res.status(500).json({ error: "Failed to update visitor" });
+    return error;
   }
 };
 

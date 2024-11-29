@@ -235,8 +235,8 @@ ChatMessageController.addNoteToChat = async (
 };
 
 //get all notes of conversation
-ChatMessageController.getAllChatNotesMessages = async (req, res) => {
-  const { conversationId } = req.body.basicInfo;
+ChatMessageController.getAllChatNotesMessages = async (conversationId) => {
+  // const { conversationId } = req.body.basicInfo;
   try {
     let chatMessagesNotes;
     if (conversationId) {
@@ -245,9 +245,9 @@ ChatMessageController.getAllChatNotesMessages = async (req, res) => {
         is_note: "true",
       });
     }
-    res.status(201).json(chatMessagesNotes);
+    return chatMessagesNotes;
   } catch (error) {
-    throw error;
+    return error;
   }
 };
 
