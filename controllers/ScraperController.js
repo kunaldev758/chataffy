@@ -1,7 +1,7 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
 // const tfjs = require('@tensorflow/tfjs');
-const use = require('@tensorflow-models/universal-sentence-encoder');
+// const use = require('@tensorflow-models/universal-sentence-encoder');
 const Client = require("../models/Client");
 const Sitemap = require("../models/Sitemap");
 const TrainingList = require("../models/TrainingList");

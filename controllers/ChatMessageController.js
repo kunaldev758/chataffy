@@ -7,8 +7,8 @@ const TrainingList = require("../models/TrainingList");
 const OpenAITrainingList = require("../models/OpenaiTrainingList");
 const RelatedTrainingList = require("../models/RelatedTrainingList");
 
-const tfjs = require("@tensorflow/tfjs");
-const use = require("@tensorflow-models/universal-sentence-encoder");
+// const tfjs = require("@tensorflow/tfjs");
+// const use = require("@tensorflow-models/universal-sentence-encoder");
 const Conversation = require("../models/Conversation");
 
 const ChatMessageController = {};
@@ -212,7 +212,8 @@ ChatMessageController.addNoteToChat = async (
   sender,
   sender_type,
   message,
-  conversation_id
+  conversation_id,
+  userId
 ) => {
   // const { sender, sender_type, message, conversation_id } = req.body;
   try {
@@ -224,6 +225,7 @@ ChatMessageController.addNoteToChat = async (
       conversation_id,
       infoSources: undefined,
       is_note: true,
+      userId
     });
     // console.log("chatMessage",chatMessage);
     await chatMessage.save();

@@ -38,6 +38,10 @@ ConversationController.getOpenConversation = async (visitorId) => {
       visitor: visitorId,
       conversationOpenStatus: "open",
     });
+    if(!result){
+      const conversation = await ConversationController.createConversation(visitorId);
+      return conversation;
+    }
     return result;
   } catch (err) {
     throw err;

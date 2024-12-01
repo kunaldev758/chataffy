@@ -191,12 +191,11 @@ VisitorController.getVisitorById = async (req, res) => {
 };
 
 // Create a new visitor
-const createVisitor = async (userId, name) => {
+const createVisitor = async (userId, visitorId) => {
   try {
-    if (!name) {
-      name = await generateUniqueName(userId);
-    }
-    const visitor = new Visitor({ userId, name });
+    let name = await generateUniqueName(userId);
+
+    const visitor = new Visitor({ userId, name, visitorId });
     await visitor.save();
     return visitor;
   } catch (error) {
@@ -215,13 +214,24 @@ VisitorController.createVisitorAPI = async (req, res) => {
 };
 
 // Update an existing visitor by ID
-VisitorController.updateVisitorById = async ({id, location, ip, visitorDetails}) => {
+VisitorController.updateVisitorById = async ({
+  id,
+  location,
+  ip,
+  visitorDetails,
+}) => {
   // const { id } = req.params;
   // const { id, userId, location, ip, visitorDetails } = req.body.basicInfo;
   try {
+    const transformedVisitorDetails = Object.entries(visitorDetails).map(
+      ([key, value]) => ({
+        field: key,
+        value: value,
+      })
+    );
     const visitor = await Visitor.findByIdAndUpdate(
       id,
-      { location, ip, visitorDetails, userId },
+      { location, ip, visitorDetails: transformedVisitorDetails },
       { new: true }
     );
     if (!visitor) {

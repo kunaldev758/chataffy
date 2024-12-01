@@ -68,13 +68,13 @@ const myMiddleware = async (socket, next) => {
       socket.embedType = embedType;
 
       if (visitorId && visitorId !='undefined') {
-        const visitor = await Visitor.findById(visitorId);
+        const visitor = await Visitor.findOne({visitorId:visitorId});
         socket.visitorId =
           visitor && visitor.userId.toString() === socket.userId.toString()
             ? visitor._id
-            : (await VisitorController.createVisitor(socket.userId))._id;
+            : (await VisitorController.createVisitor(socket.userId,visitorId))._id;
       } else {
-        const visitor = await VisitorController.createVisitor(socket.userId)
+        const visitor = await VisitorController.createVisitor(socket.userId,visitorId)
         socket.visitorId = visitor._id
       }
     } else {
@@ -97,6 +97,35 @@ SocketController.handleSocketEvents = (io) => {
       // Join client to their unique room
       const clientRoom = `user-${userId}`;
       socket.join(clientRoom);
+
+      socket.on("get-credit-count", async (data) => {
+        // const userId = socket.userId;
+        const credits = await CreditsController.getUserCredits(userId);
+        socket.emit("get-credit-count-response", {
+          response: "Received data from message",
+          data: credits,
+        });
+      });
+      socket.on("get-training-list-count", async (data) => {
+        // const userId = socket.userId;
+        const webPagesCount = await OpenaiTrainingListController.getWebPageUrlCount(userId);
+        const docSnippets = await OpenaiTrainingListController.getSnippetCount(userId);
+        // {crawledDocs: 0, totalDocs: 0};
+        const faqs = await OpenaiTrainingListController.getFaqCount(userId);
+        // {crawledFaqs: 0,totalFaqs: 0};
+        socket.emit("get-training-list-count-response", {
+          response: "Received data from message",
+          data: {...webPagesCount, ...docSnippets, ...faqs},
+        });
+      });
+      socket.on("get-training-list", async (data) => {
+        // const userId = socket.userId;
+        const webPages = await OpenaiTrainingListController.getWebPageList(userId);
+        socket.emit("get-training-list-response", {
+          response: "Received data from message",
+          data: webPages,
+        });
+      });
 
       socket.on("get-conversations-list", async (data) => {
         try {
@@ -174,7 +203,8 @@ SocketController.handleSocketEvents = (io) => {
               visitorId,
               "agent",
               message,
-              conversationId
+              conversationId,
+              userId,
             );
             callback?.({ success: true, note });
           } catch (error) {
@@ -258,10 +288,10 @@ SocketController.handleSocketEvents = (io) => {
         "close-conversation",
         async ({ conversationId, status }, callback) => {
           try {
-            await ConversationController.UpdateConversationStatusOpenClose({
+            await ConversationController.UpdateConversationStatusOpenClose(
               conversationId,
               status,
-            }); // Replace with your DB logic
+            ); // Replace with your DB logic
             callback({ success: true });
           } catch (error) {
             callback({ success: false, error: error.message });
@@ -341,27 +371,29 @@ SocketController.handleSocketEvents = (io) => {
 
       socket.on("visitor-connect", async ({ widgetToken }) => {
         try {
-          // Verify widget auth token (authentication/authorization logic)
-          // const isValidWidget = await verifyWidgetAuthToken(widgetId, widgetAuthToken);
-          // if (!isValidWidget) {
-          //   return socket.emit("error", { message: "Invalid widget authentication" });
-          // }
-    
-          // // Fetch visitor's data (conversation history, theme settings)
-          // let visitor = await Visitor.findOne({ visitorId, widgetId });
-          // if (!visitor) {
-          //   // If visitor does not exist, create a new visitor record
-          //   visitor = await Visitor.create({
-          //     visitorId: generateUniqueVisitorId(), // Generate a unique visitor ID
-          //     widgetId,
-          //   });
-          // }
-    
           // Fetch theme settings for the widget
           const themeSettings = await Widget.findOne({ widgetToken });
     
           // Fetch the visitor's conversation history
-          const chatMessages = await ChatMessageController.getAllChatMessages(visitorId);
+          let chatMessages = [];
+          chatMessages = await ChatMessageController.getAllChatMessages(visitorId);
+
+          if(chatMessages.length <=0){
+            const conversation = await ConversationController.getOpenConversation(
+              visitorId
+            );
+            const conversationId = conversation?._id || null;
+          
+          await OpenaiChatMessageController.createChatMessage(
+            conversationId,
+            visitorId,
+            "bot",
+            themeSettings?.welcomeMessage,
+            userId
+          );
+
+          chatMessages = await ChatMessageController.getAllChatMessages(visitorId);
+          }
     
           // Emit visitor-connect-response with visitor data
           socket.emit("visitor-connect-response", {

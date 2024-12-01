@@ -113,7 +113,8 @@ WidgetController.getThemeSettings = async (req, res) => {
 
 WidgetController.updateThemeSettings = async (req, res) => {
   try {
-    const {userId,themeSettings} = req.body;
+    const {userId} = req.body;
+    const themeSettings = req.body?.themeSettings?.themeSettings
     if(userId){
       const widget = await Widget.findOne({ userId });
       if(widget){

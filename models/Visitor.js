@@ -8,6 +8,7 @@ let visitorSchema = new mongoose.Schema(
       ref: "User",
     }, // client
     name: { type: String, required: true },
+    visitorId:{type:String},
     visitorDetails: [
       {
         field: {
