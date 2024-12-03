@@ -622,6 +622,7 @@ ScraperController.scrape = async (req, res) => {
     else if(client.webPageScrappingStatus == 1) {
       res.status(200).json({ status_code: 200, message: "Web-page scrapping already in progress" });
     }
+    // await Client.updateOne({id:userId},{webPageAdded:true})
   } catch (error) {
     console.error(error);
     // Emit socket event: Scraping failed
@@ -877,6 +878,7 @@ ScraperController.createSnippet = async (req, res) => {
           'lastEdit': Date.now(),   
           'trainingStatus': 4
         });
+        await Client.updateOne({id:userId},{docSnippetAdded:true})
       }
       catch(error) {
         console.log("Error in snippet mapping");
@@ -992,6 +994,7 @@ ScraperController.createFaq = async (req, res) => {
       });
       console.log(error);
     }
+    await Client.updateOne({id:userId},{faqAdded:true})
   }
   catch(error) {
     console.log("Error in createFaq");

@@ -1,10 +1,14 @@
 const commonHelper = require("../helpers/commonHelper.js");
 const Client = require("../models/Client");
 // const ObjectId  = require('mongoose').Types.ObjectId;
+const Conversation = require("../models/Conversation.js");
+const ChatMessage = require("../models/ChatMessage.js");
+
 const DashboardController = {};
 DashboardController.getDashboardData = async (dateRange, userId) => {
   try {
-    const { startDate, endDate } = dateRange;
+    const startDate = dateRange[0]; 
+    const endDate  = dateRange[1];
     const conversationCount = await Conversation.find({
       createdAt: {
         $gte: new Date(startDate),
@@ -19,7 +23,7 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
       },
       aiChat: true,
     }).countDocuments();
-    res.status(200).json(conversationCount, AiconversationCount);
+    // res.status(200).json(conversationCount, AiconversationCount);
 
     // const totalChats = await ChatMessage.find({
     //     userId: userId,
@@ -47,16 +51,18 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
     } else {
       csat = 0;
     }
-    res.status(200).json({ csat: csat });
+    // res.status(200).json({ csat: csat });
 
     //   res.status(200).json(chatCount);
 
     // const clientData = await Client.findOne({userId});
     return {
-      conversationCount: conversationCount,
-      AiconversationCount: AiconversationCount,
-      totalChats: totalChats,
+      totalChat: conversationCount,
+      aiAssists: AiconversationCount,
+      totalMessage: totalChats,
       csat: csat,
+      fallbackMessage:0,
+
     };
   } catch (error) {
     return error;

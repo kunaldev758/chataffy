@@ -98,8 +98,13 @@ SocketController.handleSocketEvents = (io) => {
       const clientRoom = `user-${userId}`;
       socket.join(clientRoom);
 
+      socket.on("client-connect", async () => {
+        socket.emit("client-connect-response", {
+          response: "Received data from message",
+        });
+      });
+
       socket.on("get-credit-count", async (data) => {
-        // const userId = socket.userId;
         const credits = await CreditsController.getUserCredits(userId);
         socket.emit("get-credit-count-response", {
           response: "Received data from message",
@@ -107,7 +112,6 @@ SocketController.handleSocketEvents = (io) => {
         });
       });
       socket.on("get-training-list-count", async (data) => {
-        // const userId = socket.userId;
         const webPagesCount = await OpenaiTrainingListController.getWebPageUrlCount(userId);
         const docSnippets = await OpenaiTrainingListController.getSnippetCount(userId);
         // {crawledDocs: 0, totalDocs: 0};
@@ -145,7 +149,6 @@ SocketController.handleSocketEvents = (io) => {
                 conversationOpenStatus: "open",
               });
               visitor["conversation"] = conv;
-              // console.log(visitor,"visitor data list")
               return visitor; // Return modified visitor
             })
           );
@@ -426,19 +429,40 @@ SocketController.handleSocketEvents = (io) => {
           );
           const conversationId = conversation?._id || null;
 
-          const chatMessage =
-            await OpenaiChatMessageController.createChatMessage(
-              conversationId,
-              visitorId,
-              "visitor",
-              message,
-              userId
-            );
+          // const chatMessage =
+          //   await OpenaiChatMessageController.createChatMessage(
+          //     conversationId,
+          //     visitorId,
+          //     "visitor",
+          //     message,
+          //     userId
+          //   );
+            const encodedMessage = encode(message);
+          let chatMessage = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'visitor', "<p>"+encodedMessage+"</p>",userId);
 
           io.to(`user-${userId}`).emit("conversation-append-message", {
             chatMessage,
           });
           callback?.({ success: true, chatMessage, id });
+         
+            response_data = await OpenaiChatMessageController.chat_message_response(chatMessage, visitorId, conversationId, io, userId);
+            io.to(`conversation-${visitorId}`).emit('intermediate-response', {message:"...replying"});
+            io.to(`user-${userId}`).emit('intermediate-response', {message:"...replying"});
+
+            if(response_data.error) {
+              // io.to("visitor"+socket.visitorId).emit('chat-response-error', {"message_for": "abcd", "error": "Error in response"});
+              const chatMessageResponse = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'bot-error', "Error in response",userId);
+              io.to(`conversation-${visitorId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse});
+              io.to(`user-${userId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse });
+              // response_data.error
+            }
+            else {
+              const chatMessageResponse = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'bot', response_data.reply,userId, response_data.infoSources);
+              io.to(`conversation-${visitorId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse, sources: response_data.sources });
+              io.to(`user-${userId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse, sources: response_data.sources });
+              // io.to(conversationId).emit('newChatMessage', chatMessage);
+            }
+          
         } catch (error) {
           console.error("visitor-send-message error:", error.message);
           callback?.({ success: false, error: error.message });
