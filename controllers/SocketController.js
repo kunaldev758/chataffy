@@ -18,14 +18,6 @@ const Conversation = require("../models/Conversation");
 const ConversationTagController = require("../controllers/ConversationTagController");
 const DashboardController = require('../controllers/DashboardController');
 
-//write it in Conversation Controller
-// async function searchConversationsInDB(query) {
-//   // Replace with your actual database search logic
-//   return Conversations.find({ name: { $regex: query, $options: "i" } }).limit(
-//     10
-//   ); // MongoDB query
-// }
-
 const verifyToken = (token) => {
   return new Promise((resolve, reject) => {
     jwt.verify(token, process.env.JWT_SECRET_KEY, (err, decoded) => {
@@ -40,10 +32,12 @@ const verifyToken = (token) => {
 // Middleware function
 const myMiddleware = async (socket, next) => {
   try {
-    const { token, embedType, visitorId,widgetId,widgetAuthToken } =
+    const { token, visitorId,widgetId,widgetAuthToken,conversationId } =
       socket.handshake.query;
 
-    if (token && embedType && !widgetId) {
+    socket.conversationId = conversationId;
+
+    if (token && !widgetId) {
       // Client Authentication
       const decoded = await verifyToken(token);
       if (!decoded) throw new Error("Invalid token.");
@@ -54,7 +48,6 @@ const myMiddleware = async (socket, next) => {
 
       socket.userId = user._id;
       socket.type = "client";
-      socket.embedType = embedType;
     } else if (visitorId && widgetId && widgetAuthToken) {
       // Visitor Authentication
       const widget = await Widget.findOne({
@@ -65,7 +58,6 @@ const myMiddleware = async (socket, next) => {
 
       socket.userId = widget.userId;
       socket.type = "visitor";
-      socket.embedType = embedType;
 
       if (visitorId && visitorId !='undefined') {
         const visitor = await Visitor.findOne({visitorId:visitorId});
@@ -91,12 +83,14 @@ SocketController.handleSocketEvents = (io) => {
   io.use(myMiddleware);
 
   io.on("connection", (socket) => {
-    const { type, userId, visitorId, embedType } = socket;
+    const { type, userId, visitorId,conversationId } = socket;
 
     if (type === "client") {
       // Join client to their unique room
+      const conversationRoom = `conversation-${conversationId}`
       const clientRoom = `user-${userId}`;
       socket.join(clientRoom);
+      socket.join(conversationRoom);
 
       socket.on("client-connect", async () => {
         socket.emit("client-connect-response", {
@@ -146,7 +140,7 @@ SocketController.handleSocketEvents = (io) => {
               const visitor = visitorDoc.toObject(); // Convert to plain object
               const conv = await Conversation.findOne({
                 visitor: visitor._id,
-                conversationOpenStatus: "open",
+                // conversationOpenStatus: "open",
               });
               visitor["conversation"] = conv;
               return visitor; // Return modified visitor
@@ -169,9 +163,7 @@ SocketController.handleSocketEvents = (io) => {
         }
       });
 
-      socket.on(
-        "client-send-message",
-        async ({ message, visitorId }, callback) => {
+      socket.on("client-send-message", async ({ message, visitorId }, callback) => {
           try {
             const conversation =
               await ConversationController.getOpenConversation(visitorId);
@@ -198,9 +190,7 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on(
-        "client-send-add-note",
-        async ({ message, visitorId, conversationId }, callback) => {
+      socket.on("client-send-add-note", async ({ message, visitorId, conversationId }, callback) => {
           try {
             const note = await ChatMessageController.addNoteToChat(
               visitorId,
@@ -217,9 +207,7 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on(
-        "get-all-note-messages",
-        async ({ conversationId }, callback) => {
+      socket.on("get-all-note-messages", async ({ conversationId }, callback) => {
           try {
             const notes =await ChatMessageController.getAllChatNotesMessages(conversationId)
             callback?.({ success: true, notes:notes });
@@ -230,9 +218,7 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on(
-        "get-visitor-old-conversations",
-        async ({ visitorId }, callback) => {
+      socket.on("get-visitor-old-conversations", async ({ visitorId }, callback) => {
           try {
             const conversations =await ConversationController.getAllOldConversations(visitorId)
             callback?.({ success: true, conversations:conversations });
@@ -243,9 +229,7 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on(
-        "add-conversation-tag",
-        async ({ name, conversationId }, callback) => {
+      socket.on("add-conversation-tag", async ({ name, conversationId }, callback) => {
           try {
             const updatedTags = await ConversationTagController.createTag({
               name,
@@ -258,9 +242,7 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on(
-        "get-conversation-tags",
-        async ({ conversationId }, callback) => {
+      socket.on("get-conversation-tags", async ({ conversationId }, callback) => {
           try {
             const tags =
               await ConversationTagController.getAllTagsOfConversation({
@@ -273,9 +255,7 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on(
-        "remove-conversation-tag",
-        async ({ id, conversationId }, callback) => {
+      socket.on("remove-conversation-tag", async ({ id, conversationId }, callback) => {
           try {
             const updatedTags = await ConversationTagController.deleteTagById({
               id,
@@ -287,9 +267,7 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on(
-        "close-conversation",
-        async ({ conversationId, status }, callback) => {
+      socket.on("close-conversation", async ({ conversationId, status }, callback) => {
           try {
             await ConversationController.UpdateConversationStatusOpenClose(
               conversationId,
@@ -306,10 +284,21 @@ SocketController.handleSocketEvents = (io) => {
         try {
           await VisitorController.blockVisitor({ visitorId }); // Replace with your DB logic
           callback({ success: true });
+          io.to(conversationRoom).emit('visitor-blocked', {conversationStatus:'close' });
         } catch (error) {
           callback({ success: false, error: error.message });
         }
       });
+
+      socket.on("close-ai-response", async ({ conversationId }, callback) => {
+        try {
+          await ConversationController.disableAiChat({ conversationId });
+          callback({ success: true });
+        } catch (error) {
+          callback({ success: false, error: error.message });
+        }
+      });
+
 
       socket.on("search-conversations", async ({ query }, callback) => {
         try {
@@ -363,14 +352,17 @@ SocketController.handleSocketEvents = (io) => {
       // }, 5000);
       ////////////////dash end///////////
 
-      socket.on("disconnect", () => socket.leave(clientRoom));
+      socket.on("disconnect", () => {socket.leave(clientRoom);
+        socket.leave(conversationRoom)});
     }
 
     if (type === "visitor") {
-      const visitorRoom = `visitor-${visitorId}`;
-      const conversationRoom = `conversation-${visitorId}`;
-      socket.join(visitorRoom);
+
+      const VisitorRoom = `conversation-${visitorId}`;
+      const conversationRoom = `conversation-${conversationId}`
+  
       socket.join(conversationRoom);
+      socket.join(VisitorRoom);
 
       socket.on("visitor-connect", async ({ widgetToken }) => {
         try {
@@ -396,6 +388,8 @@ SocketController.handleSocketEvents = (io) => {
           );
 
           chatMessages = await ChatMessageController.getAllChatMessages(visitorId);
+
+          io.to(conversationRoom).emit('visitor-connect-list-update', {});
           }
     
           // Emit visitor-connect-response with visitor data
@@ -440,28 +434,29 @@ SocketController.handleSocketEvents = (io) => {
             const encodedMessage = encode(message);
           let chatMessage = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'visitor', "<p>"+encodedMessage+"</p>",userId);
 
-          io.to(`user-${userId}`).emit("conversation-append-message", {
+          io.to(`conversation-${conversationId}`).emit("conversation-append-message", {
             chatMessage,
           });
           callback?.({ success: true, chatMessage, id });
-         
+         if(conversation.aiChat){
             response_data = await OpenaiChatMessageController.chat_message_response(chatMessage, visitorId, conversationId, io, userId);
             io.to(`conversation-${visitorId}`).emit('intermediate-response', {message:"...replying"});
-            io.to(`user-${userId}`).emit('intermediate-response', {message:"...replying"});
+            io.to(`conversation-${conversationId}`).emit('intermediate-response', {message:"...replying"});
 
             if(response_data.error) {
               // io.to("visitor"+socket.visitorId).emit('chat-response-error', {"message_for": "abcd", "error": "Error in response"});
               const chatMessageResponse = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'bot-error', "Error in response",userId);
               io.to(`conversation-${visitorId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse});
-              io.to(`user-${userId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse });
+              io.to(`conversation-${conversationId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse });
               // response_data.error
             }
             else {
               const chatMessageResponse = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'bot', response_data.reply,userId, response_data.infoSources);
               io.to(`conversation-${visitorId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse, sources: response_data.sources });
-              io.to(`user-${userId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse, sources: response_data.sources });
+              io.to(`conversation-${conversationId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse, sources: response_data.sources });
               // io.to(conversationId).emit('newChatMessage', chatMessage);
             }
+          }
           
         } catch (error) {
           console.error("visitor-send-message error:", error.message);
@@ -469,9 +464,7 @@ SocketController.handleSocketEvents = (io) => {
         }
       });
 
-      socket.on(
-        "message-feedback",
-        async ({ messageId, feedback }, callback) => {
+      socket.on("message-feedback", async ({ messageId, feedback }, callback) => {
           try {
             const updatedMessage = await ChatMessageController.updateFeedback(
               messageId,
@@ -485,15 +478,14 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on(
-        "close-conversation",
-        async ({ conversationId, status }, callback) => {
+      socket.on("close-conversation",async ({ conversationId, status }, callback) => {
           try {
             await ConversationController.UpdateConversationStatusOpenClose(
               conversationId,
               status
             );
             callback?.({ success: true });
+            io.to(conversationRoom).emit('visitor-close-chat', {conversationStatus:'close' });
           } catch (error) {
             console.error("close-conversation error:", error.message);
             callback?.({ success: false, error: error.message });
@@ -502,7 +494,7 @@ SocketController.handleSocketEvents = (io) => {
       );
 
       socket.on("disconnect", () => {
-        socket.leave(visitorRoom);
+        socket.leave(VisitorRoom);
         socket.leave(conversationRoom);
       });
     }

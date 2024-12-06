@@ -69,6 +69,15 @@ ConversationController.findConversation = async (visitorId) => {
   }
 };
 
+ConversationController.disableAiChat = async ({conversationId}) => {
+  try{
+    await Conversation.updateOne({_id:conversationId},{aiChat:false});
+    return true;
+  } catch(err){
+    throw err;
+  }
+}
+
 //Add Conversation to Archive
 ConversationController.AddConversationToArchive = async (req, res) => {
   const { conversationId } = req.body.basicInfo;
