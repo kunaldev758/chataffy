@@ -32,10 +32,10 @@ const verifyToken = (token) => {
 // Middleware function
 const myMiddleware = async (socket, next) => {
   try {
-    const { token, visitorId,widgetId,widgetAuthToken,conversationId } =
+    const { token, visitorId,widgetId,widgetAuthToken } =
       socket.handshake.query;
 
-    socket.conversationId = conversationId;
+    // socket.conversationId = conversationId;
 
     if (token && !widgetId) {
       // Client Authentication
@@ -83,14 +83,13 @@ SocketController.handleSocketEvents = (io) => {
   io.use(myMiddleware);
 
   io.on("connection", (socket) => {
-    const { type, userId, visitorId,conversationId } = socket;
+    const { type, userId, visitorId } = socket;
 
     if (type === "client") {
       // Join client to their unique room
-      const conversationRoom = `conversation-${conversationId}`
+      let conversationRoom = ``
       const clientRoom = `user-${userId}`;
       socket.join(clientRoom);
-      socket.join(conversationRoom);
 
       socket.on("client-connect", async () => {
         socket.emit("client-connect-response", {
@@ -162,6 +161,17 @@ SocketController.handleSocketEvents = (io) => {
           });
         }
       });
+
+      socket.on("set-conversation-id", async ({conversationId} , callback) => {
+        try{
+          socket.leave(conversationRoom);
+          conversationRoom = `conversation-${conversationId}`
+          socket.join(conversationRoom);
+        }catch(error){
+          console.error("set-conversation-id error:", error.message);
+            callback?.({ success: false, error: error.message });
+        }
+      })
 
       socket.on("client-send-message", async ({ message, visitorId }, callback) => {
           try {
@@ -259,7 +269,7 @@ SocketController.handleSocketEvents = (io) => {
           try {
             const updatedTags = await ConversationTagController.deleteTagById({
               id,
-            }); // Replace with your DB logic
+            }); 
             callback({ success: true, tags: updatedTags });
           } catch (error) {
             callback({ success: false, error: error.message });
@@ -269,11 +279,20 @@ SocketController.handleSocketEvents = (io) => {
 
       socket.on("close-conversation", async ({ conversationId, status }, callback) => {
           try {
+            let conversation = await Conversation.findOne({
+              _id:conversationId,
+              conversationOpenStatus: "open" }
+            );
+            let visitorId = conversation?.visitor
+            
             await ConversationController.UpdateConversationStatusOpenClose(
               conversationId,
               status,
-            ); // Replace with your DB logic
+            ); 
+       
             callback({ success: true });
+            io.to(`conversation-${visitorId}`).emit('visitor-conversation-close', {conversationStatus:'close' });
+            // io.to(`user-${userId}`).emit('visitor-connect-list-update', {});
           } catch (error) {
             callback({ success: false, error: error.message });
           }
@@ -284,7 +303,8 @@ SocketController.handleSocketEvents = (io) => {
         try {
           await VisitorController.blockVisitor({ visitorId }); // Replace with your DB logic
           callback({ success: true });
-          io.to(conversationRoom).emit('visitor-blocked', {conversationStatus:'close' });
+          io.to(`conversation-${visitorId}`).emit('visitor-blocked', {conversationStatus:'close' });
+          // io.to(`user-${userId}`).emit('visitor-connect-list-update', {});
         } catch (error) {
           callback({ success: false, error: error.message });
         }
@@ -317,15 +337,9 @@ SocketController.handleSocketEvents = (io) => {
                 // conversationOpenStatus: "open",
               });
               visitor["conversation"] = conv;
-              // console.log(visitor,"visitor data list")
-              return visitor; // Return modified visitor
+              return visitor; 
             })
           );
-          // Perform the search in your database
-          // const searchResults = await ConversationController.searchByTagOrName(
-          //   query
-          // ); // Replace with your DB logic
-
           callback({ success: true, data: updatedVisitors });
         } catch (error) {
           console.error("Error during search:", error);
@@ -337,7 +351,7 @@ SocketController.handleSocketEvents = (io) => {
       socket.on("fetch-dashboard-data", async ({ dateRange }, callback) => {
         try {
           // Fetch data from the database based on date range
-          const data = await DashboardController.getDashboardData(dateRange); // Replace with actual DB logic
+          const data = await DashboardController.getDashboardData(dateRange);
           callback({ success: true, data });
         } catch (error) {
           console.error("Error fetching dashboard data:", error);
@@ -352,16 +366,14 @@ SocketController.handleSocketEvents = (io) => {
       // }, 5000);
       ////////////////dash end///////////
 
-      socket.on("disconnect", () => {socket.leave(clientRoom);
-        socket.leave(conversationRoom)});
+      socket.on("disconnect", () => {
+        socket.leave(clientRoom);
+        socket.leave(conversationRoom);
+      });
     }
 
     if (type === "visitor") {
-
       const VisitorRoom = `conversation-${visitorId}`;
-      const conversationRoom = `conversation-${conversationId}`
-  
-      socket.join(conversationRoom);
       socket.join(VisitorRoom);
 
       socket.on("visitor-connect", async ({ widgetToken }) => {
@@ -378,6 +390,7 @@ SocketController.handleSocketEvents = (io) => {
               visitorId
             );
             const conversationId = conversation?._id || null;
+
           
           await OpenaiChatMessageController.createChatMessage(
             conversationId,
@@ -389,17 +402,14 @@ SocketController.handleSocketEvents = (io) => {
 
           chatMessages = await ChatMessageController.getAllChatMessages(visitorId);
 
-          io.to(conversationRoom).emit('visitor-connect-list-update', {});
+          io.to(`user-${userId}`).emit('visitor-connect-list-update', {});
           }
     
           // Emit visitor-connect-response with visitor data
           socket.emit("visitor-connect-response", {
-            // visitorId: visitor.visitorId,
             chatMessages,
             themeSettings,
           });
-    
-          // console.log(`Visitor connected: ${visitor.visitorId}`);
         } catch (error) {
           console.error("Error handling visitor-connect:", error);
           socket.emit("error", { message: "Failed to connect visitor" });
@@ -415,7 +425,6 @@ SocketController.handleSocketEvents = (io) => {
         }
       });
     
-
       socket.on("visitor-send-message", async ({ message, id }, callback) => {
         try {
           const conversation = await ConversationController.getOpenConversation(
@@ -423,15 +432,7 @@ SocketController.handleSocketEvents = (io) => {
           );
           const conversationId = conversation?._id || null;
 
-          // const chatMessage =
-          //   await OpenaiChatMessageController.createChatMessage(
-          //     conversationId,
-          //     visitorId,
-          //     "visitor",
-          //     message,
-          //     userId
-          //   );
-            const encodedMessage = encode(message);
+          const encodedMessage = encode(message);
           let chatMessage = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'visitor', "<p>"+encodedMessage+"</p>",userId);
 
           io.to(`conversation-${conversationId}`).emit("conversation-append-message", {
@@ -444,17 +445,14 @@ SocketController.handleSocketEvents = (io) => {
             io.to(`conversation-${conversationId}`).emit('intermediate-response', {message:"...replying"});
 
             if(response_data.error) {
-              // io.to("visitor"+socket.visitorId).emit('chat-response-error', {"message_for": "abcd", "error": "Error in response"});
               const chatMessageResponse = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'bot-error', "Error in response",userId);
               io.to(`conversation-${visitorId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse});
               io.to(`conversation-${conversationId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse });
-              // response_data.error
             }
             else {
               const chatMessageResponse = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'bot', response_data.reply,userId, response_data.infoSources);
               io.to(`conversation-${visitorId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse, sources: response_data.sources });
               io.to(`conversation-${conversationId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse, sources: response_data.sources });
-              // io.to(conversationId).emit('newChatMessage', chatMessage);
             }
           }
           
@@ -478,14 +476,17 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on("close-conversation",async ({ conversationId, status }, callback) => {
+      socket.on("close-conversation-visitor",async ({ conversationId, status }, callback) => {
           try {
             await ConversationController.UpdateConversationStatusOpenClose(
               conversationId,
               status
             );
             callback?.({ success: true });
-            io.to(conversationRoom).emit('visitor-close-chat', {conversationStatus:'close' });
+  
+            io.to(`conversation-${conversationId}`).emit('visitor-close-chat', {conversationStatus:'close' });
+            // io.to(`user-${userId}`).emit('visitor-connect-list-update', {});
+            socket.leave(conversationRoom);
           } catch (error) {
             console.error("close-conversation error:", error.message);
             callback?.({ success: false, error: error.message });
@@ -495,7 +496,6 @@ SocketController.handleSocketEvents = (io) => {
 
       socket.on("disconnect", () => {
         socket.leave(VisitorRoom);
-        socket.leave(conversationRoom);
       });
     }
   });
