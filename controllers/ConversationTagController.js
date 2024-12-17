@@ -1,6 +1,3 @@
-// const Visitor = require('../models/Visitor');
-// const ChatMessage = require('../models/ChatMessage');
-// const ObjectId = require('mongoose').Types.ObjectId;
 const ConversationTag = require('../models/ConversationTag');
 const Conversation = require('../models/Conversation');
 
@@ -10,11 +7,9 @@ const ConversationTagController = {};
 
 ConversationTagController.getAllTagsOfConversation = async (conversationId) => {
   try {
-    // const conversationId = req.body.basicInfo.conversationId;
     const tags = await ConversationTag.find({ conversation: conversationId.conversationId });
     return tags;
   } catch (error) {
-    // res.status(500).json({ error: 'Failed to fetch tags' });
     return error;
   }
 };
@@ -61,28 +56,8 @@ ConversationTagController.createTagAPI = async (req, res) => {
   }
 };
 
-// Update an existing visitor by ID
-// ConversationTagController.updateVisitorById = async (req, res) => {
-//   const { id } = req.params;
-//   const { name } = req.body;
-//   try {
-//     const visitor = await Visitor.findByIdAndUpdate(
-//       id,
-//       { name },
-//       { new: true }
-//     );
-//     if (!visitor) {
-//       return res.status(404).json({ error: 'Visitor not found' });
-//     }
-//     res.json(visitor);
-//   } catch (error) {
-//     res.status(500).json({ error: 'Failed to update visitor' });
-//   }
-// };
-
 // Delete an existing visitor by ID
 ConversationTagController.deleteTagById = async (id) => {
-  // const { id } = req.body.basicInfo;
   try {
     const tag = await ConversationTag.findByIdAndDelete(id);
     if (!tag) {

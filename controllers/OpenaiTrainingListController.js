@@ -724,8 +724,38 @@ ScraperController.getFaqCount = async (userId) => {
   }
 };
 
-ScraperController.getWebPageList = async (userId) => {
+ScraperController.getWebPageList = async (userId,skip,limit,sourcetype,actionType) => {
   try {
+    let isActive = 0; 
+    let type = 1;
+    switch(actionType){
+      case "Action 1" :
+        isActive = 1
+        break;
+      case "Action 2" :
+        isActive = 0
+        break;
+        default:
+        isActive = 0;
+    }
+
+    switch(sourcetype){
+      case "Show All Sources" :
+        type = 1
+        break;
+      case "Web Pages" :
+        type = 0
+        break;
+        case "Doc/Snippets" :
+        type = 2
+        break;
+        case "FAQs" :
+        type = 1
+        break;
+        default:
+        type = 1;
+    }
+
     const webPages = await TrainingList.aggregate([
       {
         $match: {
@@ -735,7 +765,8 @@ ScraperController.getWebPageList = async (userId) => {
       {
         $project: {
           title: 1,
-          type: 1,
+          type: type,
+          isActive:isActive,
           lastEdit: {
             $dateToString: {
               format: "%B %d, %Y",
@@ -756,9 +787,12 @@ ScraperController.getWebPageList = async (userId) => {
           trainingStatus: 1,
         },
       },
-      // {
-      //   $limit: 10, // Limit the result to 10 documents
-      // },
+      {
+        $skip: skip, // Skip documents for the previous pages
+      },
+      {
+        $limit: limit, // Limit the number of documents returned
+      },
     ]);
     return webPages;
   } catch (error) {

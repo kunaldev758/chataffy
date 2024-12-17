@@ -6,22 +6,11 @@ const asyncHandler = require('express-async-handler');
 const OpenAIController = require("./OpenAIController");
 const OpenAIQueueController = require("./OpenAIQueueController");
 const TrainingList = require("../models/OpenaiTrainingList");
-const RelatedTrainingList = require("../models/RelatedTrainingList");
-
-// const tfjs = require('@tensorflow/tfjs');
-// const use = require('@tensorflow-models/universal-sentence-encoder');
 
 const ChatMessageController = {};
 
-// let useModel;
-
-// async function loadUSEModel() {
-//   useModel = await use.load();
-// }
-
 // Get all chat messages
 const getRecentChatMessages = async (conversation_id, chat_message) => {
-  // console.log("getAllChatMessages",conversationId);
   try {
     
     // check Conversation
@@ -47,14 +36,12 @@ const getRecentChatMessages = async (conversation_id, chat_message) => {
 };
 // Get all chat messages
 const getAllChatMessages = async (conversation_id) => {
-  // console.log("getAllChatMessages",conversationId);
   try {
     let chatMessages;
     if(conversation_id) {
       chatMessages = await ChatMessage.find({conversation_id})
     }
     else {
-      // chatMessages = await ChatMessage.find();
       throw new Error("No Conversation Id found")
     }
     return chatMessages;

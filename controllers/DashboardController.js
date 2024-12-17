@@ -1,8 +1,8 @@
 const commonHelper = require("../helpers/commonHelper.js");
 const Client = require("../models/Client");
-// const ObjectId  = require('mongoose').Types.ObjectId;
 const Conversation = require("../models/Conversation.js");
 const ChatMessage = require("../models/ChatMessage.js");
+const Visitor = require("../models/Visitor.js")
 
 const DashboardController = {};
 DashboardController.getDashboardData = async (dateRange, userId) => {
@@ -23,21 +23,17 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
       },
       aiChat: true,
     }).countDocuments();
-    // res.status(200).json(conversationCount, AiconversationCount);
 
-    // const totalChats = await ChatMessage.find({
-    //     userId: userId,
-    //   }).countDocuments();
-    const totalChats = await ChatMessage.find({
+    const totalMessages = await ChatMessage.find({
       createdAt: {
         $gte: new Date(startDate),
         $lte: new Date(endDate),
       },
+      userId:userId
     }).countDocuments();
 
-    const likedChats = await ChatMessage.find({
-      userId: userId,
-      feedback: "like",
+    const likedConversation = await Conversation.find({
+      feedback: true,
       createdAt: {
         $gte: new Date(startDate),
         $lte: new Date(endDate),
@@ -46,27 +42,49 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
 
     let csat = 0;
 
-    if (totalChats && likedChats) {
-      csat = (likedChats / totalChats) * 100;
+    if (conversationCount && likedConversation) {
+      csat = (likedConversation / conversationCount) * 100;
     } else {
       csat = 0;
     }
-    // res.status(200).json({ csat: csat });
 
-    //   res.status(200).json(chatCount);
+    const location = await Visitor.find({userId:userId}, { location: 1, _id: 0 })
+    console.log(location,"the location")
+   const locationData = transformData(location)
 
-    // const clientData = await Client.findOne({userId});
     return {
       totalChat: conversationCount,
       aiAssists: AiconversationCount,
-      totalMessage: totalChats,
+      totalMessage: totalMessages,
       csat: csat,
       fallbackMessage:0,
-
+      art:4.2,
+      locationData:locationData
     };
   } catch (error) {
     return error;
   }
 };
+
+
+function transformData(data) {
+  const countryMap = new Map();
+
+  // Count occurrences of each location
+  data.forEach((item) => {
+    const location = item.location || "UNKNOWN"; // Handle missing locations
+    countryMap.set(location, (countryMap.get(location) || 0) + 1);
+  });
+
+  // Convert map to desired array format
+  const result = [["Country", "Chat Count"]];
+  for (const [key, value] of countryMap.entries()) {
+    // Add human-readable country names if needed
+    const countryName = key === "IN" ? "INDIA" : key === "PK" ? "PAKISTAN" : key;
+    result.push([key, value]);
+  }
+
+  return result;
+}
 
 module.exports = DashboardController;

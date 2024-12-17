@@ -23,9 +23,6 @@ const chatMessageSchema = new Schema({
   infoSources: {
     type: [String],
   },
-  feedback: {
-   type:String
-  },
   conversation_id: {
     type: Schema.Types.ObjectId,
     ref: 'Conversation',

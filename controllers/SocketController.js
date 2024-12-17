@@ -116,8 +116,8 @@ SocketController.handleSocketEvents = (io) => {
         });
       });
       socket.on("get-training-list", async (data) => {
-        // const userId = socket.userId;
-        const webPages = await OpenaiTrainingListController.getWebPageList(userId);
+        const {skip ,limit,sourcetype,actionType} = data ;
+        const webPages = await OpenaiTrainingListController.getWebPageList(userId,skip,limit,sourcetype,actionType);
         socket.emit("get-training-list-response", {
           response: "Received data from message",
           data: webPages,
@@ -176,7 +176,7 @@ SocketController.handleSocketEvents = (io) => {
       socket.on("client-send-message", async ({ message, visitorId }, callback) => {
           try {
             const conversation =
-              await ConversationController.getOpenConversation(visitorId);
+              await ConversationController.getOpenConversation(visitorId,userId);
             const conversationId = conversation?._id || null;
 
             const chatMessage =
@@ -376,6 +376,19 @@ SocketController.handleSocketEvents = (io) => {
       const VisitorRoom = `conversation-${visitorId}`;
       socket.join(VisitorRoom);
 
+      socket.on("visitor-ip",async({ip},callback)=>{
+        try{
+          const visitorDetail = await Visitor.findOne({ip:ip})
+          if(visitorDetail.is_blocked == true){
+            io.to(`conversation-${visitorId}`).emit('visitor-is-blocked', {});
+          }
+        }catch(error){
+          console.error("visitor-ip error:", error.message);
+          callback?.({ success: false, error: error.message });
+        }
+      });
+    
+
       socket.on("visitor-connect", async ({ widgetToken }) => {
         try {
           // Fetch theme settings for the widget
@@ -387,7 +400,8 @@ SocketController.handleSocketEvents = (io) => {
 
           if(chatMessages.length <=0){
             const conversation = await ConversationController.getOpenConversation(
-              visitorId
+              visitorId,
+              userId
             );
             const conversationId = conversation?._id || null;
 
@@ -428,7 +442,8 @@ SocketController.handleSocketEvents = (io) => {
       socket.on("visitor-send-message", async ({ message, id }, callback) => {
         try {
           const conversation = await ConversationController.getOpenConversation(
-            visitorId
+            visitorId,
+            userId
           );
           const conversationId = conversation?._id || null;
 
@@ -462,10 +477,10 @@ SocketController.handleSocketEvents = (io) => {
         }
       });
 
-      socket.on("message-feedback", async ({ messageId, feedback }, callback) => {
+      socket.on("conversation-feedback", async ({ conversationId, feedback }, callback) => {
           try {
-            const updatedMessage = await ChatMessageController.updateFeedback(
-              messageId,
+            const updatedMessage = await ConversationController.updateFeedback(
+              conversationId,
               feedback
             );
             callback?.({ success: true, updatedMessage });

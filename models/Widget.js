@@ -29,8 +29,7 @@ const widgetSchema = new Schema(
       type: String,
     },
     logo: {
-      type: Buffer, // Storing the file as a buffer (can also be a URL if needed)
-      contentType: String, // Optional: to store the file type (e.g., 'image/png')
+      type: String,
     },
     titleBar: { 
       type: String,

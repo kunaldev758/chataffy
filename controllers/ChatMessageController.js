@@ -1,14 +1,8 @@
 const ChatMessage = require("../models/ChatMessage");
 const asyncHandler = require("express-async-handler");
-
-const OpenAIController = require("./OpenAIController");
 const OpenAIQueueController = require("./OpenAIQueueController");
 const TrainingList = require("../models/TrainingList");
 const OpenAITrainingList = require("../models/OpenaiTrainingList");
-const RelatedTrainingList = require("../models/RelatedTrainingList");
-
-// const tfjs = require("@tensorflow/tfjs");
-// const use = require("@tensorflow-models/universal-sentence-encoder");
 const Conversation = require("../models/Conversation");
 
 const ChatMessageController = {};
@@ -72,36 +66,6 @@ ChatMessageController.getAllChatMessagesAPI = async (req, res) => {
     const chatMessages = await getAllChatMessages(req.body.id); //conversationId
     res.json({ chatMessages: chatMessages, conversationOpenStatus: "open" });
   } catch (error) {
-    res.status(500).json({ error: "Failed to fetch chat messages" });
-  }
-};
-
-ChatMessageController.updateFeedback = async (messageId, feedback) => {
-  try {
-    await ChatMessage.findByIdAndUpdate(messageId, { feedback: feedback });
-  } catch (err) {
-    throw err;
-  }
-};
-
-ChatMessageController.getCSAT = async (req, res) => {
-  const userId = req.body.userId;
-  try {
-    const totalChats = await ChatMessage.find({
-      userId: userId,
-    }).countDocuments();
-    const likedChats = await ChatMessage.find({
-      userId: userId,
-      feedback: "like",
-    }).countDocuments();
-    let csat = 0;
-    if (totalChats && likedChats) {
-      csat = (likedChats / totalChats) * 100;
-    } else {
-      csat = 0;
-    }
-    res.status(200).json({ csat: csat });
-  } catch (err) {
     res.status(500).json({ error: "Failed to fetch chat messages" });
   }
 };
@@ -250,22 +214,6 @@ ChatMessageController.getAllChatNotesMessages = async (conversationId) => {
     return chatMessagesNotes;
   } catch (error) {
     return error;
-  }
-};
-
-//dashboard Api
-ChatMessageController.getTotalChats = async (req, res) => {
-  try {
-    const { startDate, endDate } = req.body;
-    const chatCount = await ChatMessage.find({
-      createdAt: {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      },
-    }).countDocuments();
-    res.status(200).json(chatCount);
-  } catch (err) {
-    throw err;
   }
 };
 

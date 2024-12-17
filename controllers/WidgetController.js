@@ -148,42 +148,67 @@ WidgetController.updateThemeSettings = async (req, res) => {
 };
 
 WidgetController.uploadLogo = async (req, res) => {
-  try {
-    const {userId} = req.body;
-    const logoFile = req.file;
-  if (!logoFile) {
-    return res.status(400).send('No file uploaded.');
+  try{
+  const {userId} = req.body;
+  if (!req.file) {
+    return res.status(400).send({ error: 'No file uploaded' });
   }
-    if(userId){
-      const widget = await Widget.findOne({ userId });
-      if(widget){
-        await Widget.updateOne({userId},{ logo:themeSettings.logo,
-          titleBar : themeSettings.titleBar,
-          welcomeMessage : themeSettings.welcomeMessage,
-          showLogo : themeSettings.showLogo,
-          isPreChatFormEnabled : themeSettings.isPreChatFormEnabled,
-          fields : themeSettings.fields,
-          colorFields : themeSettings.colorFields})
-        res.status(200).json({ status_code: 200, data: {
-          "logo": themeSettings.logo,
-          "titleBar": themeSettings.titleBar,
-          "welcomeMessage": themeSettings.welcomeMessage,
-          "showLogo": themeSettings.showLogo,
-          "isPreChatFormEnabled": themeSettings.isPreChatFormEnabled,
-          "fields":themeSettings.fields,
-          "colorFields":themeSettings.colorFields
-        }});
-      }      
-      else{
-        throw new Error(`No widget found with the given userId:${userId}`)
-      }
-    }else{
-      throw new Error(`No user found with the given userId:${userId}`)
-    }
-  } catch (error) {
-     commonHelper.logErrorToFile(error);
-    res.status(500).json({ status: false, message: "Something went wrong please try again!" });
-  }
+  const filePath = `/uploads/${req.file.filename}`;
+  await Widget.findOneAndUpdate({userId:userId},{logo:filePath},{ new: true });
+  return res.status(200).send({ message: 'File uploaded successfully', filePath });
+}catch(error){
+  res.status(404).send({ error: 'something went wrong' });
+}
 };
+
+// Function to get logo
+// const getLogo = (req, res) => {
+//   const filePath = path.join(__dirname, 'uploads', req.params.filename);
+//   if (fs.existsSync(filePath)) {
+//     res.sendFile(filePath);
+//   } else {
+//     res.status(404).send({ error: 'File not found' });
+//   }
+// };
+
+
+// WidgetController.uploadLogo = async (req, res) => {
+//   try {
+//     const {userId} = req.body;
+//     const logoFile = req.file;
+//   if (!logoFile) {
+//     return res.status(400).send('No file uploaded.');
+//   }
+//     if(userId){
+//       const widget = await Widget.findOne({ userId });
+//       if(widget){
+//         await Widget.updateOne({userId},{ logo:themeSettings.logo,
+//           titleBar : themeSettings.titleBar,
+//           welcomeMessage : themeSettings.welcomeMessage,
+//           showLogo : themeSettings.showLogo,
+//           isPreChatFormEnabled : themeSettings.isPreChatFormEnabled,
+//           fields : themeSettings.fields,
+//           colorFields : themeSettings.colorFields})
+//         res.status(200).json({ status_code: 200, data: {
+//           "logo": themeSettings.logo,
+//           "titleBar": themeSettings.titleBar,
+//           "welcomeMessage": themeSettings.welcomeMessage,
+//           "showLogo": themeSettings.showLogo,
+//           "isPreChatFormEnabled": themeSettings.isPreChatFormEnabled,
+//           "fields":themeSettings.fields,
+//           "colorFields":themeSettings.colorFields
+//         }});
+//       }      
+//       else{
+//         throw new Error(`No widget found with the given userId:${userId}`)
+//       }
+//     }else{
+//       throw new Error(`No user found with the given userId:${userId}`)
+//     }
+//   } catch (error) {
+//      commonHelper.logErrorToFile(error);
+//     res.status(500).json({ status: false, message: "Something went wrong please try again!" });
+//   }
+// };
 
 module.exports = WidgetController;

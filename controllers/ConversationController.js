@@ -7,7 +7,6 @@ const ConversationController = {};
 
 //get all old conversation
 ConversationController.getAllOldConversations = async (visitor_id) => {
-  // const { visitor_id } = req.body.basicInfo;
   try {
     let chatMessagesNotesList = [];
     if (visitor_id) {
@@ -32,14 +31,14 @@ ConversationController.getAllOldConversations = async (visitor_id) => {
 };
 
 //get Open Conversation
-ConversationController.getOpenConversation = async (visitorId) => {
+ConversationController.getOpenConversation = async (visitorId,userId) => {
   try {
     const result = await Conversation.findOne({
       visitor: visitorId,
       conversationOpenStatus: "open",
     });
     if(!result){
-      const conversation = await ConversationController.createConversation(visitorId);
+      const conversation = await ConversationController.createConversation(visitorId,userId);
       return conversation;
     }
     return result;
@@ -48,22 +47,21 @@ ConversationController.getOpenConversation = async (visitorId) => {
   }
 };
 
-ConversationController.createConversation = async (visitorId) => {
+ConversationController.createConversation = async (visitorId,userId) => {
   try {
     const result = await Conversation.create({
       visitor: visitorId,
+      userId:userId,
     });
     return result;
   } catch (err) {
     throw err;
   }
 };
-ConversationController.findConversation = async (visitorId) => {
+
+ConversationController.updateFeedback = async (conversationId, feedback) => {
   try {
-    const result = await Conversation.findOne({
-      visitor: visitorId,
-    });
-    return result;
+    await Conversation.findByIdAndUpdate(conversationId, { feedback: feedback });
   } catch (err) {
     throw err;
   }
@@ -78,31 +76,10 @@ ConversationController.disableAiChat = async ({conversationId}) => {
   }
 }
 
-//Add Conversation to Archive
-ConversationController.AddConversationToArchive = async (req, res) => {
-  const { conversationId } = req.body.basicInfo;
-  try {
-    if (conversationId) {
-      let conversation = await Conversation.findByIdAndUpdate(conversationId, {
-        isArchived: true,
-      });
-      res.status(200).json(conversation);
-    } else {
-      throw error;
-    }
-  } catch (error) {
-    res
-      .status(500)
-      .json({ error: "An error occurred while fetching chat messages" });
-  }
-};
-
 ConversationController.UpdateConversationStatusOpenClose = async (
   conversationId,
   status
 ) => {
-  // const conversationId = req.params.id;
-  // const { status } = req.body;
   try {
     if (conversationId) {
       if (status == "open") {
@@ -139,30 +116,6 @@ ConversationController.searchByTagOrName = async (query, userId) => {
   }
   if (tag) {
     return tag.conversationId;
-  }
-};
-
-//dashboard Api
-ConversationController.getTotalConversation = async (req, res) => {
-  try {
-    const { startDate, endDate } = req.body;
-    const conversationCount = await Conversation.find({
-      createdAt: {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      },
-    }).countDocuments();
-
-    const AiconversationCount = await Conversation.find({
-      createdAt: {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      },
-      aiChat: true,
-    }).countDocuments();
-    res.status(200).json(conversationCount, AiconversationCount);
-  } catch (err) {
-    throw err;
   }
 };
 

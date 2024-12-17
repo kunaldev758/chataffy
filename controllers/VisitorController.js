@@ -1,6 +1,4 @@
 const Visitor = require("../models/Visitor");
-// const ChatMessage = require('../models/ChatMessage');
-// const ObjectId = require('mongoose').Types.ObjectId;
 
 const things = [
   "Shirt",
@@ -105,17 +103,6 @@ const colors = [
 const getRandomElement = (array) =>
   array[Math.floor(Math.random() * array.length)];
 
-// const generateAlphaSequence = () => {
-//     const length = 3;
-//     const lowerCharacters = 'abcdefghijklmnopqrstuvwxyz';
-//     const upperCharacters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-//     let sequence = upperCharacters[Math.floor(Math.random() * upperCharacters.length)];
-//     for (let i = 1; i < length; i++) {
-//         sequence += lowerCharacters[Math.floor(Math.random() * lowerCharacters.length)];
-//     }
-//     return sequence;
-// };
-
 const generateUniqueName = async (userId) => {
   let name;
   let isUnique = false;
@@ -138,33 +125,6 @@ const generateUniqueName = async (userId) => {
 };
 
 const VisitorController = {};
-// // Get all visitors
-// VisitorController.updateOldVisitors = async (req, res) => {
-//   try {
-//     const visitors = await Visitor.find({});
-
-//     for (const visitor of visitors) {
-//       // Find the latest message for the visitor's conversation with sender_type visitor, bot, or agent
-//       const chatMessage = await ChatMessage.findOne({
-//         conversation_id: new ObjectId(visitor._id),
-//         sender_type: { $in: ["visitor", "bot", "agent"] } // Condition for sender_type
-//       }).sort({ createdAt: -1 }).exec();
-
-//       if (chatMessage) {
-//         visitor.lastMessage = chatMessage.message;
-//         await visitor.save();
-//       }else {
-//         visitor.lastMessage = undefined;
-//         await visitor.save();
-//       }
-//     }
-
-//     console.log('Visitors updated successfully');
-//     res.json({ result: "Done" });
-//   } catch (error) {
-//       res.status(500).json({ error: error.message });
-//   }
-// };
 
 // Get all visitors
 VisitorController.getAllVisitors = async (req, res) => {
@@ -220,8 +180,6 @@ VisitorController.updateVisitorById = async ({
   ip,
   visitorDetails,
 }) => {
-  // const { id } = req.params;
-  // const { id, userId, location, ip, visitorDetails } = req.body.basicInfo;
   try {
     const transformedVisitorDetails = Object.entries(visitorDetails).map(
       ([key, value]) => ({
@@ -244,20 +202,20 @@ VisitorController.updateVisitorById = async ({
 };
 
 // Update an existing visitor by ID
-VisitorController.getIsVisitorExists = async (req, res) => {
-  const { id, userId } = req.body.basicInfo;
-  try {
-    const visitor = await Visitor.exists({ _id: id, userId: userId });
+// VisitorController.getIsVisitorExists = async (req, res) => {
+//   const { id, userId } = req.body.basicInfo;
+//   try {
+//     const visitor = await Visitor.exists({ _id: id, userId: userId });
 
-    if (visitor) {
-      return res.status(200).json({ exists: true });
-    } else {
-      return res.status(200).json({ exists: false });
-    }
-  } catch (error) {
-    res.status(500).json({ error: "Failed to update visitor" });
-  }
-};
+//     if (visitor) {
+//       return res.status(200).json({ exists: true });
+//     } else {
+//       return res.status(200).json({ exists: false });
+//     }
+//   } catch (error) {
+//     res.status(500).json({ error: "Failed to update visitor" });
+//   }
+// };
 
 VisitorController.blockVisitor = async (req, res) => {
   const { id } = req.body.basicInfo;
