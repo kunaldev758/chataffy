@@ -1004,6 +1004,7 @@ ScraperController.createFaq = async (req, res) => {
       }
     });
     await trainingList.save();
+    await Client.updateOne({userId:userId},{faqAdded:true})
     res.status(201).json({ status_code: 200, message: "FAQ added." });
 
     try {
@@ -1028,7 +1029,6 @@ ScraperController.createFaq = async (req, res) => {
       });
       console.log(error);
     }
-    await Client.updateOne({id:userId},{faqAdded:true})
   }
   catch(error) {
     console.log("Error in createFaq");

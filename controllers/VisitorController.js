@@ -217,13 +217,13 @@ VisitorController.updateVisitorById = async ({
 //   }
 // };
 
-VisitorController.blockVisitor = async (req, res) => {
-  const { id } = req.body.basicInfo;
+VisitorController.blockVisitor = async (visitorId) => {
+  let id = visitorId.visitorId;
   try {
-    await Visitor.findByIdAndUpdate(id, { is_blocked: true });
-    return res.status(200).json({ message: "Blocked" });
+    await Visitor.findByIdAndUpdate({_id:id}, { is_blocked: true });
+    return true;
   } catch (error) {
-    res.status(500).json({ error: "Failed to update visitor" });
+    return error
   }
 };
 

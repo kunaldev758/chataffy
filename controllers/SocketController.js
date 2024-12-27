@@ -126,10 +126,6 @@ SocketController.handleSocketEvents = (io) => {
 
       socket.on("get-conversations-list", async (data) => {
         try {
-          console.log("Received request for conversations list", data);
-    
-          // Fetch the conversations list from your database
-          // const conversations = await getConversationsForUser(data.userId);
           const visitors = await Visitor.find({
             userId,
             // lastMessage: { $exists: true },
@@ -137,7 +133,7 @@ SocketController.handleSocketEvents = (io) => {
           const updatedVisitors = await Promise.all(
             visitors.map(async (visitorDoc) => {
               const visitor = visitorDoc.toObject(); // Convert to plain object
-              const conv = await Conversation.findOne({
+              const conv = await Conversation.find({
                 visitor: visitor._id,
                 // conversationOpenStatus: "open",
               });
@@ -244,7 +240,8 @@ SocketController.handleSocketEvents = (io) => {
             const updatedTags = await ConversationTagController.createTag({
               name,
               conversationId,
-            }); // Replace with your DB logic
+              userId
+            });
             callback({ success: true, tags: updatedTags });
           } catch (error) {
             callback({ success: false, error: error.message });
@@ -257,7 +254,7 @@ SocketController.handleSocketEvents = (io) => {
             const tags =
               await ConversationTagController.getAllTagsOfConversation({
                 conversationId,
-              }); // Replace with your DB logic
+              }); 
             callback({ success: true, tags });
           } catch (error) {
             callback({ success: false, error: error.message });
@@ -292,19 +289,23 @@ SocketController.handleSocketEvents = (io) => {
        
             callback({ success: true });
             io.to(`conversation-${visitorId}`).emit('visitor-conversation-close', {conversationStatus:'close' });
-            // io.to(`user-${userId}`).emit('visitor-connect-list-update', {});
           } catch (error) {
             callback({ success: false, error: error.message });
           }
         }
       );
 
-      socket.on("block-visitor", async ({ visitorId }, callback) => {
+      socket.on("block-visitor", async ({ visitorId,conversationId }, callback) => {
         try {
-          await VisitorController.blockVisitor({ visitorId }); // Replace with your DB logic
+          await VisitorController.blockVisitor({ visitorId }); 
+
+          await ConversationController.UpdateConversationStatusOpenClose(
+            conversationId,
+            "close",
+          ); 
+
           callback({ success: true });
           io.to(`conversation-${visitorId}`).emit('visitor-blocked', {conversationStatus:'close' });
-          // io.to(`user-${userId}`).emit('visitor-connect-list-update', {});
         } catch (error) {
           callback({ success: false, error: error.message });
         }
@@ -322,25 +323,8 @@ SocketController.handleSocketEvents = (io) => {
 
       socket.on("search-conversations", async ({ query }, callback) => {
         try {
-          console.log("Search Query Received:", query);
-
-          const visitors = await Visitor.find({
-            userId,
-            name:query
-            // lastMessage: { $exists: true },
-          }).sort({ createdAt: -1 });
-          const updatedVisitors = await Promise.all(
-            visitors.map(async (visitorDoc) => {
-              const visitor = visitorDoc.toObject(); // Convert to plain object
-              const conv = await Conversation.findOne({
-                visitor: visitor._id,
-                // conversationOpenStatus: "open",
-              });
-              visitor["conversation"] = conv;
-              return visitor; 
-            })
-          );
-          callback({ success: true, data: updatedVisitors });
+          const visitors = await ConversationController.searchByTagOrName(query,userId)
+          callback({ success: true, data: visitors });
         } catch (error) {
           console.error("Error during search:", error);
           callback({ success: false, error: error.message });
@@ -351,7 +335,7 @@ SocketController.handleSocketEvents = (io) => {
       socket.on("fetch-dashboard-data", async ({ dateRange }, callback) => {
         try {
           // Fetch data from the database based on date range
-          const data = await DashboardController.getDashboardData(dateRange);
+          const data = await DashboardController.getDashboardData(dateRange,socket.userId);
           callback({ success: true, data });
         } catch (error) {
           console.error("Error fetching dashboard data:", error);
@@ -500,7 +484,6 @@ SocketController.handleSocketEvents = (io) => {
             callback?.({ success: true });
   
             io.to(`conversation-${conversationId}`).emit('visitor-close-chat', {conversationStatus:'close' });
-            // io.to(`user-${userId}`).emit('visitor-connect-list-update', {});
             socket.leave(conversationRoom);
           } catch (error) {
             console.error("close-conversation error:", error.message);

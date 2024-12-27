@@ -90,7 +90,7 @@ const createChatMessage = async(conversation_id, sender, sender_type, message,us
     await chatMessage.save();
     const validSenderTypes = ['visitor', 'bot', 'agent'];
     if (validSenderTypes.includes(sender_type)) {
-      const conversation = await Conversation.find({id:conversation_id})
+      const conversation = await Conversation.findOne({_id:conversation_id})
       await Visitor.updateOne(
         { _id: conversation.visitor },
         { $set: { lastMessage: message } }

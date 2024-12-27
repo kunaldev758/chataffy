@@ -29,14 +29,14 @@ ConversationTagController.getTagById = async (req, res) => {
 };
 
 // Create a new tag
-const createTag = async (data) => {
+ConversationTagController.createTag = async (data) => {
     try {
-      const {name,conversationId} = data;
+      const {name,conversationId, userId} = data;
       if(!name || !conversationId) {
         throw error;
       }
       const conversation = await Conversation.findById(conversationId)
-      const tag = new ConversationTag({  name,conversation });
+      const tag = new ConversationTag({  name,conversation ,userId });
       await tag.save();
       const tags = await ConversationTag.find({ conversation:{_id:conversation._id} });
     return tags;
@@ -45,19 +45,10 @@ const createTag = async (data) => {
       throw error;
     }
   };
-  ConversationTagController.createTag = createTag;
-ConversationTagController.createTagAPI = async (req, res) => {
-  const { name,conversationId } = req.body.basicInfo;
-  try {
-    const tag = await createTag(name,conversationId);
-    res.status(201).json(tag);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to create tag' });
-  }
-};
+
 
 // Delete an existing visitor by ID
-ConversationTagController.deleteTagById = async (id) => {
+ConversationTagController.deleteTagById = async ({id}) => {
   try {
     const tag = await ConversationTag.findByIdAndDelete(id);
     if (!tag) {

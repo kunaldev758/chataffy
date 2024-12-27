@@ -9,6 +9,7 @@ const conversationTagSchema = new mongoose.Schema({
     required: true,
   },
   conversation:{ type: mongoose.Schema.Types.ObjectId, ref: "Conversation" },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   createdAt: {
     type: Date,
     default: Date.now,

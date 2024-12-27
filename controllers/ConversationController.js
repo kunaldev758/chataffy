@@ -104,18 +104,60 @@ ConversationController.UpdateConversationStatusOpenClose = async (
 };
 
 ConversationController.searchByTagOrName = async (query, userId) => {
-  // const query = req.body.basicInfo;
-  // const userId = req.body.userId;
-  // return Conversations.find({ name: { $regex: query, $options: "i" } }).limit(
-  //   10
-  // );
-  const visitor = await Visitor.find({ name: query, userId: userId });
-  const tag = await ConversationTag.find({ name: query });
-  if (visitor) {
-    return visitor.conversation.id;
-  }
-  if (tag) {
-    return tag.conversationId;
+  try {
+    // Split the query into individual words
+    const queryWords = query.split(" ").filter((word) => word.trim() !== "");
+
+    // Create regex conditions for each word
+    const regexConditions = queryWords.map((word) => ({
+      name: { $regex: word, $options: "i" }, // "i" for case-insensitive
+    }));
+
+    // Search for visitors matching any of the words
+    const visitors = await Visitor.find({
+      $and: [{ userId: userId }, { $or: regexConditions }],
+    });
+
+    // Search for tags matching any of the words
+    const tags = await ConversationTag.find({
+      $and: [{ userId: userId }, { $or: regexConditions }],
+    });
+
+  const updatedVisitors = await Promise.all(
+    visitors.map(async (visitorDoc) => {
+      const visitor = visitorDoc.toObject(); 
+      const conversation = await Conversation.findOne({
+        visitor: visitor._id,
+      });
+      visitor["conversation"] = conversation; 
+      return visitor; 
+    })
+  );
+
+   // Fetch conversations for tags
+   const tagConversations = await Promise.all(
+    tags.map(async (tag) => {
+      const conversation = await Conversation.findOne({ _id: tag.conversation });
+      let visitor = await Visitor.findOne({_id:conversation.visitor});
+      visitor = visitor.toObject(); 
+      visitor["conversation"] = conversation; 
+      return visitor;
+    })
+  );
+
+  const combinedVisitors  = [
+    ...updatedVisitors,
+    ...tagConversations.filter(Boolean), 
+  ];
+
+  // Remove duplicates by unique visitor `_id`
+const uniqueVisitors = Array.from(
+  new Map(combinedVisitors.map((v) => [v._id.toString(), v])).values()
+);
+
+    return uniqueVisitors;
+  } catch (error) {
+    throw error;
   }
 };
 
