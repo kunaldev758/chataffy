@@ -2,8 +2,9 @@ const ChatMessage = require("../models/ChatMessage");
 const asyncHandler = require("express-async-handler");
 const OpenAIQueueController = require("./OpenAIQueueController");
 const TrainingList = require("../models/TrainingList");
-const OpenAITrainingList = require("../models/OpenaiTrainingList");
+const OpenAITrainingList = require("../models/TrainingList");
 const Conversation = require("../models/Conversation");
+const Visitor =  require("../models/Visitor");
 
 const ChatMessageController = {};
 
@@ -117,6 +118,7 @@ const createChatMessage = async (
   sender,
   sender_type,
   message,
+  userId,
   sources = undefined
 ) => {
   try {
@@ -128,8 +130,13 @@ const createChatMessage = async (
       message,
       conversation_id,
       infoSources: sources,
+      userId,
     });
     // console.log("chatMessage",chatMessage);
+    // await Visitor.updateOne(
+    //   { _id: conversation.visitor },
+    //   { $set: { lastMessage: message } }
+    // );
     await chatMessage.save();
     return chatMessage;
   } catch (error) {
@@ -258,112 +265,16 @@ function isValidJson(jsonString) {
 }
 
 const generalInquiryResponse = async (message, userId, chatMessageId) => {
-  /*
-  if (!useModel) {
-    await loadUSEModel();
-  }
-
-  // Calculate embeddings for the query message
-  const start = Date.now();
-  const queryEmbedding = await useModel.embed(message);
-  const queryEmbeddingValues = Array.from(queryEmbedding.dataSync());
-  const end = Date.now();
-  console.log(queryEmbedding, queryEmbeddingValues);
-
-  const similarTrainingLists = await TrainingList.find({
-    userId, type:0,
-    'mapping.mappingLocation': {
-      $near: {
-        $geometry: {
-          type: 'Point',
-          coordinates: [530,2880] //queryEmbeddingValues,
-        },
-      },
-    },
-  }, 'webPage.content webPage.url')
-  // .sort({ 'mapping.mappingLocation': -1 })
-  .limit(3);
-
-  try {
-    const trainingListIds = similarTrainingLists.map(trainingList => trainingList._id);
-    const newRelatedTrainingList = new RelatedTrainingList({
-      userId,
-      chatMessageId,
-      message,
-      mapping: {
-        embedding: queryEmbedding,
-        mappingLocation: {
-          type: "Point",
-          coordinates: queryEmbeddingValues
-        },
-        mappingDuration: {
-          start, end
-        }
-      },
-      trainingListIds,
-    });
-    const savedRelatedTrainingList = await newRelatedTrainingList.save();
-    console.log('New document created:', savedRelatedTrainingList);
-  } catch (error) {
-    console.error('Error creating document:', error.message);
-  }
-
-  const data = {
-    info: {
-      contents: similarTrainingLists.map(trainingList => trainingList.webPage.content),
-    },
-    sources: similarTrainingLists.map(trainingList => trainingList.webPage.url)
-  };
-  */
   try {
     if (!useModel) {
       await loadUSEModel();
     }
     const start = Date.now();
     const queryEmbedding = await useModel.embed(message);
-    // const queryEmbeddingValues = Array.from(queryEmbedding.dataSync());
     const queryEmbeddingValues = queryEmbedding.arraySync()[0];
     console.log("queryEmbeddingValues", queryEmbeddingValues);
     const end = Date.now();
-    // const pipeline = [
-    //   {
-    //     $project: {
-    //       'webPage.content': 1,
-    //       'webPage.url': 1,  // Include the fields you need
-    //       similarity: {
-    //         $function: {
-    //           body: `
-    //             function(inputEmbeddingValues, documentEmbeddingValues) {
-    //               const calculateCosineSimilarity = (vec1, vec2) => {
-    //                 const dotProduct = vec1.reduce((acc, val, i) => acc + val * vec2[i], 0);
-    //                 const magnitude1 = Math.sqrt(vec1.reduce((acc, val) => acc + val * val, 0));
-    //                 const magnitude2 = Math.sqrt(vec2.reduce((acc, val) => acc + val * val, 0));
-
-    //                 return dotProduct / (magnitude1 * magnitude2);
-    //               }
-    //               const similarity = calculateCosineSimilarity(inputEmbeddingValues, documentEmbeddingValues);
-    //               return similarity;
-    //             }
-    //           `,
-    //           args: [queryEmbeddingValues, '$mapping.mappingLocation.coordinates'],
-    //           lang: 'js',
-    //         },
-    //       },
-    //     },
-    //   },
-    //   // {
-    //   //   $match: {
-    //   //     similarity: { $gt: 0.5 },  // Adjust the similarity threshold as needed
-    //   //   },
-    //   // },
-    //   {
-    //     $sort: { similarity: -1 },
-    //   },
-    //   {
-    //     $limit: 3,
-    //   },
-    // ];
-
+  
     const pipeline = [
       {
         $match: {
@@ -447,7 +358,6 @@ const generalInquiryResponse = async (message, userId, chatMessageId) => {
     console.log("similarTrainingLists", similarTrainingLists);
     const data = {
       info: {
-        // contents: similarTrainingLists.map(trainingList => trainingList.webPage.content),
         contents: similarTrainingLists.map(
           (trainingList) => trainingList.content
         ),
@@ -466,17 +376,6 @@ const generalInquiryResponse = async (message, userId, chatMessageId) => {
       sources: [],
     };
   }
-  // const vector = await OpenAIController.createEmbedding(message.toLowerCase());
-  // const data = await searchSimilarDocuments(userId, message, 2);
-  // const response = {
-  //   info: {
-  //     // "faqs": {},
-  //     contents: data.info
-  //   },
-  //   sources: data.sources
-  // };
-  // // console.log("Search response",response);
-  // return response;
 };
 
 const chat_message_response = async (

@@ -124,26 +124,24 @@ SocketController.handleSocketEvents = (io) => {
         });
       });
 
-      socket.on("get-conversations-list", async (data) => {
+      socket.on("get-open-conversations-list", async (data) => {
         try {
-          const visitors = await Visitor.find({
-            userId,
-            // lastMessage: { $exists: true },
-          }).sort({ createdAt: -1 });
+          const conv = await Conversation.find({
+            userId:userId,
+            conversationOpenStatus: "open",
+          }).sort({createdAt:-1} );
+
           const updatedVisitors = await Promise.all(
-            visitors.map(async (visitorDoc) => {
-              const visitor = visitorDoc.toObject(); // Convert to plain object
-              const conv = await Conversation.find({
-                visitor: visitor._id,
-                // conversationOpenStatus: "open",
-              });
-              visitor["conversation"] = conv;
-              return visitor; // Return modified visitor
+            conv.map(async (conv) => {
+              const conversation = conv.toObject(); 
+              const visitor = await Visitor.findOne({_id:conv.visitor})
+              conversation['visitor'] = visitor
+              return conversation; 
             })
           );
     
           // Emit the response back to the frontend
-          socket.emit("get-conversations-list-response", {
+          socket.emit("get-open-conversations-list-response", {
             status: "success",
             conversations:updatedVisitors,
           });
@@ -151,9 +149,43 @@ SocketController.handleSocketEvents = (io) => {
           console.error("Error fetching conversations list:", error);
     
           // Emit an error response
-          socket.emit("get-conversations-list-response", {
+          socket.emit("get-open-conversations-list-response", {
             status: "error",
             message: "Failed to fetch conversations list",
+          });
+        }
+      });
+
+      socket.on("get-close-conversations-list", async (data) => {
+        try {
+          const visitors = await Visitor.find({
+            userId,
+            conversationOpenStatus: "close",
+            // lastMessage: { $exists: true },
+          }).sort({ createdAt: -1 });
+          const updatedVisitors = await Promise.all(
+            visitors.map(async (visitorDoc) => {
+              const visitor = visitorDoc.toObject(); // Convert to plain object
+              const conv = await Conversation.find({
+                visitor: visitor._id,
+                conversationOpenStatus: "close",
+              });
+              visitor["conversation"] = conv;
+              return visitor; // Return modified visitor
+            })
+          );
+    
+          // Emit the response back to the frontend
+          socket.emit("get-close-conversations-list-response", {
+            status: "success",
+            conversations:updatedVisitors,
+          });
+        } catch (error) {
+          console.error("Error fetching close conversations list:", error);
+          // Emit an error response
+          socket.emit("get-close-conversations-list-response", {
+            status: "error",
+            message: "Failed to fetch close conversations list",
           });
         }
       });
@@ -168,6 +200,18 @@ SocketController.handleSocketEvents = (io) => {
             callback?.({ success: false, error: error.message });
         }
       })
+
+      socket.on("message-seen", async ({ conversationId }, callback) => {
+        try {
+          await Conversation.updateOne(
+            { _id: conversationId },
+            { $set: { newMessage: 0 } }
+          );
+        } catch (error) {
+          console.error("update message-seen error:", error.message);
+          callback?.({ success: false, error: error.message });
+        }
+      });
 
       socket.on("client-send-message", async ({ message, visitorId }, callback) => {
           try {
@@ -437,9 +481,15 @@ SocketController.handleSocketEvents = (io) => {
           io.to(`conversation-${conversationId}`).emit("conversation-append-message", {
             chatMessage,
           });
+          io.to(`user-${userId}`).emit("new-message-count", {});
+
+          await Conversation.updateOne(
+            { _id: conversationId },
+            { $inc: { newMessage: 1 } }
+          );
           callback?.({ success: true, chatMessage, id });
          if(conversation.aiChat){
-            response_data = await OpenaiChatMessageController.chat_message_response(chatMessage, visitorId, conversationId, io, userId);
+            response_data = await QueryController.handleQuestionAnswer;
             io.to(`conversation-${visitorId}`).emit('intermediate-response', {message:"...replying"});
             io.to(`conversation-${conversationId}`).emit('intermediate-response', {message:"...replying"});
 

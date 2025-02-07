@@ -34,3 +34,17 @@ const chatMessageSchema = new Schema({
 
 const ChatMessage = mongoose.model('ChatMessage', chatMessageSchema);
 module.exports = ChatMessage;
+
+
+// const ChatSessionSchema = new mongoose.Schema({
+//   userId: { type: String, required: true },
+//   messages: [
+//     {
+//       role: { type: String, enum: ["user", "assistant"], required: true },
+//       content: { type: String, required: true },
+//       timestamp: { type: Date, default: Date.now },
+//     },
+//   ],
+//   createdAt: { type: Date, default: Date.now },
+//   lastUpdated: { type: Date, default: Date.now },
+// });

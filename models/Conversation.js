@@ -7,19 +7,25 @@ const conversationSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    userId:{ type: mongoose.Schema.Types.ObjectId, required: true , ref: 'User'},
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      ref: "User",
+    },
     conversationOpenStatus: {
       type: String,
       enum: ["open", "close"],
       default: "open",
       required: true,
     },
+    newMessage: { type: Number, default: 0 },
+    isSeen: { type: Boolean, default: false },
     createdAt: {
       type: Date,
       default: Date.now,
     },
     aiChat: { type: Boolean, default: true },
-    feedback:{type:Boolean},
+    feedback: { type: Boolean },
     updatedAt: {
       type: Date,
       default: Date.now,

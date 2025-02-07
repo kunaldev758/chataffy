@@ -13,11 +13,6 @@ const TrainingList = require("../models/OpenaiTrainingList");
 const OpenAIController = require("./OpenAIController");
 const urlModule = require('url');
 
-// const WebPage = require("../models/WebPage");
-// const WebPageSource = require("../models/WebPageSource");
-// const Faq = require("../models/Faq");
-// const Snippet = require("../models/Snippet");
-// const mongoose = require("mongoose");
 const commonHelper = require("../helpers/commonHelper.js");
 const ObjectId = require("mongoose").Types.ObjectId;
 const ScraperController = {};
@@ -776,14 +771,7 @@ ScraperController.getWebPageList = async (userId,skip,limit,sourcetype,actionTyp
           },
           timeUsed: 1,
           crawlingStatus: "$trainingProcessStatus.crawlingStatus",
-          minifyingStatus: "$trainingProcessStatus.minifyingStatus",
-          mappingStatus: "$trainingProcessStatus.mappingStatus",
           isActive: 1,
-
-          crawlingDuration: "$trainingProcessStatus.crawlingDuration",
-          minifyingDuration: "$trainingProcessStatus.minifyingDuration",
-          mappingDuration: "$trainingProcessStatus.mappingDuration",
-
           trainingStatus: 1,
         },
       },
@@ -801,66 +789,6 @@ ScraperController.getWebPageList = async (userId,skip,limit,sourcetype,actionTyp
   }
 };
 
-
-// ScraperController.createSnippet = async (req, res) => {
-//   const { title, content } = req.body;
-//   const userId = req.body.userId;
-//   try {
-//     // const client = await Client.findOne({userId});
-//     const trainingList = new TrainingList({
-//       userId,
-//       title,
-//       type: 2,
-//       snippet: {
-//         title,
-//         content
-//       }
-//     });
-//     await trainingList.save();
-//     res.status(201).json({ status_code: 200, message: "Snippet added." });
-
-//     try {     
-//       const input =[]; 
-//       async function splitContentAndMapping(content, maxLength) {
-//         const parts = [];
-//         let start = 0;  
-//         while (start < content.length) {
-//             const part = content.substr(start, maxLength);
-//             parts.push({ content: part });
-//             input.push(part);
-//             start += maxLength;
-//         }        
-//         return parts;
-//       }
-
-//       const maxLength = 1200;
-//       const mappings = await splitContentAndMapping(content, maxLength);
-//       const embeddingData = await OpenAIController.createEmbedding(input);
-//       // console.log("embeddingData", embeddingData);
-//       embeddingData.map((data)=>{
-//         mappings[data.index]['embeddingValues'] = data.embedding;
-//       });
-
-//       await TrainingList.findByIdAndUpdate(trainingList._id, { 
-//         'mappings': mappings,  
-//         'lastEdit': Date.now(),   
-//         'trainingStatus': 4
-//       });
-//     }
-//     catch(error) {
-//       console.log("Error in snippet mapping");
-//       await TrainingList.findByIdAndUpdate(trainingList._id, { 
-//         'lastEdit': Date.now(),   
-//         'trainingStatus': 19
-//       });
-//       console.log(error);
-//     }    
-//   }
-//   catch(error) {
-//     console.log("Error in createSnippet");
-//     console.log(error);
-//   }
-// };
 
 ScraperController.createSnippet = async (req, res) => {
   try {
