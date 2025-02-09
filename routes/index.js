@@ -20,6 +20,7 @@ const CreditsController = require('../controllers/CreditsController');
 const WidgetController = require('../controllers/WidgetController');
 const OpenAIUsageController = require('../controllers/OpenAIUsageController');
 const TrainingListController =  require('../controllers/TrainingListController');
+const ScraperController =  require('../controllers/ScraperController');
 const middleware = require('../middleware/authMiddleware');
 
 
@@ -33,24 +34,30 @@ router.use(middleware);
 router.post('/logout', UserController.logoutUser);
 
 router.post('/openaiCreateSnippet', upload.single('file'), middleware, OpenaiTrainingListController.createSnippet);
-// router.post('/openaiScrape', OpenaiTrainingListController.scrape);
+router.post('/openaiScrape', OpenaiTrainingListController.scrape);
 
-router.post('/openaiScrape', async (req, res) => {
-  const { url } = req.body;
-  const markdown = await scrapeWebsite(url);
-  console.log(markdown,"crawl data")
-  // Process and store the content as shown above
-  const trainingData = prepareTrainingData(markdown);
-  const result = await train(trainingData);
-  console.log(`Training completed: ${result.vectorsUpserted} vectors from ${result.pagesProcessed} pages`);
-  res.send('Website content indexed successfully.');
-});
+// router.post('/openaiScrape', async (req, res) => {
+//   const { url } = req.body;
+//   const markdown = await scrapeWebsite(url);
+//   console.log(markdown,"crawl data")
+//   // Process and store the content as shown above
+//   const trainingData = prepareTrainingData(markdown);
+//   const result = await train(trainingData);
+//   console.log(`Training completed: ${result.vectorsUpserted} vectors from ${result.pagesProcessed} pages`);
+//   res.send('Website content indexed successfully.');
+// });
 
 
 
 router.post('/openaiCreateFaq', OpenaiTrainingListController.createFaq);
 router.post('/openaiToggleActiveStatus', OpenaiTrainingListController.toggleActiveStatus);
 router.post('/getOpenaiTrainingListDetail', OpenaiTrainingListController.getTrainingListDetail);
+
+router.post('/getTrainingStatus',TrainingListController.getTrainingStatus);
+
+router.get('/open-ai-usages-total-cost', OpenAIUsageController.sumTotalCost);
+
+router.post('/getUserCredits', CreditsController.getUserCredits);
 
 router.post('/getConversationMessages', ChatMessageController.getAllChatMessagesAPI);
 router.post('/getMessageSources', ChatMessageController.getMessageSources);
@@ -62,12 +69,6 @@ router.post('/setBasicInfo', WidgetController.setBasicInfo);
 router.post('/uploadLogo', upload.single('logo'),middleware, WidgetController.uploadLogo);
 router.get('/getThemeSettings/:userId',WidgetController.getThemeSettings);
 router.post('/updateThemeSettings',WidgetController.updateThemeSettings);
-
-router.post('/getUserCredits', CreditsController.getUserCredits);
-
-router.get('/open-ai-usages-total-cost', OpenAIUsageController.sumTotalCost);
-
-router.post('/getTrainingStatus',TrainingListController.getTrainingStatus);
 
 
 module.exports = router;

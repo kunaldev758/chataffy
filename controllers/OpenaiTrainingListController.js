@@ -5,6 +5,12 @@ const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const officeParser = require('officeparser');
 
+const { OpenAIEmbeddings } = require('langchain/embeddings/openai');
+const { RecursiveCharacterTextSplitter } = require('langchain/text_splitter');
+const { PineconeStore } = require('langchain/vectorstores/pinecone');
+const { PineconeClient } = require('@pinecone-database/pinecone');
+const { Document } = require('langchain/document');
+
 const axios = require("axios");
 const cheerio = require("cheerio");
 const Client = require("../models/Client");
@@ -19,36 +25,649 @@ const ScraperController = {};
 
 const clientStatus = {};
 
-const readFileContent = (filePath, mimeType) => {
-  return new Promise((resolve, reject) => {
-    if (mimeType === 'text/plain') {
-      // Read .txt file
-      fs.readFile(filePath, 'utf8', (err, data) => {
-        if (err) reject(err);
-        else resolve(data);
+class VectorStoreManager {
+  constructor() {
+    this.pineconeClient = null;
+    this.pineconeIndex = null;
+    this.embeddings = null;
+  }
+
+  async initialize() {
+    // Initialize Pinecone
+    this.pineconeClient = new PineconeClient();
+    await this.pineconeClient.init({
+      apiKey: process.env.PINECONE_API_KEY,
+      environment: process.env.PINECONE_ENVIRONMENT,
+    });
+    this.pineconeIndex = this.pineconeClient.Index(process.env.PINECONE_INDEX_NAME);
+
+    // Initialize OpenAI embeddings
+    this.embeddings = new OpenAIEmbeddings({
+      openAIApiKey: process.env.OPENAI_API_KEY,
+    });
+  }
+
+  async createVectorStore(texts, metadata) {
+    const documents = texts.map(
+      (text) => new Document({ pageContent: text, metadata })
+    );
+
+    const vectorStore = await PineconeStore.fromDocuments(
+      documents,
+      this.embeddings,
+      {
+        pineconeIndex: this.pineconeIndex,
+      }
+    );
+
+    return vectorStore;
+  }
+}
+
+class TrainingPricingCalculator {
+  constructor() {
+    // Current pricing rates (as of 2024)
+    this.rates = {
+      embedding: {
+        ada: 0.0001, // per 1K tokens
+      },
+      chatCompletion: {
+        "gpt-3.5-turbo": {
+          input: 0.001, // per 1K tokens
+          output: 0.002, // per 1K tokens
+        },
+      },
+      pinecone: {
+        query: 0.0002, // per query
+        vector: 0.0002, // per vector per month
+      },
+    };
+  }
+
+  async estimateTokens(text) {
+    // Rough approximation: 1 token ≈ 4 characters
+    return Math.ceil(text.length / 4);
+  }
+
+  calculateEmbeddingCost(tokens) {
+    return (tokens / 1000) * this.rates.embedding.ada;
+  }
+
+  calculateChatCompletionCost(
+    inputTokens,
+    outputTokens,
+    model = "gpt-3.5-turbo"
+  ) {
+    const inputCost =
+      (inputTokens / 1000) * this.rates.chatCompletion[model].input;
+    const outputCost =
+      (outputTokens / 1000) * this.rates.chatCompletion[model].output;
+    return inputCost + outputCost;
+  }
+
+  calculatePineconeQueryCost(queryCount) {
+    return queryCount * this.rates.pinecone.query;
+  }
+}
+
+
+class ContentProcessor {
+  constructor() {
+    this.textSplitter = new RecursiveCharacterTextSplitter({
+      chunkSize: 1000,
+      chunkOverlap: 200,
+    });
+    this.vectorStoreManager = new VectorStoreManager();
+    this.pricingCalculator = new TrainingPricingCalculator();
+  }
+
+  async initialize() {
+    await this.vectorStoreManager.initialize();
+  }
+
+  async readFileContent(filePath, mimeType) {
+    return new Promise((resolve, reject) => {
+      if (mimeType === 'text/plain') {
+        fs.readFile(filePath, 'utf8', (err, data) => {
+          if (err) reject(err);
+          else resolve(data);
+        });
+      } else if (mimeType === 'application/pdf') {
+        fs.readFile(filePath, (err, data) => {
+          if (err) reject(err);
+          pdfParse(data).then((data) => resolve(data.text)).catch(reject);
+        });
+      } else if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        mammoth.extractRawText({ path: filePath })
+          .then(result => resolve(result.value))
+          .catch(reject);
+      } else if (mimeType === 'application/msword') {
+        officeParser.parseOfficeAsync(filePath, (err, data) => {
+          if (err) reject(err);
+          else resolve(data);
+        });
+      } else {
+        resolve('');
+      }
+    });
+  }
+
+  async processWebPage(trainingListObj) {
+    try {
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, {
+        'trainingProcessStatus.minifyingStatus': 1,
+        'trainingProcessStatus.minifyingDuration.start': Date.now()
       });
-    } else if (mimeType === 'application/pdf') {
-      // Read .pdf file
-      fs.readFile(filePath, (err, data) => {
-        if (err) reject(err);
-        pdfParse(data).then((data) => resolve(data.text)).catch(reject);
+
+      const sourceCode = trainingListObj.webPage.sourceCode;
+      const $ = cheerio.load(sourceCode);
+      const webPageURL = trainingListObj.webPage.url;
+  
+      // Handle singular tags appropriately
+      const title = $("title").text();
+      const metaDescription = $('meta[name="description"]').attr('content');
+      $("br, hr").remove(); // or replace with a suitable representation
+      // Remove style, script tags
+      $("style, script").remove();
+      // Remove comments
+      $("*")
+        .contents()
+        .filter(function () {
+          return this.nodeType === 8;
+        })
+        .remove();
+      // Handle other singular tags appropriately
+      $("img, input").remove(); // or handle differently based on your requirements
+
+      // Function to convert relative URLs to absolute
+      function convertToAbsoluteUrl(relativeUrl, baseUrl) {
+        return urlModule.resolve(baseUrl, relativeUrl);
+      }
+
+      // Update relative URLs to absolute URLs
+      $('a').each((i, el) => {
+        const href = $(el).attr('href');
+        if (href && !href.startsWith('http') && href!=='#') { // !href.startsWith('#')
+            $(el).attr('href', convertToAbsoluteUrl(href, webPageURL));
+        }
       });
-    } else if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      // Read .docx file
-      mammoth.extractRawText({ path: filePath })
-        .then(result => resolve(result.value))
-        .catch(reject);
-    } else if (mimeType === 'application/msword') {
-      // Read .doc file
-      officeParser.parseOfficeAsync(filePath, (err, data) => {
-        if (err) reject(err);
-        else resolve(data);
+
+      // Replace iframes with a message or remove them if no src attribute
+      $('iframe').each((i, el) => {
+        const src = $(el).attr('src');
+        if (src) {
+            $(el).replaceWith(`${convertToAbsoluteUrl(src, webPageURL)}`);
+        } else {
+            $(el).remove();
+        }
       });
-    } else {
-      resolve('');
+
+      // Replace form elements with a message
+      $('form').each((i, el) => {
+          $(el).prepend(`Form on URL: ${webPageURL}`);
+      });
+      
+      // Replace all tags other than allowed tags with their inner HTML recursively
+      function replaceNonAllowedTags(element) {
+        $(element)
+          .contents()
+          .each(function () {
+            if (this.nodeType === 1) {
+              replaceNonAllowedTags(this);
+              // Check if the current node is not in the allowed tag list
+              if (!allowedTags.includes(this.name)) {
+                // Check if there is exactly 1 immediate child node of type 1
+                const childNodes = $(this)
+                  .children()
+                  .filter(function () {
+                    return this.nodeType === 1;
+                  });
+
+                if (childNodes.length === 1) {
+                  // Replace the outer node with its inner HTML
+                  const innerHtml = $(this).html() || "";
+                  $(this).replaceWith(innerHtml);
+                }
+              }
+            }
+          });
+      }
+      replaceNonAllowedTags("body");
+
+      // Remove empty elements recursively
+      function removeEmptyElements(element) {
+        $(element)
+          .contents()
+          .each(function () {
+            if (this.nodeType === 1) {
+              removeEmptyElements(this);
+              // if ($(this).is(":empty")) {
+              if ($(this).is(":empty") || /^\s*$/.test($(this).text())) {
+                $(this).remove();
+              }
+            }
+          });
+      }
+      removeEmptyElements("body");
+      // Remove trailing spaces
+      // $('*').each(function () {
+      //     if ($(this).is('p, h1, h2, h3, h4, h5, h6, li')) {
+      //         // $(this).text($.trim($(this).text()));
+      //         // $(this).text($(this).text().trim());
+      //         $(this).html($(this).html().replace(/(<a [^>]+>[^<]+<\/a>)/g, ' $1 ')); // Preserve links
+      //         $(this).text($(this).text().trim());
+      //     }
+      // });
+      $("*").each(function () {
+        if ($(this).is("p, h1, h2, h3, h4, h5, h6, li")) {
+          // Preserve anchor tags while trimming text
+          $(this)
+            .contents()
+            .filter(function () {
+              return this.nodeType === 3; // Filter for text nodes
+            })
+            .each(function () {
+              this.nodeValue = this.nodeValue.trim(); // Trim text content
+            });
+        }
+      });
+
+      
+      // Remove unused attributes
+      // $('*').removeAttr('style');
+      $("*").each(function () {
+        const allowedAttributes = ["src", "href"];
+
+        // Get all attributes of the current element
+        const attributes = this.attribs;
+
+        // Check each attribute
+        for (const attr in attributes) {
+          if (attributes[attr] && !allowedAttributes.includes(attr)) {
+            // Remove the non-allowed attributes
+            delete attributes[attr];
+          }
+        }
+      });
+      
+      // removeEmptyElements("body");
+      
+      const content = $("body").html().replace(/\s+/g, " ").trim();
+      
+      // Split content into chunks using LangChain's text splitter
+      const chunks = await this.textSplitter.createDocuments([content], {
+        metadata: {
+          url: webPageURL,
+          title: title,
+          type: 'webpage',
+          userId: trainingListObj.userId
+        }
+      });
+
+      // Calculate costs
+      const totalTokens = await this.pricingCalculator.estimateTokens(content);
+      const costs = {
+        embedding: this.pricingCalculator.calculateEmbeddingCost(totalTokens),
+        storage: this.pricingCalculator.calculatePineconeStorageCost(chunks.length)
+      };
+  
+      // Create vector store
+      await this.vectorStoreManager.createVectorStore(
+        chunks.map(chunk => chunk.pageContent),
+        chunks[0].metadata
+      );
+
+      // Update training list with status
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, {
+        'webPage.title': title,
+        'webPage.metaDescription': metaDescription,
+        'webPage.content': content,
+        'costDetails': {
+          tokens: totalTokens,
+          ...costs,
+          totalCost: embeddingCost + storageCost
+        },
+        'trainingProcessStatus.minifyingStatus': 2,
+        'trainingProcessStatus.minifyingDuration.end': Date.now(),
+        'trainingStatus': 4
+      });
+
+      return { success: true, chunks: chunks.length };
+    } catch (error) {
+      console.error('Error processing webpage:', error);
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, {
+        'trainingProcessStatus.minifyingStatus': 3,
+        'trainingStatus': 9
+      });
+      return { success: false, error };
     }
-  });
+  }
+
+  async processFileOrSnippet(data) {
+    try {
+      let content, metadata;
+      
+      if (data.file) {
+        content = await this.readFileContent(data.file.path, data.file.mimetype);
+        metadata = {
+          title: data.file.originalname,
+          type: 'file',
+          mimeType: data.file.mimetype,
+          userId: data.userId
+        };
+      } else {
+        content = data.content;
+        metadata = {
+          title: data.title,
+          type: 'snippet',
+          userId: data.userId
+        };
+      }
+
+      const chunks = await this.textSplitter.createDocuments([content], { metadata });
+
+      const totalTokens = await this.pricingCalculator.estimateTokens(content);
+      const costs = {
+        embedding: this.pricingCalculator.calculateEmbeddingCost(totalTokens),
+        storage: this.pricingCalculator.calculatePineconeStorageCost(chunks.length)
+      };
+
+      await this.vectorStoreManager.createVectorStore(
+        chunks.map(chunk => chunk.pageContent),
+        chunks[0].metadata
+      );
+
+      return {
+        success: true,
+        costs: {
+          tokens: totalTokens,
+          ...costs,
+          total: costs.embedding + costs.storage
+        },
+        chunks: chunks.length
+      };
+    } catch (error) {
+      console.error('Error processing file/snippet:', error);
+      return { success: false, error };
+    }
+  }
+
+
+  async processFAQ(faqData) {
+    try {
+      const { question, answer, userId } = faqData;
+      
+      const content = `Question: ${question}\nAnswer: ${answer}`;
+      const chunks = await this.textSplitter.createDocuments([content], {
+        metadata: {
+          type: 'faq',
+          userId
+        }
+      });
+
+      const totalTokens = await this.pricingCalculator.estimateTokens(content);
+      const costs = {
+        embedding: this.pricingCalculator.calculateEmbeddingCost(totalTokens),
+        storage: this.pricingCalculator.calculatePineconeStorageCost(1)
+      };
+
+      await this.vectorStoreManager.createVectorStore([content], {
+        type: 'faq',
+        userId
+      });
+
+      return {
+        success: true,
+        costs: {
+          ...costs,
+          total: costs.embedding + costs.storage
+        }
+      };
+    } catch (error) {
+      console.error('Error processing FAQ:', error);
+      return { success: false, error };
+    }
+  }
+
+  // async processSnippet(snippetData) {
+  //   try {
+  //     const { content, title, userId } = snippetData;
+      
+  //     const chunks = await this.textSplitter.createDocuments([content], {
+  //       metadata: {
+  //         title,
+  //         type: 'snippet',
+  //         userId
+  //       }
+  //     });
+
+  //     const totalTokens = await this.pricingCalculator.estimateTokens(content);
+  //     const costs = {
+  //       embedding: this.pricingCalculator.calculateEmbeddingCost(totalTokens),
+  //       storage: this.pricingCalculator.calculatePineconeStorageCost(chunks.length)
+  //     };
+
+  //     await this.vectorStoreManager.createVectorStore(
+  //       chunks.map(chunk => chunk.pageContent),
+  //       chunks[0].metadata
+  //     );
+
+  //     return {
+  //       success: true,
+  //       costs: {
+  //         ...costs,
+  //         total: costs.embedding + costs.storage
+  //       }
+  //     };
+  //   } catch (error) {
+  //     console.error('Error processing snippet:', error);
+  //     return { success: false, error };
+  //   }
+  // }
+}
+
+// Update the main controller methods to use the new processor
+const contentProcessor = new ContentProcessor();
+await contentProcessor.initialize();
+
+// Update createFaq method
+ScraperController.createFaq = async (req, res) => {
+  const { question, answer } = req.body;
+  const userId = req.body.userId;
+
+  try {
+    // const result = await contentProcessor.processFAQ({ question, answer, userId });
+    const content = `Question: ${question}\nAnswer: ${answer}`;
+    const result = await contentProcessor.processFileOrSnippet({
+      title: question,
+      content,
+      userId
+    });
+    
+    if (result.success) {
+      const trainingList = new TrainingList({
+        userId,
+        title: question,
+        type: 1,
+        faq: { question, answer },
+        costDetails: result.costs
+      });
+      await trainingList.save();
+      
+      await Client.updateOne({id: userId}, {faqAdded: true});
+      res.status(201).json({ status_code: 200, message: "FAQ added successfully" });
+    } else {
+      throw new Error(result.error);
+    }
+  } catch (error) {
+    console.error("Error in createFaq:", error);
+    res.status(500).json({ status: false, message: "Failed to create FAQ" });
+  }
 };
+
+
+// Updated scraping method
+ScraperController.scrape = async (req, res) => {
+  const { sitemap } = req.body;
+  const userId = req.body.userId;
+
+  try {
+    const client = await Client.findOne({userId});
+    if(client.sitemapScrappingStatus + client.webPageScrappingStatus > 0) {
+      return res.status(200).json({ 
+        status_code: 200, 
+        message: client.sitemapScrappingStatus ? "Sitemap scrapping in progress" : "Web-page scrapping in progress" 
+      });
+    }
+
+    const existingSitemap = await Sitemap.findOne({ userId, url: sitemap });
+    if (existingSitemap) {
+      return res.status(200).json({ status_code: 200, message: "Sitemap already added." });
+    }
+
+    const sitemapObj = await Sitemap.create({userId, url: sitemap});
+    res.status(201).json({ status_code: 200, message: "Scraping process initiated." });
+    
+    client.sitemapScrappingStatus = 1;
+    await client.save();
+
+    try {
+      const response = await axios.get(sitemap);
+      const $ = cheerio.load(response.data);
+
+      const webPageUrls = $("loc:not(sitemap loc)").map((_, el) => $(el).text()).get();
+      const sitemapUrls = $("sitemap loc").map((_, el) => $(el).text()).get();
+
+      if(webPageUrls.length) {
+        await createTrainingListAndWebPages(webPageUrls, userId, sitemapObj._id);
+        req.io.to('user'+userId).emit('web-pages-added');
+        webPageCrawling(client, userId, req);
+      }
+
+      if(sitemapUrls.length) {
+        await insertOrUpdateSitemapRecords(sitemapUrls, userId, sitemapObj._id);
+      }
+
+      sitemapObj.status = 1;
+      await sitemapObj.save();
+    } catch(error) {
+      console.error("Error processing sitemap:", error);
+      sitemapObj.status = 2; // Error status
+      await sitemapObj.save();
+    }
+
+    client.sitemapScrappingStatus = 0;
+    await client.save();
+
+  } catch (error) {
+    console.error("Scraping error:", error);
+    res.status(500).json({ status: false, message: "Scraping failed" });
+  }
+};
+
+
+// Updated createSnippet method
+ScraperController.createSnippet = async (req, res) => {
+  try {
+    const { title, content } = req.body;
+    const file = req.file;
+    const userId = req.body.userId;
+
+    let results = [];
+
+    if (title && content) {
+      const snippetResult = await contentProcessor.processFileOrSnippet({
+        title,
+        content,
+        userId
+      });
+
+      if (snippetResult.success) {
+        const trainingList = new TrainingList({
+          userId,
+          title,
+          type: 2,
+          snippet: { title, content },
+          costDetails: snippetResult.costs
+        });
+        await trainingList.save();
+        results.push({ type: 'snippet', success: true });
+      }
+    }
+
+    if (file) {
+      const fileResult = await contentProcessor.processFileOrSnippet({
+        file,
+        userId
+      });
+
+      if (fileResult.success) {
+        const fileContent = await contentProcessor.readFileContent(file.path, file.mimetype);
+        const trainingList = new TrainingList({
+          userId,
+          title: file.originalname,
+          type: 3,
+          file: {
+            fileName: file.filename,
+            originalFileName: file.originalname,
+            path: file.path,
+            content: fileContent
+          },
+          costDetails: fileResult.costs
+        });
+        await trainingList.save();
+        results.push({ type: 'file', success: true });
+      }
+    }
+
+    if (results.length > 0) {
+      await Client.updateOne({id: userId}, {docSnippetAdded: true});
+      res.status(201).json({ status_code: 200, message: "Documents processed successfully" });
+    } else {
+      throw new Error("No content processed successfully");
+    }
+
+  } catch (error) {
+    console.error("Error in createSnippet:", error);
+    res.status(500).json({ message: 'Failed to process documents' });
+  }
+};
+
+
+
+
+
+
+// const readFileContent = (filePath, mimeType) => {
+//   return new Promise((resolve, reject) => {
+//     if (mimeType === 'text/plain') {
+//       // Read .txt file
+//       fs.readFile(filePath, 'utf8', (err, data) => {
+//         if (err) reject(err);
+//         else resolve(data);
+//       });
+//     } else if (mimeType === 'application/pdf') {
+//       // Read .pdf file
+//       fs.readFile(filePath, (err, data) => {
+//         if (err) reject(err);
+//         pdfParse(data).then((data) => resolve(data.text)).catch(reject);
+//       });
+//     } else if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+//       // Read .docx file
+//       mammoth.extractRawText({ path: filePath })
+//         .then(result => resolve(result.value))
+//         .catch(reject);
+//     } else if (mimeType === 'application/msword') {
+//       // Read .doc file
+//       officeParser.parseOfficeAsync(filePath, (err, data) => {
+//         if (err) reject(err);
+//         else resolve(data);
+//       });
+//     } else {
+//       resolve('');
+//     }
+//   });
+// };
 
 ScraperController.getTrainingListDetail = async (req, res) => {
   try {
@@ -145,485 +764,485 @@ async function createTrainingListAndWebPages(urls, userId, sitemapId) {
   }
 }
 
-async function webPageMapping(client, userId, req) {
-  try {
-    if(clientStatus[userId] && clientStatus[userId].webPageMapping) {
-      // setTimeout
-      return;
-    }
-    clientStatus[userId] = { webPageMapping: true };
-    let trainingListObjArray = [];
-    do {
-      trainingListObjArray = await TrainingList.find({
-        userId,
-        type: 0,
-        // 'webPage.minifyingStatus': 2,
-        trainingStatus: 3
-        // $or: [
-        //   { 'mapping': { $exists: false } },
-        //   { 'mapping.mappingStatus': { $nin: [2, 3] } }
-        // ]
-      }).limit(10);
-      await Promise.all(trainingListObjArray.map(async (trainingListObj) => {
-        try {
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-            'trainingProcessStatus.mappingStatus': 1, 
-            'trainingProcessStatus.mappingDuration.start': Date.now()
-          });
-          const mappings = trainingListObj.mappings;
-          const input = mappings.map(({content})=>content);
-          // console.log("input", input);
-          const embeddingData = await OpenAIController.createEmbedding(input);
-          // console.log("embeddingData", embeddingData);
-          embeddingData.map((data)=>{
-            mappings[data.index]['embeddingValues'] = data.embedding;
-          });
+// async function webPageMapping(client, userId, req) {
+//   try {
+//     if(clientStatus[userId] && clientStatus[userId].webPageMapping) {
+//       // setTimeout
+//       return;
+//     }
+//     clientStatus[userId] = { webPageMapping: true };
+//     let trainingListObjArray = [];
+//     do {
+//       trainingListObjArray = await TrainingList.find({
+//         userId,
+//         type: 0,
+//         // 'webPage.minifyingStatus': 2,
+//         trainingStatus: 3
+//         // $or: [
+//         //   { 'mapping': { $exists: false } },
+//         //   { 'mapping.mappingStatus': { $nin: [2, 3] } }
+//         // ]
+//       }).limit(10);
+//       await Promise.all(trainingListObjArray.map(async (trainingListObj) => {
+//         try {
+//           await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
+//             'trainingProcessStatus.mappingStatus': 1, 
+//             'trainingProcessStatus.mappingDuration.start': Date.now()
+//           });
+//           const mappings = trainingListObj.mappings;
+//           const input = mappings.map(({content})=>content);
+//           // console.log("input", input);
+//           const embeddingData = await OpenAIController.createEmbedding(input);
+//           // console.log("embeddingData", embeddingData);
+//           embeddingData.map((data)=>{
+//             mappings[data.index]['embeddingValues'] = data.embedding;
+//           });
           
-            // trainingListObj.mapping.mappingLocation = {
-            //   type: "Point",
-            //   coordinates: embeddingValues
-            // };
+//             // trainingListObj.mapping.mappingLocation = {
+//             //   type: "Point",
+//             //   coordinates: embeddingValues
+//             // };
           
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-            'mappings': mappings,  
-            'trainingProcessStatus.mappingStatus': 2,  
-            'trainingProcessStatus.mappingDuration.end': Date.now(),  
-            'trainingStatus': 4
-          });
-          trainingListObj.trainingStatus = 4;
-        }
-        catch(error) {
-          console.log("Error in mapping "+trainingListObj.webPage.url);
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-            'trainingProcessStatus.mappingStatus': 3,
-            'lastEdit': Date.now(),
-            'trainingStatus': 9
-          });
-          trainingListObj.trainingStatus = 9;
-          console.log(error);
-        }
-      }));
-      if(trainingListObjArray.length) {
-        const list = trainingListObjArray.map(({ _id, trainingStatus }) => ({ _id, trainingStatus }));
-        req.io.to('user'+userId).emit('web-pages-mapped',{
-          list
-        });
-      }
-    } while (trainingListObjArray.length > 0); 
-    // }
-    clientStatus[userId] = { webPageMapping: false };
-    console.log("Complete Done");
-  }
-  catch (error) {
-    console.error("Error in webpage mapping", error);
-    clientStatus[userId] = { webPageMapping: false };
-  }
-}
+//           await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
+//             'mappings': mappings,  
+//             'trainingProcessStatus.mappingStatus': 2,  
+//             'trainingProcessStatus.mappingDuration.end': Date.now(),  
+//             'trainingStatus': 4
+//           });
+//           trainingListObj.trainingStatus = 4;
+//         }
+//         catch(error) {
+//           console.log("Error in mapping "+trainingListObj.webPage.url);
+//           await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
+//             'trainingProcessStatus.mappingStatus': 3,
+//             'lastEdit': Date.now(),
+//             'trainingStatus': 9
+//           });
+//           trainingListObj.trainingStatus = 9;
+//           console.log(error);
+//         }
+//       }));
+//       if(trainingListObjArray.length) {
+//         const list = trainingListObjArray.map(({ _id, trainingStatus }) => ({ _id, trainingStatus }));
+//         req.io.to('user'+userId).emit('web-pages-mapped',{
+//           list
+//         });
+//       }
+//     } while (trainingListObjArray.length > 0); 
+//     // }
+//     clientStatus[userId] = { webPageMapping: false };
+//     console.log("Complete Done");
+//   }
+//   catch (error) {
+//     console.error("Error in webpage mapping", error);
+//     clientStatus[userId] = { webPageMapping: false };
+//   }
+// }
 
-async function webPageMinifying(client, userId, req) {
-  try {
-    if(clientStatus[userId] && clientStatus[userId].webPageMinifying) {
-      // setTimeout
-      return;
-    }
-    clientStatus[userId] = { webPageMinifying: true };
-    // if(client.webPageMappingCount > 0) {
-      // const model = await use.load();
-    const allowedTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "dl", "dt", "dd","a" ];
-    let trainingListObjArray = [];
-    do {
-      trainingListObjArray = await TrainingList.find({
-        userId,
-        type: 0,
-        // 'webPage.crawlingStatus': 2,
-        trainingStatus: 2
-        // $or: [
-        //   { 'mapping': { $exists: false } },
-        //   { 'mapping.mappingStatus': { $nin: [2, 3] } }
-        // ]
-      }).limit(10);
-      await Promise.all(trainingListObjArray.map(async (trainingListObj) => {
-        // console.log("For Mapping",trainingListObj);      
-      // while(trainingListObj && trainingListObj.webPage.sourceCode) {
-        try {
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-            'trainingProcessStatus.minifyingStatus': 1, 
-            'trainingProcessStatus.minifyingDuration.start': Date.now()
-          });
-          const sourceCode = trainingListObj.webPage.sourceCode;
-          const $ = cheerio.load(sourceCode);
-          const webPageURL = trainingListObj.webPage.url;
+// async function webPageMinifying(client, userId, req) {
+//   try {
+//     if(clientStatus[userId] && clientStatus[userId].webPageMinifying) {
+//       // setTimeout
+//       return;
+//     }
+//     clientStatus[userId] = { webPageMinifying: true };
+//     // if(client.webPageMappingCount > 0) {
+//       // const model = await use.load();
+//     const allowedTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "dl", "dt", "dd","a" ];
+//     let trainingListObjArray = [];
+//     do {
+//       trainingListObjArray = await TrainingList.find({
+//         userId,
+//         type: 0,
+//         // 'webPage.crawlingStatus': 2,
+//         trainingStatus: 2
+//         // $or: [
+//         //   { 'mapping': { $exists: false } },
+//         //   { 'mapping.mappingStatus': { $nin: [2, 3] } }
+//         // ]
+//       }).limit(10);
+//       await Promise.all(trainingListObjArray.map(async (trainingListObj) => {
+//         // console.log("For Mapping",trainingListObj);      
+//       // while(trainingListObj && trainingListObj.webPage.sourceCode) {
+//         try {
+//           await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
+//             'trainingProcessStatus.minifyingStatus': 1, 
+//             'trainingProcessStatus.minifyingDuration.start': Date.now()
+//           });
+//           const sourceCode = trainingListObj.webPage.sourceCode;
+//           const $ = cheerio.load(sourceCode);
+//           const webPageURL = trainingListObj.webPage.url;
           
-          // Handle singular tags appropriately
-          const title = $("title").text();
-          const metaDescription = $('meta[name="description"]').attr('content');
-          $("br, hr").remove(); // or replace with a suitable representation
-          // Remove style, script tags
-          $("style, script").remove();
-          // Remove comments
-          $("*")
-            .contents()
-            .filter(function () {
-              return this.nodeType === 8;
-            })
-            .remove();
-          // Handle other singular tags appropriately
-          $("img, input").remove(); // or handle differently based on your requirements
+//           // Handle singular tags appropriately
+//           const title = $("title").text();
+//           const metaDescription = $('meta[name="description"]').attr('content');
+//           $("br, hr").remove(); // or replace with a suitable representation
+//           // Remove style, script tags
+//           $("style, script").remove();
+//           // Remove comments
+//           $("*")
+//             .contents()
+//             .filter(function () {
+//               return this.nodeType === 8;
+//             })
+//             .remove();
+//           // Handle other singular tags appropriately
+//           $("img, input").remove(); // or handle differently based on your requirements
 
-          // Function to convert relative URLs to absolute
-          function convertToAbsoluteUrl(relativeUrl, baseUrl) {
-            return urlModule.resolve(baseUrl, relativeUrl);
-          }
+//           // Function to convert relative URLs to absolute
+//           function convertToAbsoluteUrl(relativeUrl, baseUrl) {
+//             return urlModule.resolve(baseUrl, relativeUrl);
+//           }
 
-          // Update relative URLs to absolute URLs
-          $('a').each((i, el) => {
-            const href = $(el).attr('href');
-            if (href && !href.startsWith('http') && href!=='#') { // !href.startsWith('#')
-                $(el).attr('href', convertToAbsoluteUrl(href, webPageURL));
-            }
-          });
+//           // Update relative URLs to absolute URLs
+//           $('a').each((i, el) => {
+//             const href = $(el).attr('href');
+//             if (href && !href.startsWith('http') && href!=='#') { // !href.startsWith('#')
+//                 $(el).attr('href', convertToAbsoluteUrl(href, webPageURL));
+//             }
+//           });
 
-          // Replace iframes with a message or remove them if no src attribute
-          $('iframe').each((i, el) => {
-            const src = $(el).attr('src');
-            if (src) {
-                $(el).replaceWith(`${convertToAbsoluteUrl(src, webPageURL)}`);
-            } else {
-                $(el).remove();
-            }
-          });
+//           // Replace iframes with a message or remove them if no src attribute
+//           $('iframe').each((i, el) => {
+//             const src = $(el).attr('src');
+//             if (src) {
+//                 $(el).replaceWith(`${convertToAbsoluteUrl(src, webPageURL)}`);
+//             } else {
+//                 $(el).remove();
+//             }
+//           });
 
-          // Replace form elements with a message
-          $('form').each((i, el) => {
-              $(el).prepend(`Form on URL: ${webPageURL}`);
-          });
+//           // Replace form elements with a message
+//           $('form').each((i, el) => {
+//               $(el).prepend(`Form on URL: ${webPageURL}`);
+//           });
           
-          // Replace all tags other than allowed tags with their inner HTML recursively
-          function replaceNonAllowedTags(element) {
-            $(element)
-              .contents()
-              .each(function () {
-                if (this.nodeType === 1) {
-                  replaceNonAllowedTags(this);
-                  // Check if the current node is not in the allowed tag list
-                  if (!allowedTags.includes(this.name)) {
-                    // Check if there is exactly 1 immediate child node of type 1
-                    const childNodes = $(this)
-                      .children()
-                      .filter(function () {
-                        return this.nodeType === 1;
-                      });
+//           // Replace all tags other than allowed tags with their inner HTML recursively
+//           function replaceNonAllowedTags(element) {
+//             $(element)
+//               .contents()
+//               .each(function () {
+//                 if (this.nodeType === 1) {
+//                   replaceNonAllowedTags(this);
+//                   // Check if the current node is not in the allowed tag list
+//                   if (!allowedTags.includes(this.name)) {
+//                     // Check if there is exactly 1 immediate child node of type 1
+//                     const childNodes = $(this)
+//                       .children()
+//                       .filter(function () {
+//                         return this.nodeType === 1;
+//                       });
 
-                    if (childNodes.length === 1) {
-                      // Replace the outer node with its inner HTML
-                      const innerHtml = $(this).html() || "";
-                      $(this).replaceWith(innerHtml);
-                    }
-                  }
-                }
-              });
-          }
-          replaceNonAllowedTags("body");
+//                     if (childNodes.length === 1) {
+//                       // Replace the outer node with its inner HTML
+//                       const innerHtml = $(this).html() || "";
+//                       $(this).replaceWith(innerHtml);
+//                     }
+//                   }
+//                 }
+//               });
+//           }
+//           replaceNonAllowedTags("body");
 
-          // Remove empty elements recursively
-          function removeEmptyElements(element) {
-            $(element)
-              .contents()
-              .each(function () {
-                if (this.nodeType === 1) {
-                  removeEmptyElements(this);
-                  // if ($(this).is(":empty")) {
-                  if ($(this).is(":empty") || /^\s*$/.test($(this).text())) {
-                    $(this).remove();
-                  }
-                }
-              });
-          }
-          removeEmptyElements("body");
-          // Remove trailing spaces
-          // $('*').each(function () {
-          //     if ($(this).is('p, h1, h2, h3, h4, h5, h6, li')) {
-          //         // $(this).text($.trim($(this).text()));
-          //         // $(this).text($(this).text().trim());
-          //         $(this).html($(this).html().replace(/(<a [^>]+>[^<]+<\/a>)/g, ' $1 ')); // Preserve links
-          //         $(this).text($(this).text().trim());
-          //     }
-          // });
-          $("*").each(function () {
-            if ($(this).is("p, h1, h2, h3, h4, h5, h6, li")) {
-              // Preserve anchor tags while trimming text
-              $(this)
-                .contents()
-                .filter(function () {
-                  return this.nodeType === 3; // Filter for text nodes
-                })
-                .each(function () {
-                  this.nodeValue = this.nodeValue.trim(); // Trim text content
-                });
-            }
-          });
+//           // Remove empty elements recursively
+//           function removeEmptyElements(element) {
+//             $(element)
+//               .contents()
+//               .each(function () {
+//                 if (this.nodeType === 1) {
+//                   removeEmptyElements(this);
+//                   // if ($(this).is(":empty")) {
+//                   if ($(this).is(":empty") || /^\s*$/.test($(this).text())) {
+//                     $(this).remove();
+//                   }
+//                 }
+//               });
+//           }
+//           removeEmptyElements("body");
+//           // Remove trailing spaces
+//           // $('*').each(function () {
+//           //     if ($(this).is('p, h1, h2, h3, h4, h5, h6, li')) {
+//           //         // $(this).text($.trim($(this).text()));
+//           //         // $(this).text($(this).text().trim());
+//           //         $(this).html($(this).html().replace(/(<a [^>]+>[^<]+<\/a>)/g, ' $1 ')); // Preserve links
+//           //         $(this).text($(this).text().trim());
+//           //     }
+//           // });
+//           $("*").each(function () {
+//             if ($(this).is("p, h1, h2, h3, h4, h5, h6, li")) {
+//               // Preserve anchor tags while trimming text
+//               $(this)
+//                 .contents()
+//                 .filter(function () {
+//                   return this.nodeType === 3; // Filter for text nodes
+//                 })
+//                 .each(function () {
+//                   this.nodeValue = this.nodeValue.trim(); // Trim text content
+//                 });
+//             }
+//           });
 
           
-          // Remove unused attributes
-          // $('*').removeAttr('style');
-          $("*").each(function () {
-            const allowedAttributes = ["src", "href"];
+//           // Remove unused attributes
+//           // $('*').removeAttr('style');
+//           $("*").each(function () {
+//             const allowedAttributes = ["src", "href"];
 
-            // Get all attributes of the current element
-            const attributes = this.attribs;
+//             // Get all attributes of the current element
+//             const attributes = this.attribs;
 
-            // Check each attribute
-            for (const attr in attributes) {
-              if (attributes[attr] && !allowedAttributes.includes(attr)) {
-                // Remove the non-allowed attributes
-                delete attributes[attr];
-              }
-            }
-          });
+//             // Check each attribute
+//             for (const attr in attributes) {
+//               if (attributes[attr] && !allowedAttributes.includes(attr)) {
+//                 // Remove the non-allowed attributes
+//                 delete attributes[attr];
+//               }
+//             }
+//           });
           
-          // removeEmptyElements("body");
+//           // removeEmptyElements("body");
 
-          // Get the modified HTML
-          const content = $("body").html().replace(/\s+/g, " ").trim();
-          const minifiedContent = content;
-          // trainingListObj.webPage.content = content;
+//           // Get the modified HTML
+//           const content = $("body").html().replace(/\s+/g, " ").trim();
+//           const minifiedContent = content;
+//           // trainingListObj.webPage.content = content;
 
-          function splitContent(content, maxLength) {
-            const parts = [];
-            let start = 0;        
-            while (start < content.length) {
-                const part = content.substr(start, maxLength);
-                parts.push({ content: part });
-                start += maxLength;
-            }        
-            return parts;
-          }
+//           function splitContent(content, maxLength) {
+//             const parts = [];
+//             let start = 0;        
+//             while (start < content.length) {
+//                 const part = content.substr(start, maxLength);
+//                 parts.push({ content: part });
+//                 start += maxLength;
+//             }        
+//             return parts;
+//           }
 
-          const maxLength = 1200;
-          const mappings = [{ content: `<div>URL: ${webPageURL} <br/>Title: ${title} <br/>Meta Description: ${metaDescription} <br/></div>`},...splitContent(content, maxLength)];
-          // console.log(mappings);
+//           const maxLength = 1200;
+//           const mappings = [{ content: `<div>URL: ${webPageURL} <br/>Title: ${title} <br/>Meta Description: ${metaDescription} <br/></div>`},...splitContent(content, maxLength)];
+//           // console.log(mappings);
 
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-            'webPage.title': title,  
-            'webPage.metaDescription': metaDescription, 
-            'webPage.content': minifiedContent, 
-            'mappings': mappings,  
-            'lastEdit': Date.now(),  
-            'trainingProcessStatus.minifyingStatus': 2,  
-            'trainingProcessStatus.minifyingDuration.end': Date.now(),  
-            'trainingStatus': 3
-          });
-          trainingListObj.trainingStatus = 3;
-        }
-        catch(error) {
-          console.log("Error in minifying "+trainingListObj.webPage.url);
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-            'lastEdit': Date.now(),  
-            'trainingProcessStatus.minifyingStatus': 3,
-            'trainingStatus': 9
-          });
-          trainingListObj.trainingStatus = 9;
-          console.log(error);
-        }
-      }));
-      if(trainingListObjArray.length) {
-        const list = trainingListObjArray.map(({ _id, trainingStatus }) => ({ _id, trainingStatus }));
-        req.io.to('user'+userId).emit('web-pages-minified',{
-          list
-        });
+//           await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
+//             'webPage.title': title,  
+//             'webPage.metaDescription': metaDescription, 
+//             'webPage.content': minifiedContent, 
+//             'mappings': mappings,  
+//             'lastEdit': Date.now(),  
+//             'trainingProcessStatus.minifyingStatus': 2,  
+//             'trainingProcessStatus.minifyingDuration.end': Date.now(),  
+//             'trainingStatus': 3
+//           });
+//           trainingListObj.trainingStatus = 3;
+//         }
+//         catch(error) {
+//           console.log("Error in minifying "+trainingListObj.webPage.url);
+//           await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
+//             'lastEdit': Date.now(),  
+//             'trainingProcessStatus.minifyingStatus': 3,
+//             'trainingStatus': 9
+//           });
+//           trainingListObj.trainingStatus = 9;
+//           console.log(error);
+//         }
+//       }));
+//       if(trainingListObjArray.length) {
+//         const list = trainingListObjArray.map(({ _id, trainingStatus }) => ({ _id, trainingStatus }));
+//         req.io.to('user'+userId).emit('web-pages-minified',{
+//           list
+//         });
 
-        webPageMapping(client, userId, req);
-      }
-    } while (trainingListObjArray.length > 0); 
-    // }
-    clientStatus[userId] = { webPageMinifying: false };
-  }
-  catch (error) {
-    console.error("Error in webpage mapping", error);
-    clientStatus[userId] = { webPageMinifying: false };
-  }
-}
+//         webPageMapping(client, userId, req);
+//       }
+//     } while (trainingListObjArray.length > 0); 
+//     // }
+//     clientStatus[userId] = { webPageMinifying: false };
+//   }
+//   catch (error) {
+//     console.error("Error in webpage mapping", error);
+//     clientStatus[userId] = { webPageMinifying: false };
+//   }
+// }
 
-async function webPageCrawling(client, userId, req) {
-  try {
-    if(clientStatus[userId] && clientStatus[userId].webPageCrawling) {
-      // setTimeout
-      return;
-    }
-    clientStatus[userId] = { webPageCrawling: true };
-    let trainingListObjArray = [];
-    do {
-      trainingListObjArray = await TrainingList.find({
-        userId,
-        type: 0,
-        trainingStatus: 1,
-        // $or: [
-        //   { 'webPage': { $exists: false } },
-        //   { 'webPage.crawlingStatus': { $nin: [2, 3] } }
-        // ]
-      }).limit(10);
+// async function webPageCrawling(client, userId, req) {
+//   try {
+//     if(clientStatus[userId] && clientStatus[userId].webPageCrawling) {
+//       // setTimeout
+//       return;
+//     }
+//     clientStatus[userId] = { webPageCrawling: true };
+//     let trainingListObjArray = [];
+//     do {
+//       trainingListObjArray = await TrainingList.find({
+//         userId,
+//         type: 0,
+//         trainingStatus: 1,
+//         // $or: [
+//         //   { 'webPage': { $exists: false } },
+//         //   { 'webPage.crawlingStatus': { $nin: [2, 3] } }
+//         // ]
+//       }).limit(10);
       
-      await Promise.all(trainingListObjArray.map(async (trainingListObj) => {        
-        await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-          'trainingProcessStatus.crawlingStatus': 1, 
-          'trainingProcessStatus.crawlingDuration.start': Date.now()
-        });
-        const url = trainingListObj.webPage.url;        
-        try {
-          // console.log("url", url);
-          let config = {
-            method: 'get',
-            maxBodyLength: Infinity,
-            url: url,
-            headers: { }
-          };
-          const response = await axios.request(config);
+//       await Promise.all(trainingListObjArray.map(async (trainingListObj) => {        
+//         await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
+//           'trainingProcessStatus.crawlingStatus': 1, 
+//           'trainingProcessStatus.crawlingDuration.start': Date.now()
+//         });
+//         const url = trainingListObj.webPage.url;        
+//         try {
+//           // console.log("url", url);
+//           let config = {
+//             method: 'get',
+//             maxBodyLength: Infinity,
+//             url: url,
+//             headers: { }
+//           };
+//           const response = await axios.request(config);
           
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-            'webPage.sourceCode': response.data,
-            'trainingProcessStatus.crawlingStatus': 2,
-            'trainingProcessStatus.crawlingDuration.end': Date.now(), 
-            'trainingStatus': 2, 
-          });
-          trainingListObj.trainingStatus = 2;
-        }
-        catch(error) {
-          console.log("Error in scrapping "+url);
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-            'trainingProcessStatus.crawlingStatus': 3,
-            'lastEdit': Date.now(), 
-            'trainingStatus': 9,  // Error
-          });
-          trainingListObj.trainingStatus = 9;
-          console.log(error);
-        }
-      }));
+//           await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
+//             'webPage.sourceCode': response.data,
+//             'trainingProcessStatus.crawlingStatus': 2,
+//             'trainingProcessStatus.crawlingDuration.end': Date.now(), 
+//             'trainingStatus': 2, 
+//           });
+//           trainingListObj.trainingStatus = 2;
+//         }
+//         catch(error) {
+//           console.log("Error in scrapping "+url);
+//           await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
+//             'trainingProcessStatus.crawlingStatus': 3,
+//             'lastEdit': Date.now(), 
+//             'trainingStatus': 9,  // Error
+//           });
+//           trainingListObj.trainingStatus = 9;
+//           console.log(error);
+//         }
+//       }));
       
-      if(trainingListObjArray.length) {
-        const updatedCrawledCount = await TrainingList.countDocuments({
-          userId: new ObjectId(userId),
-          type: 0,
-          'trainingProcessStatus.crawlingStatus': 2
-        }).exec();
-        const list = trainingListObjArray.map(({ _id, trainingStatus }) => ({ _id, trainingStatus }));
-        req.io.to('user'+userId).emit('web-pages-crawled',{
-          updatedCrawledCount,
-          list
-        });
+//       if(trainingListObjArray.length) {
+//         const updatedCrawledCount = await TrainingList.countDocuments({
+//           userId: new ObjectId(userId),
+//           type: 0,
+//           'trainingProcessStatus.crawlingStatus': 2
+//         }).exec();
+//         const list = trainingListObjArray.map(({ _id, trainingStatus }) => ({ _id, trainingStatus }));
+//         req.io.to('user'+userId).emit('web-pages-crawled',{
+//           updatedCrawledCount,
+//           list
+//         });
 
-        webPageMinifying(client, userId, req);
-      }
-    } while (trainingListObjArray.length > 0); // Loop end
-    clientStatus[userId] = { webPageCrawling: false };
-  }
-  catch(error) {
-    console.error("Error in webpage scrapping", error);
-    clientStatus[userId] = { webPageCrawling: false };
-  }
-}
+//         webPageMinifying(client, userId, req);
+//       }
+//     } while (trainingListObjArray.length > 0); // Loop end
+//     clientStatus[userId] = { webPageCrawling: false };
+//   }
+//   catch(error) {
+//     console.error("Error in webpage scrapping", error);
+//     clientStatus[userId] = { webPageCrawling: false };
+//   }
+// }
 
-ScraperController.scrape = async (req, res) => {
-  const { sitemap } = req.body;
-  const userId = req.body.userId;
-  try {
-    const client = await Client.findOne({userId});
-    if(client.sitemapScrappingStatus + client.webPageScrappingStatus == 0) {
-      const existingSitemap = await Sitemap.findOne({ userId, url: sitemap });
-      if (existingSitemap) {
-        res.status(200).json({ status_code: 200, message: "Sitemap already added." });
-      } else {
-        // Create Sitemap
-        let sitemapObj = await Sitemap.create({userId, url: sitemap });
-        res.status(201).json({ status_code: 200, message: "Scraping process initiated." });
-        client.sitemapScrappingStatus = 1;
-        await client.save();
-        // Recursive function to scrape nested sitemaps
-        //const scrapeSitemap = async (sitemapObj) => {
-        while(sitemapObj) {
-          try {
-            let config = {
-              method: 'get',
-              maxBodyLength: Infinity,
-              url: sitemapObj.url,
-              headers: { }
-            };
-            const sitemapResponse = await axios.request(config);
-            const $ = cheerio.load(sitemapResponse.data);
+// ScraperController.scrape = async (req, res) => {
+//   const { sitemap } = req.body;
+//   const userId = req.body.userId;
+//   try {
+//     const client = await Client.findOne({userId});
+//     if(client.sitemapScrappingStatus + client.webPageScrappingStatus == 0) {
+//       const existingSitemap = await Sitemap.findOne({ userId, url: sitemap });
+//       if (existingSitemap) {
+//         res.status(200).json({ status_code: 200, message: "Sitemap already added." });
+//       } else {
+//         // Create Sitemap
+//         let sitemapObj = await Sitemap.create({userId, url: sitemap });
+//         res.status(201).json({ status_code: 200, message: "Scraping process initiated." });
+//         client.sitemapScrappingStatus = 1;
+//         await client.save();
+//         // Recursive function to scrape nested sitemaps
+//         //const scrapeSitemap = async (sitemapObj) => {
+//         while(sitemapObj) {
+//           try {
+//             let config = {
+//               method: 'get',
+//               maxBodyLength: Infinity,
+//               url: sitemapObj.url,
+//               headers: { }
+//             };
+//             const sitemapResponse = await axios.request(config);
+//             const $ = cheerio.load(sitemapResponse.data);
 
-            const webPageLocs = $("loc:not(sitemap loc)")
-              .map((index, element) => $(element).text())
-              .get(); 
-            // const insertedWebPages = await insertOrUpdateWebPageRecords(webPageLocs, userId, sitemapObj._id);
-            // insertOrUpdateWebPageRecords(webPageLocs, userId, sitemapObj._id)
-            //   .then((insertedWebPages) => {
-              // })
-              // .catch(error => console.error('Error:', error));  
-            if(webPageLocs.length) {
-              await createTrainingListAndWebPages(webPageLocs, userId, sitemapObj._id);
-              req.io.to('user'+userId).emit('web-pages-added');
-              webPageCrawling(client, userId, req);
-            }
+//             const webPageLocs = $("loc:not(sitemap loc)")
+//               .map((index, element) => $(element).text())
+//               .get(); 
+//             // const insertedWebPages = await insertOrUpdateWebPageRecords(webPageLocs, userId, sitemapObj._id);
+//             // insertOrUpdateWebPageRecords(webPageLocs, userId, sitemapObj._id)
+//             //   .then((insertedWebPages) => {
+//               // })
+//               // .catch(error => console.error('Error:', error));  
+//             if(webPageLocs.length) {
+//               await createTrainingListAndWebPages(webPageLocs, userId, sitemapObj._id);
+//               req.io.to('user'+userId).emit('web-pages-added');
+//               webPageCrawling(client, userId, req);
+//             }
 
-            // const delayInMilliseconds = 1000;
-            const sitemapLocs = $("sitemap loc")
-              .map((index, element) => $(element).text())
-              .get();
-            if(sitemapLocs.length) {
-              const insertedSitemaps = await insertOrUpdateSitemapRecords(sitemapLocs, userId, sitemapObj._id);
-            }
-            // insertOrUpdateSitemapRecords(sitemapLocs, userId, sitemapObj._id)
-            //   .then(async (insertedSitemaps) => {
-                // insertedSitemaps.insertedRecords.map(async (sitemapObj) => {
+//             // const delayInMilliseconds = 1000;
+//             const sitemapLocs = $("sitemap loc")
+//               .map((index, element) => $(element).text())
+//               .get();
+//             if(sitemapLocs.length) {
+//               const insertedSitemaps = await insertOrUpdateSitemapRecords(sitemapLocs, userId, sitemapObj._id);
+//             }
+//             // insertOrUpdateSitemapRecords(sitemapLocs, userId, sitemapObj._id)
+//             //   .then(async (insertedSitemaps) => {
+//                 // insertedSitemaps.insertedRecords.map(async (sitemapObj) => {
 
-                // for (const sitemapObj of insertedSitemaps.insertedRecords) {
-                //   await scrapeSitemap(sitemapObj);
-                //   await Sitemap.findByIdAndUpdate(sitemapObj._id, { status: 1 });
-                //   await new Promise(resolve => setTimeout(resolve, delayInMilliseconds));
-                // }
+//                 // for (const sitemapObj of insertedSitemaps.insertedRecords) {
+//                 //   await scrapeSitemap(sitemapObj);
+//                 //   await Sitemap.findByIdAndUpdate(sitemapObj._id, { status: 1 });
+//                 //   await new Promise(resolve => setTimeout(resolve, delayInMilliseconds));
+//                 // }
 
-              // })
-              // .catch(error => console.error('Error:', error));        
+//               // })
+//               // .catch(error => console.error('Error:', error));        
             
 
-            // await Promise.all(urlPromises);
-            // await sitemapObj.save();
+//             // await Promise.all(urlPromises);
+//             // await sitemapObj.save();
 
-            // Emit socket event: Scraping completed for this sitemap
-          }
-          catch(error) {
-            console.log("Error in scrapping "+sitemapObj.url);
-            console.log(error);
-          }
-          sitemapObj.status = 1;
-          await sitemapObj.save();
-          // await Sitemap.findByIdAndUpdate(sitemapObj._id, { status: 1 });
-          sitemapObj = await Sitemap.findOne({ userId, status: 0 });
-        } // Loop end
+//             // Emit socket event: Scraping completed for this sitemap
+//           }
+//           catch(error) {
+//             console.log("Error in scrapping "+sitemapObj.url);
+//             console.log(error);
+//           }
+//           sitemapObj.status = 1;
+//           await sitemapObj.save();
+//           // await Sitemap.findByIdAndUpdate(sitemapObj._id, { status: 1 });
+//           sitemapObj = await Sitemap.findOne({ userId, status: 0 });
+//         } // Loop end
 
-        // Start scraping from the main sitemap
-        // await scrapeSitemap(sitemapObj);
+//         // Start scraping from the main sitemap
+//         // await scrapeSitemap(sitemapObj);
 
-        // Update Sitemap status
-        // await Sitemap.findByIdAndUpdate(sitemapObj._id, { status: 1 });
-        // req.io.to('user'+userId).emit('web-page-added');
-        // console.log("Done sitemap scrapping");
-        client.sitemapScrappingStatus = 0;
-        await client.save();
-      }
-    }
-    else if(client.sitemapScrappingStatus == 1) {
-      res.status(200).json({ status_code: 200, message: "Sitemap scrapping already in progress" });
-    }
-    else if(client.webPageScrappingStatus == 1) {
-      res.status(200).json({ status_code: 200, message: "Web-page scrapping already in progress" });
-    }
-    // await Client.updateOne({id:userId},{webPageAdded:true})
-  } catch (error) {
-    console.error(error);
-    // Emit socket event: Scraping failed
-    req.io.emit("scrapingFailed", { message: "Scraping process failed." });
-  }
-};
+//         // Update Sitemap status
+//         // await Sitemap.findByIdAndUpdate(sitemapObj._id, { status: 1 });
+//         // req.io.to('user'+userId).emit('web-page-added');
+//         // console.log("Done sitemap scrapping");
+//         client.sitemapScrappingStatus = 0;
+//         await client.save();
+//       }
+//     }
+//     else if(client.sitemapScrappingStatus == 1) {
+//       res.status(200).json({ status_code: 200, message: "Sitemap scrapping already in progress" });
+//     }
+//     else if(client.webPageScrappingStatus == 1) {
+//       res.status(200).json({ status_code: 200, message: "Web-page scrapping already in progress" });
+//     }
+//     // await Client.updateOne({id:userId},{webPageAdded:true})
+//   } catch (error) {
+//     console.error(error);
+//     // Emit socket event: Scraping failed
+//     req.io.emit("scrapingFailed", { message: "Scraping process failed." });
+//   }
+// };
 ScraperController.getWebPageUrlCount = async (userId) => {
   try {
     const result = await TrainingList.aggregate([
@@ -790,179 +1409,179 @@ ScraperController.getWebPageList = async (userId,skip,limit,sourcetype,actionTyp
 };
 
 
-ScraperController.createSnippet = async (req, res) => {
-  try {
-    const { title, content } = req.body;
-    console.log(req.body, "create snippet body");
-    const file = req.file;
-    const userId = req.body.userId;
+// ScraperController.createSnippet = async (req, res) => {
+//   try {
+//     const { title, content } = req.body;
+//     console.log(req.body, "create snippet body");
+//     const file = req.file;
+//     const userId = req.body.userId;
 
 
-    const snippetData = title && content
-      ? {
-          title,
-          content,
-        }
-      : null;
+//     const snippetData = title && content
+//       ? {
+//           title,
+//           content,
+//         }
+//       : null;
 
-    if(snippetData) {
-      const trainingList1 = new TrainingList({
-        userId,
-        title,
-        type: 2,
-        snippet: snippetData,
-      });
-      await trainingList1.save();
+//     if(snippetData) {
+//       const trainingList1 = new TrainingList({
+//         userId,
+//         title,
+//         type: 2,
+//         snippet: snippetData,
+//       });
+//       await trainingList1.save();
 
-      try {             
-        // Mapping
-        const input =[];
-        async function splitContentAndMapping(content, maxLength) {
-          const parts = [];
-          let start = 0;  
-          while (start < content.length) {
-              const part = content.slice(start, start+maxLength);
-              parts.push({ content: part });
-              input.push(part);
-              start += maxLength;
-          } 
-          return parts;
-        }
-        const maxLength = 1200;
-        const mappings = await splitContentAndMapping(content, maxLength);
-        const embeddingData = await OpenAIController.createEmbedding(input);
-        // console.log("embeddingData", embeddingData);
-        embeddingData.map((data)=>{
-          mappings[data.index]['embeddingValues'] = data.embedding;
-        });
-        await TrainingList.findByIdAndUpdate(trainingList1._id, { 
-          'mappings': mappings,  
-          'lastEdit': Date.now(),   
-          'trainingStatus': 4
-        });
-        await Client.updateOne({id:userId},{docSnippetAdded:true})
-      }
-      catch(error) {
-        console.log("Error in snippet mapping");
-        await TrainingList.findByIdAndUpdate(trainingList1._id, { 
-          'lastEdit': Date.now(),   
-          'trainingStatus': 19
-        });
-        console.log(error);
-      }
-    }
+//       try {             
+//         // Mapping
+//         const input =[];
+//         async function splitContentAndMapping(content, maxLength) {
+//           const parts = [];
+//           let start = 0;  
+//           while (start < content.length) {
+//               const part = content.slice(start, start+maxLength);
+//               parts.push({ content: part });
+//               input.push(part);
+//               start += maxLength;
+//           } 
+//           return parts;
+//         }
+//         const maxLength = 1200;
+//         const mappings = await splitContentAndMapping(content, maxLength);
+//         const embeddingData = await OpenAIController.createEmbedding(input);
+//         // console.log("embeddingData", embeddingData);
+//         embeddingData.map((data)=>{
+//           mappings[data.index]['embeddingValues'] = data.embedding;
+//         });
+//         await TrainingList.findByIdAndUpdate(trainingList1._id, { 
+//           'mappings': mappings,  
+//           'lastEdit': Date.now(),   
+//           'trainingStatus': 4
+//         });
+//         await Client.updateOne({id:userId},{docSnippetAdded:true})
+//       }
+//       catch(error) {
+//         console.log("Error in snippet mapping");
+//         await TrainingList.findByIdAndUpdate(trainingList1._id, { 
+//           'lastEdit': Date.now(),   
+//           'trainingStatus': 19
+//         });
+//         console.log(error);
+//       }
+//     }
 
-    let fileData = null;
-    if (file) {
-      const filePath = path.join(__dirname, '..', file.path);
-      const fileContent = await readFileContent(filePath, file.mimetype);
-      fileData = {
-        fileName: file.filename,
-        originalFileName: file.originalname,
-        path: file.path,
-        content: fileContent,
-      };
+//     let fileData = null;
+//     if (file) {
+//       const filePath = path.join(__dirname, '..', file.path);
+//       const fileContent = await readFileContent(filePath, file.mimetype);
+//       fileData = {
+//         fileName: file.filename,
+//         originalFileName: file.originalname,
+//         path: file.path,
+//         content: fileContent,
+//       };
       
-      const trainingList2 = new TrainingList({
-        userId,
-        title: file.originalname,
-        type: 3,
-        file: fileData,
-      });
-      await trainingList2.save();
+//       const trainingList2 = new TrainingList({
+//         userId,
+//         title: file.originalname,
+//         type: 3,
+//         file: fileData,
+//       });
+//       await trainingList2.save();
 
-      try {            
-        // Mapping
-        const input =[];
-        async function splitContentAndMapping(content, maxLength) {
-          const parts = [];
-          let start = 0;  
-          while (start < content.length) {
-              const part = content.slice(start, start+maxLength);
-              parts.push({ content: part });
-              input.push(part);
-              start += maxLength;
-          }   
-          return parts;
-        }  
-        const maxLength = 1200;
-        const mappings = await splitContentAndMapping(fileContent, maxLength);
-        const embeddingData = await OpenAIController.createEmbedding(input);
-        // console.log("embeddingData", embeddingData);
-        embeddingData.map((data)=>{
-          mappings[data.index]['embeddingValues'] = data.embedding;
-        });
+//       try {            
+//         // Mapping
+//         const input =[];
+//         async function splitContentAndMapping(content, maxLength) {
+//           const parts = [];
+//           let start = 0;  
+//           while (start < content.length) {
+//               const part = content.slice(start, start+maxLength);
+//               parts.push({ content: part });
+//               input.push(part);
+//               start += maxLength;
+//           }   
+//           return parts;
+//         }  
+//         const maxLength = 1200;
+//         const mappings = await splitContentAndMapping(fileContent, maxLength);
+//         const embeddingData = await OpenAIController.createEmbedding(input);
+//         // console.log("embeddingData", embeddingData);
+//         embeddingData.map((data)=>{
+//           mappings[data.index]['embeddingValues'] = data.embedding;
+//         });
   
-        await TrainingList.findByIdAndUpdate(trainingList2._id, { 
-          'mappings': mappings,  
-          'lastEdit': Date.now(),   
-          'trainingStatus': 4
-        });
-      }
-      catch(error) {
-        console.log("Error in snippet mapping");
-        await TrainingList.findByIdAndUpdate(trainingList2._id, { 
-          'lastEdit': Date.now(),   
-          'trainingStatus': 19
-        });
-        console.log(error);
-      }
-    }
+//         await TrainingList.findByIdAndUpdate(trainingList2._id, { 
+//           'mappings': mappings,  
+//           'lastEdit': Date.now(),   
+//           'trainingStatus': 4
+//         });
+//       }
+//       catch(error) {
+//         console.log("Error in snippet mapping");
+//         await TrainingList.findByIdAndUpdate(trainingList2._id, { 
+//           'lastEdit': Date.now(),   
+//           'trainingStatus': 19
+//         });
+//         console.log(error);
+//       }
+//     }
 
-    res.status(201).json({ status_code: 200, message: "Document Saved." });
+//     res.status(201).json({ status_code: 200, message: "Document Saved." });
     
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error in creating snippet, please try again later.' });
-  }
-};
+//   } catch (error) {
+//     console.error(error);
+//     res.status(500).json({ message: 'Server error in creating snippet, please try again later.' });
+//   }
+// };
 
-ScraperController.createFaq = async (req, res) => {
-  const { question, answer } = req.body;
-  const userId = req.body.userId;
-  try {
-    // const client = await Client.findOne({userId});
-    const trainingList = new TrainingList({
-      userId,
-      title: question,
-      type: 1,
-      faq: {
-        question,
-        answer
-      }
-    });
-    await trainingList.save();
-    await Client.updateOne({userId:userId},{faqAdded:true})
-    res.status(201).json({ status_code: 200, message: "FAQ added." });
+// ScraperController.createFaq = async (req, res) => {
+//   const { question, answer } = req.body;
+//   const userId = req.body.userId;
+//   try {
+//     // const client = await Client.findOne({userId});
+//     const trainingList = new TrainingList({
+//       userId,
+//       title: question,
+//       type: 1,
+//       faq: {
+//         question,
+//         answer
+//       }
+//     });
+//     await trainingList.save();
+//     await Client.updateOne({userId:userId},{faqAdded:true})
+//     res.status(201).json({ status_code: 200, message: "FAQ added." });
 
-    try {
-      const embeddingData = await OpenAIController.createEmbedding(question);
-      const embeddingValues = embeddingData[0].embedding;
-      const mappings = [{
-        'content': "Question: ["+question+"] \nAnswer: ["+answer+"]",
-        embeddingValues
-      }]
+//     try {
+//       const embeddingData = await OpenAIController.createEmbedding(question);
+//       const embeddingValues = embeddingData[0].embedding;
+//       const mappings = [{
+//         'content': "Question: ["+question+"] \nAnswer: ["+answer+"]",
+//         embeddingValues
+//       }]
 
-      await TrainingList.findByIdAndUpdate(trainingList._id, { 
-        'mappings': mappings,  
-        'lastEdit': Date.now(),   
-        'trainingStatus': 4
-      });
-    }
-    catch(error) {
-      console.log("Error in faq mapping");
-      await TrainingList.findByIdAndUpdate(trainingList._id, { 
-        'lastEdit': Date.now(),   
-        'trainingStatus': 29
-      });
-      console.log(error);
-    }
-  }
-  catch(error) {
-    console.log("Error in createFaq");
-    console.log(error);
-  }
-};
+//       await TrainingList.findByIdAndUpdate(trainingList._id, { 
+//         'mappings': mappings,  
+//         'lastEdit': Date.now(),   
+//         'trainingStatus': 4
+//       });
+//     }
+//     catch(error) {
+//       console.log("Error in faq mapping");
+//       await TrainingList.findByIdAndUpdate(trainingList._id, { 
+//         'lastEdit': Date.now(),   
+//         'trainingStatus': 29
+//       });
+//       console.log(error);
+//     }
+//   }
+//   catch(error) {
+//     console.log("Error in createFaq");
+//     console.log(error);
+//   }
+// };
 
 ScraperController.toggleActiveStatus = async (req, res) => {
   const { id } = req.body;
