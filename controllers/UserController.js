@@ -42,6 +42,7 @@ UserController.createUser = async (req, res) => {
     await user.save();
     // Generate client specific details
     const client = new Client({userId});
+    client.pineconeIndexName = `pinecone-${userId}`;
     await client.save();
     // Generate widget token and insert in widget table
     const widgetToken = crypto.randomBytes(8).toString('hex') + userId;

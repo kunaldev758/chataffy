@@ -12,6 +12,7 @@ const clientSchema = new mongoose.Schema(
     webPageAdded: { type: Boolean, default: false },
     faqAdded: { type: Boolean, default: false },
     docSnippetAdded: { type: Boolean, default: false },
+    pineconeIndexName: { type: String, required: true, unique: true },
   },
   { timestamps: true }
 );

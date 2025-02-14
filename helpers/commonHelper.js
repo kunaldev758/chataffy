@@ -1,6 +1,6 @@
 const fs = require("fs");
 const jwt = require('jsonwebtoken');
-const TrainingList = require('../models/TrainingList');
+const TrainingList = require('../models/OpenaiTrainingList');
 
 
 async function getWebPageCount(userId) {

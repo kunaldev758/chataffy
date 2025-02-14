@@ -1,38 +1,9 @@
+require("dotenv").config();
 const { OpenAIEmbeddings } = require("@langchain/openai");
 const { Pinecone } = require("@pinecone-database/pinecone");
 const OpenAI = require("openai");
-const mongoose = require("mongoose");
-
-// MongoDB Schema for Chat History
-const ChatSessionSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  messages: [
-    {
-      role: { type: String, enum: ["user", "assistant"], required: true },
-      content: { type: String, required: true },
-      timestamp: { type: Date, default: Date.now },
-    },
-  ],
-  createdAt: { type: Date, default: Date.now },
-  lastUpdated: { type: Date, default: Date.now },
-});
-
-// Add Usage Schema for cost tracking
-const UsageSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  timestamp: { type: Date, default: Date.now },
-  operation: { type: String, required: true }, // 'embedding', 'pinecone_query', 'chat_completion'
-  details: {
-    inputTokens: Number,
-    outputTokens: Number,
-    vectorCount: Number,
-    cost: Number,
-  },
-});
-
-const Usage = mongoose.model("Usage", UsageSchema);
-
-const ChatSession = mongoose.model("ChatSession", ChatSessionSchema);
+const ChatMessageController = require("../controllers/ChatMessageController");
+const Usage = require("../models/UsageSchema");
 
 class PricingCalculator {
   constructor() {
@@ -133,33 +104,14 @@ class QuestionAnsweringSystem {
     };
   }
 
-  async getChatHistory(userId) {
+  async getChatHistory(conversationId) {
     try {
-      let session = await ChatSession.findOne({ userId });
-
-      if (!session) {
-        session = new ChatSession({ userId, messages: [] });
-        await session.save();
-      }
-
+      const session = await ChatMessageController.getRecentChatMessages(
+        conversationId
+      );
       return session;
     } catch (error) {
       console.error("Error getting chat history:", error);
-      throw error;
-    }
-  }
-
-  async addMessageToHistory(userId, role, content) {
-    try {
-      const session = await ChatSession.findOne({ userId });
-
-      if (session) {
-        session.messages.push({ role, content });
-        session.lastUpdated = new Date();
-        await session.save();
-      }
-    } catch (error) {
-      console.error("Error adding message to history:", error);
       throw error;
     }
   }
@@ -168,7 +120,7 @@ class QuestionAnsweringSystem {
     // Get last few messages
     const recentMessages = messages.slice(-this.maxHistoryMessages);
     return recentMessages
-      .map((msg) => `${msg.role}: ${msg.content}`)
+      .map((msg) => `${msg.sender_type}: ${msg.message}`)
       .join("\n");
   }
 
@@ -179,9 +131,9 @@ class QuestionAnsweringSystem {
         messages: [
           {
             role: "system",
-            content: `You are a helpful chat agent for seoant. 
+            content: `You are a helpful chat agent for seoKart. 
                 - Always be professional, friendly, and helpful
-                - Focus on providing information about seoant 
+                - Focus on providing information about seoKart 
                 - If a question is outside your knowledge, politely redirect or suggest visiting the website
                 - Use a conversational but professional tone
                 - Represent the brand's values and mission`,
@@ -207,7 +159,7 @@ class QuestionAnsweringSystem {
     return sortedMatches.map((match) => match.metadata.text).join("\n\n");
   }
 
-  async getAnswer(userId, question, options = {}) {
+  async getAnswer(userId, question, conversationId, options = {}) {
     try {
       const {
         topK = 3,
@@ -223,8 +175,8 @@ class QuestionAnsweringSystem {
       };
 
       // Get chat history
-      const chatSession = await this.getChatHistory(userId);
-      const chatHistory = this.formatChatHistory(chatSession.messages);
+      const chatSession = await this.getChatHistory(conversationId);
+      const chatHistory = this.formatChatHistory(chatSession);
 
       // Calculate and track embedding cost
       const questionTokens = await this.pricingCalculator.estimateTokens(
@@ -266,9 +218,7 @@ class QuestionAnsweringSystem {
 
       let answer;
       if (relevantMatches.length === 0) {
-        (answer =
-          //   "I couldn't find any relevant information in my knowledge base to answer your question.";
-          `I apologize, but I couldn't find specific information about "${question}" in our knowledge base. 
+        (answer = `I apologize, but I couldn't find specific information about "${question}" in our knowledge base. 
             For the most accurate and up-to-date information, I recommend visiting our website 
             or checking our contact page .`),
           `Thank you for your question. While I couldn't locate exact details about "${question}", 
@@ -307,10 +257,6 @@ class QuestionAnsweringSystem {
       costs.total =
         costs.embedding + costs.pineconeQuery + costs.chatCompletion;
 
-      // Save the interaction to history
-      await this.addMessageToHistory(userId, "user", question);
-      await this.addMessageToHistory(userId, "assistant", answer);
-
       // Prepare sources if requested
       const sources = includeSources
         ? relevantMatches.map((match) => ({
@@ -324,7 +270,7 @@ class QuestionAnsweringSystem {
         answer,
         sources,
         costs,
-        conversationId: chatSession._id,
+        conversationId,
       };
     } catch (error) {
       console.error("Error in getAnswer:", error);
@@ -337,31 +283,27 @@ class QuestionAnsweringSystem {
 }
 
 // Express route handler
-async function handleQuestionAnswer(req, res) {
+async function handleQuestionAnswer(userId, question, conversationId, options) {
   try {
-    const { userId, question, options } = req.body;
-
-    if (!userId || !question) {
-      return res.status(400).json({
-        success: false,
-        error: "userId and question are required",
-      });
+    if (!userId || !question || !conversationId) {
+      throw new Error("userId and question and conversationId are required");
     }
 
     const qa = new QuestionAnsweringSystem();
-    const result = await qa.getAnswer(userId, question, options);
-    res.json(result);
+    const result = await qa.getAnswer(
+      userId,
+      question,
+      conversationId,
+      (options = {})
+    );
+    return result;
   } catch (error) {
     console.error("Error in question handler:", error);
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
-    });
+    throw error;
   }
 }
 
 module.exports = {
   QuestionAnsweringSystem,
   handleQuestionAnswer,
-  ChatSession,
 };

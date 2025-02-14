@@ -7,7 +7,6 @@ const { Node, document } = new JSDOM("").window;
 const SocketController = {};
 const CreditsController = require("../controllers/CreditsController");
 const OpenaiTrainingListController = require("../controllers/OpenaiTrainingListController");
-const OpenaiChatMessageController = require("../controllers/OpenaiChatMessageController");
 const ChatMessageController = require("../controllers/ChatMessageController");
 const VisitorController = require("../controllers/VisitorController");
 const ConversationController = require("../controllers/ConversationController");
@@ -16,7 +15,8 @@ const Widget = require("../models/Widget");
 const Visitor = require("../models/Visitor");
 const Conversation = require("../models/Conversation");
 const ConversationTagController = require("../controllers/ConversationTagController");
-const DashboardController = require('../controllers/DashboardController');
+const DashboardController = require("../controllers/DashboardController");
+const QueryController = require("../controllers/QueryController");
 
 const verifyToken = (token) => {
   return new Promise((resolve, reject) => {
@@ -32,7 +32,7 @@ const verifyToken = (token) => {
 // Middleware function
 const myMiddleware = async (socket, next) => {
   try {
-    const { token, visitorId,widgetId,widgetAuthToken } =
+    const { token, visitorId, widgetId, widgetAuthToken } =
       socket.handshake.query;
 
     // socket.conversationId = conversationId;
@@ -59,15 +59,19 @@ const myMiddleware = async (socket, next) => {
       socket.userId = widget.userId;
       socket.type = "visitor";
 
-      if (visitorId && visitorId !='undefined') {
-        const visitor = await Visitor.findOne({visitorId:visitorId});
+      if (visitorId && visitorId != "undefined") {
+        const visitor = await Visitor.findOne({ visitorId: visitorId });
         socket.visitorId =
           visitor && visitor.userId.toString() === socket.userId.toString()
             ? visitor._id
-            : (await VisitorController.createVisitor(socket.userId,visitorId))._id;
+            : (await VisitorController.createVisitor(socket.userId, visitorId))
+                ._id;
       } else {
-        const visitor = await VisitorController.createVisitor(socket.userId,visitorId)
-        socket.visitorId = visitor._id
+        const visitor = await VisitorController.createVisitor(
+          socket.userId,
+          visitorId
+        );
+        socket.visitorId = visitor._id;
       }
     } else {
       throw new Error("Invalid connection type or credentials.");
@@ -87,7 +91,7 @@ SocketController.handleSocketEvents = (io) => {
 
     if (type === "client") {
       // Join client to their unique room
-      let conversationRoom = ``
+      let conversationRoom = ``;
       const clientRoom = `user-${userId}`;
       socket.join(clientRoom);
 
@@ -105,19 +109,28 @@ SocketController.handleSocketEvents = (io) => {
         });
       });
       socket.on("get-training-list-count", async (data) => {
-        const webPagesCount = await OpenaiTrainingListController.getWebPageUrlCount(userId);
-        const docSnippets = await OpenaiTrainingListController.getSnippetCount(userId);
+        const webPagesCount =
+          await OpenaiTrainingListController.getWebPageUrlCount(userId);
+        const docSnippets = await OpenaiTrainingListController.getSnippetCount(
+          userId
+        );
         // {crawledDocs: 0, totalDocs: 0};
         const faqs = await OpenaiTrainingListController.getFaqCount(userId);
         // {crawledFaqs: 0,totalFaqs: 0};
         socket.emit("get-training-list-count-response", {
           response: "Received data from message",
-          data: {...webPagesCount, ...docSnippets, ...faqs},
+          data: { ...webPagesCount, ...docSnippets, ...faqs },
         });
       });
       socket.on("get-training-list", async (data) => {
-        const {skip ,limit,sourcetype,actionType} = data ;
-        const webPages = await OpenaiTrainingListController.getWebPageList(userId,skip,limit,sourcetype,actionType);
+        const { skip, limit, sourcetype, actionType } = data;
+        const webPages = await OpenaiTrainingListController.getWebPageList(
+          userId,
+          skip,
+          limit,
+          sourcetype,
+          actionType
+        );
         socket.emit("get-training-list-response", {
           response: "Received data from message",
           data: webPages,
@@ -127,27 +140,27 @@ SocketController.handleSocketEvents = (io) => {
       socket.on("get-open-conversations-list", async (data) => {
         try {
           const conv = await Conversation.find({
-            userId:userId,
+            userId: userId,
             conversationOpenStatus: "open",
-          }).sort({createdAt:-1} );
+          }).sort({ createdAt: -1 });
 
           const updatedVisitors = await Promise.all(
             conv.map(async (conv) => {
-              const conversation = conv.toObject(); 
-              const visitor = await Visitor.findOne({_id:conv.visitor})
-              conversation['visitor'] = visitor
-              return conversation; 
+              const conversation = conv.toObject();
+              const visitor = await Visitor.findOne({ _id: conv.visitor });
+              conversation["visitor"] = visitor;
+              return conversation;
             })
           );
-    
+
           // Emit the response back to the frontend
           socket.emit("get-open-conversations-list-response", {
             status: "success",
-            conversations:updatedVisitors,
+            conversations: updatedVisitors,
           });
         } catch (error) {
           console.error("Error fetching conversations list:", error);
-    
+
           // Emit an error response
           socket.emit("get-open-conversations-list-response", {
             status: "error",
@@ -158,27 +171,24 @@ SocketController.handleSocketEvents = (io) => {
 
       socket.on("get-close-conversations-list", async (data) => {
         try {
-          const visitors = await Visitor.find({
-            userId,
+          const conv = await Conversation.find({
+            userId: userId,
             conversationOpenStatus: "close",
-            // lastMessage: { $exists: true },
           }).sort({ createdAt: -1 });
+
           const updatedVisitors = await Promise.all(
-            visitors.map(async (visitorDoc) => {
-              const visitor = visitorDoc.toObject(); // Convert to plain object
-              const conv = await Conversation.find({
-                visitor: visitor._id,
-                conversationOpenStatus: "close",
-              });
-              visitor["conversation"] = conv;
-              return visitor; // Return modified visitor
+            conv.map(async (conv) => {
+              const conversation = conv.toObject();
+              const visitor = await Visitor.findOne({ _id: conv.visitor });
+              conversation["visitor"] = visitor;
+              return conversation;
             })
           );
-    
+
           // Emit the response back to the frontend
           socket.emit("get-close-conversations-list-response", {
             status: "success",
-            conversations:updatedVisitors,
+            conversations: updatedVisitors,
           });
         } catch (error) {
           console.error("Error fetching close conversations list:", error);
@@ -190,16 +200,16 @@ SocketController.handleSocketEvents = (io) => {
         }
       });
 
-      socket.on("set-conversation-id", async ({conversationId} , callback) => {
-        try{
+      socket.on("set-conversation-id", async ({ conversationId }, callback) => {
+        try {
           socket.leave(conversationRoom);
-          conversationRoom = `conversation-${conversationId}`
+          conversationRoom = `conversation-${conversationId}`;
           socket.join(conversationRoom);
-        }catch(error){
+        } catch (error) {
           console.error("set-conversation-id error:", error.message);
-            callback?.({ success: false, error: error.message });
+          callback?.({ success: false, error: error.message });
         }
-      })
+      });
 
       socket.on("message-seen", async ({ conversationId }, callback) => {
         try {
@@ -213,20 +223,24 @@ SocketController.handleSocketEvents = (io) => {
         }
       });
 
-      socket.on("client-send-message", async ({ message, visitorId }, callback) => {
+      socket.on(
+        "client-send-message",
+        async ({ message, visitorId }, callback) => {
           try {
             const conversation =
-              await ConversationController.getOpenConversation(visitorId,userId);
-            const conversationId = conversation?._id || null;
-
-            const chatMessage =
-              await OpenaiChatMessageController.createChatMessage(
-                conversationId,
+              await ConversationController.getOpenConversation(
                 visitorId,
-                "agent",
-                message,
                 userId
               );
+            const conversationId = conversation?._id || null;
+
+            const chatMessage = await ChatMessageController.createChatMessage(
+              conversationId,
+              visitorId,
+              "agent",
+              message,
+              userId
+            );
 
             io.to(`conversation-${visitorId}`).emit(
               "conversation-append-message",
@@ -240,14 +254,16 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on("client-send-add-note", async ({ message, visitorId, conversationId }, callback) => {
+      socket.on(
+        "client-send-add-note",
+        async ({ message, visitorId, conversationId }, callback) => {
           try {
             const note = await ChatMessageController.addNoteToChat(
               visitorId,
               "agent",
               message,
               conversationId,
-              userId,
+              userId
             );
             callback?.({ success: true, note });
           } catch (error) {
@@ -257,10 +273,14 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on("get-all-note-messages", async ({ conversationId }, callback) => {
+      socket.on(
+        "get-all-note-messages",
+        async ({ conversationId }, callback) => {
           try {
-            const notes =await ChatMessageController.getAllChatNotesMessages(conversationId)
-            callback?.({ success: true, notes:notes });
+            const notes = await ChatMessageController.getAllChatNotesMessages(
+              conversationId
+            );
+            callback?.({ success: true, notes: notes });
           } catch (error) {
             console.error("get-all-note-messages error:", error.message);
             callback?.({ success: false, error: error.message });
@@ -268,23 +288,31 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on("get-visitor-old-conversations", async ({ visitorId }, callback) => {
+      socket.on(
+        "get-visitor-old-conversations",
+        async ({ visitorId }, callback) => {
           try {
-            const conversations =await ConversationController.getAllOldConversations(visitorId)
-            callback?.({ success: true, conversations:conversations });
+            const conversations =
+              await ConversationController.getAllOldConversations(visitorId);
+            callback?.({ success: true, conversations: conversations });
           } catch (error) {
-            console.error("get-visitor-old-conversations error:", error.message);
+            console.error(
+              "get-visitor-old-conversations error:",
+              error.message
+            );
             callback?.({ success: false, error: error.message });
           }
         }
       );
 
-      socket.on("add-conversation-tag", async ({ name, conversationId }, callback) => {
+      socket.on(
+        "add-conversation-tag",
+        async ({ name, conversationId }, callback) => {
           try {
             const updatedTags = await ConversationTagController.createTag({
               name,
               conversationId,
-              userId
+              userId,
             });
             callback({ success: true, tags: updatedTags });
           } catch (error) {
@@ -293,12 +321,14 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on("get-conversation-tags", async ({ conversationId }, callback) => {
+      socket.on(
+        "get-conversation-tags",
+        async ({ conversationId }, callback) => {
           try {
             const tags =
               await ConversationTagController.getAllTagsOfConversation({
                 conversationId,
-              }); 
+              });
             callback({ success: true, tags });
           } catch (error) {
             callback({ success: false, error: error.message });
@@ -306,11 +336,13 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on("remove-conversation-tag", async ({ id, conversationId }, callback) => {
+      socket.on(
+        "remove-conversation-tag",
+        async ({ id, conversationId }, callback) => {
           try {
             const updatedTags = await ConversationTagController.deleteTagById({
               id,
-            }); 
+            });
             callback({ success: true, tags: updatedTags });
           } catch (error) {
             callback({ success: false, error: error.message });
@@ -318,42 +350,52 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on("close-conversation", async ({ conversationId, status }, callback) => {
+      socket.on(
+        "close-conversation",
+        async ({ conversationId, status }, callback) => {
           try {
             let conversation = await Conversation.findOne({
-              _id:conversationId,
-              conversationOpenStatus: "open" }
-            );
-            let visitorId = conversation?.visitor
-            
+              _id: conversationId,
+              conversationOpenStatus: "open",
+            });
+            let visitorId = conversation?.visitor;
+
             await ConversationController.UpdateConversationStatusOpenClose(
               conversationId,
-              status,
-            ); 
-       
+              status
+            );
+
             callback({ success: true });
-            io.to(`conversation-${visitorId}`).emit('visitor-conversation-close', {conversationStatus:'close' });
+            io.to(`conversation-${visitorId}`).emit(
+              "visitor-conversation-close",
+              { conversationStatus: "close" }
+            );
           } catch (error) {
             callback({ success: false, error: error.message });
           }
         }
       );
 
-      socket.on("block-visitor", async ({ visitorId,conversationId }, callback) => {
-        try {
-          await VisitorController.blockVisitor({ visitorId }); 
+      socket.on(
+        "block-visitor",
+        async ({ visitorId, conversationId }, callback) => {
+          try {
+            await VisitorController.blockVisitor({ visitorId });
 
-          await ConversationController.UpdateConversationStatusOpenClose(
-            conversationId,
-            "close",
-          ); 
+            await ConversationController.UpdateConversationStatusOpenClose(
+              conversationId,
+              "close"
+            );
 
-          callback({ success: true });
-          io.to(`conversation-${visitorId}`).emit('visitor-blocked', {conversationStatus:'close' });
-        } catch (error) {
-          callback({ success: false, error: error.message });
+            callback({ success: true });
+            io.to(`conversation-${visitorId}`).emit("visitor-blocked", {
+              conversationStatus: "close",
+            });
+          } catch (error) {
+            callback({ success: false, error: error.message });
+          }
         }
-      });
+      );
 
       socket.on("close-ai-response", async ({ conversationId }, callback) => {
         try {
@@ -364,10 +406,12 @@ SocketController.handleSocketEvents = (io) => {
         }
       });
 
-
       socket.on("search-conversations", async ({ query }, callback) => {
         try {
-          const visitors = await ConversationController.searchByTagOrName(query,userId)
+          const visitors = await ConversationController.searchByTagOrName(
+            query,
+            userId
+          );
           callback({ success: true, data: visitors });
         } catch (error) {
           console.error("Error during search:", error);
@@ -379,7 +423,10 @@ SocketController.handleSocketEvents = (io) => {
       socket.on("fetch-dashboard-data", async ({ dateRange }, callback) => {
         try {
           // Fetch data from the database based on date range
-          const data = await DashboardController.getDashboardData(dateRange,socket.userId);
+          const data = await DashboardController.getDashboardData(
+            dateRange,
+            socket.userId
+          );
           callback({ success: true, data });
         } catch (error) {
           console.error("Error fetching dashboard data:", error);
@@ -404,49 +451,52 @@ SocketController.handleSocketEvents = (io) => {
       const VisitorRoom = `conversation-${visitorId}`;
       socket.join(VisitorRoom);
 
-      socket.on("visitor-ip",async({ip},callback)=>{
-        try{
-          const visitorDetail = await Visitor.findOne({ip:ip})
-          if(visitorDetail.is_blocked == true){
-            io.to(`conversation-${visitorId}`).emit('visitor-is-blocked', {});
+      socket.on("visitor-ip", async ({ ip }, callback) => {
+        try {
+          const visitorDetail = await Visitor.findOne({ ip: ip });
+          if (visitorDetail.is_blocked == true) {
+            io.to(`conversation-${visitorId}`).emit("visitor-is-blocked", {});
           }
-        }catch(error){
+        } catch (error) {
           console.error("visitor-ip error:", error.message);
           callback?.({ success: false, error: error.message });
         }
       });
-    
 
       socket.on("visitor-connect", async ({ widgetToken }) => {
         try {
           // Fetch theme settings for the widget
           const themeSettings = await Widget.findOne({ widgetToken });
-    
+
           // Fetch the visitor's conversation history
           let chatMessages = [];
-          chatMessages = await ChatMessageController.getAllChatMessages(visitorId);
-
-          if(chatMessages.length <=0){
-            const conversation = await ConversationController.getOpenConversation(
-              visitorId,
-              userId
-            );
-            const conversationId = conversation?._id || null;
-
-          
-          await OpenaiChatMessageController.createChatMessage(
-            conversationId,
-            visitorId,
-            "bot",
-            themeSettings?.welcomeMessage,
-            userId
+          chatMessages = await ChatMessageController.getAllChatMessages(
+            visitorId
           );
 
-          chatMessages = await ChatMessageController.getAllChatMessages(visitorId);
+          if (chatMessages.length <= 0) {
+            const conversation =
+              await ConversationController.getOpenConversation(
+                visitorId,
+                userId
+              );
+            const conversationId = conversation?._id || null;
 
-          io.to(`user-${userId}`).emit('visitor-connect-list-update', {});
+            await ChatMessageController.createChatMessage(
+              conversationId,
+              visitorId,
+              "bot",
+              themeSettings?.welcomeMessage,
+              userId
+            );
+
+            chatMessages = await ChatMessageController.getAllChatMessages(
+              visitorId
+            );
+
+            io.to(`user-${userId}`).emit("visitor-connect-list-update", {});
           }
-    
+
           // Emit visitor-connect-response with visitor data
           socket.emit("visitor-connect-response", {
             chatMessages,
@@ -458,15 +508,23 @@ SocketController.handleSocketEvents = (io) => {
         }
       });
 
-      socket.on("save-visitor-details",async({location,ip,visitorDetails},callback)=>{
-        try{
-          await VisitorController.updateVisitorById({id:visitorId,location,ip,visitorDetails})
-        }catch(error){
-          console.error("save-visitor-details error:", error.message);
-          callback?.({ success: false, error: error.message });
+      socket.on(
+        "save-visitor-details",
+        async ({ location, ip, visitorDetails }, callback) => {
+          try {
+            await VisitorController.updateVisitorById({
+              id: visitorId,
+              location,
+              ip,
+              visitorDetails,
+            });
+          } catch (error) {
+            console.error("save-visitor-details error:", error.message);
+            callback?.({ success: false, error: error.message });
+          }
         }
-      });
-    
+      );
+
       socket.on("visitor-send-message", async ({ message, id }, callback) => {
         try {
           const conversation = await ConversationController.getOpenConversation(
@@ -476,11 +534,20 @@ SocketController.handleSocketEvents = (io) => {
           const conversationId = conversation?._id || null;
 
           const encodedMessage = encode(message);
-          let chatMessage = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'visitor', "<p>"+encodedMessage+"</p>",userId);
+          let chatMessage = await ChatMessageController.createChatMessage(
+            conversationId,
+            visitorId,
+            "visitor",
+            "<p>" + encodedMessage + "</p>",
+            userId
+          );
 
-          io.to(`conversation-${conversationId}`).emit("conversation-append-message", {
-            chatMessage,
-          });
+          io.to(`conversation-${conversationId}`).emit(
+            "conversation-append-message",
+            {
+              chatMessage,
+            }
+          );
           io.to(`user-${userId}`).emit("new-message-count", {});
 
           await Conversation.updateOne(
@@ -488,30 +555,67 @@ SocketController.handleSocketEvents = (io) => {
             { $inc: { newMessage: 1 } }
           );
           callback?.({ success: true, chatMessage, id });
-         if(conversation.aiChat){
-            response_data = await QueryController.handleQuestionAnswer;
-            io.to(`conversation-${visitorId}`).emit('intermediate-response', {message:"...replying"});
-            io.to(`conversation-${conversationId}`).emit('intermediate-response', {message:"...replying"});
+          if (conversation.aiChat) {
+            response_data = await QueryController.handleQuestionAnswer(
+              userId,
+              message,
+              conversationId
+            );
+            io.to(`conversation-${visitorId}`).emit("intermediate-response", {
+              message: "...replying",
+            });
+            io.to(`conversation-${conversationId}`).emit(
+              "intermediate-response",
+              { message: "...replying" }
+            );
 
-            if(response_data.error) {
-              const chatMessageResponse = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'bot-error', "Error in response",userId);
-              io.to(`conversation-${visitorId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse});
-              io.to(`conversation-${conversationId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse });
-            }
-            else {
-              const chatMessageResponse = await OpenaiChatMessageController.createChatMessage(conversationId, visitorId, 'bot', response_data.reply,userId, response_data.infoSources);
-              io.to(`conversation-${visitorId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse, sources: response_data.sources });
-              io.to(`conversation-${conversationId}`).emit('conversation-append-message', {"chatMessage":chatMessageResponse, sources: response_data.sources });
+            if (response_data.success == true) {
+              const chatMessageResponse =
+                await ChatMessageController.createChatMessage(
+                  conversationId,
+                  "",
+                  "assistant",
+                  response_data.answer,
+                  userId,
+                  response_data?.sources
+                );
+              io.to(`conversation-${visitorId}`).emit(
+                "conversation-append-message",
+                { chatMessage: chatMessageResponse, sources:response_data?.sources }
+              );
+              io.to(`conversation-${conversationId}`).emit(
+                "conversation-append-message",
+                { chatMessage: chatMessageResponse, sources:response_data?.sources }
+              );
+            } else {
+              const chatMessageResponse =
+                await ChatMessageController.createChatMessage(
+                  conversationId,
+                  "",
+                  "assistant",
+                  "error in generating Response",
+                  userId,
+                  // response_data.infoSources
+                );
+              io.to(`conversation-${visitorId}`).emit(
+                "conversation-append-message",
+                { chatMessage: chatMessageResponse }
+              );
+              io.to(`conversation-${conversationId}`).emit(
+                "conversation-append-message",
+                { chatMessage: chatMessageResponse }
+              );
             }
           }
-          
         } catch (error) {
           console.error("visitor-send-message error:", error.message);
           callback?.({ success: false, error: error.message });
         }
       });
 
-      socket.on("conversation-feedback", async ({ conversationId, feedback }, callback) => {
+      socket.on(
+        "conversation-feedback",
+        async ({ conversationId, feedback }, callback) => {
           try {
             const updatedMessage = await ConversationController.updateFeedback(
               conversationId,
@@ -525,15 +629,19 @@ SocketController.handleSocketEvents = (io) => {
         }
       );
 
-      socket.on("close-conversation-visitor",async ({ conversationId, status }, callback) => {
+      socket.on(
+        "close-conversation-visitor",
+        async ({ conversationId, status }, callback) => {
           try {
             await ConversationController.UpdateConversationStatusOpenClose(
               conversationId,
               status
             );
             callback?.({ success: true });
-  
-            io.to(`conversation-${conversationId}`).emit('visitor-close-chat', {conversationStatus:'close' });
+
+            io.to(`conversation-${conversationId}`).emit("visitor-close-chat", {
+              conversationStatus: "close",
+            });
             socket.leave(conversationRoom);
           } catch (error) {
             console.error("close-conversation error:", error.message);
@@ -548,6 +656,5 @@ SocketController.handleSocketEvents = (io) => {
     }
   });
 };
-
 
 module.exports = SocketController;

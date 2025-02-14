@@ -18,9 +18,7 @@ ConversationController.getAllOldConversations = async (visitor_id) => {
         let chatMessagesNotes = await ChatMessage.find({
           conversation_id: conv._id,
         })
-          .sort({ createdAt: -1 })
-          .limit(1)
-          .exec();
+          .sort({ createdAt: -1 });
         chatMessagesNotesList.push(...chatMessagesNotes);
       }
     }

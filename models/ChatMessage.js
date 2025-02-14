@@ -5,11 +5,11 @@ const chatMessageSchema = new Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, required: true , ref: 'User'},
   sender: {
     type: String,
-    required: true,
+    // required: true,
   },
   sender_type: {
     type: String,
-    enum: ['visitor', 'agent', 'bot', 'bot-error', 'system'],
+    enum: ['visitor', 'agent', 'assistant', 'user','bot'],
     required: true,
   },
   is_note:{
@@ -34,17 +34,3 @@ const chatMessageSchema = new Schema({
 
 const ChatMessage = mongoose.model('ChatMessage', chatMessageSchema);
 module.exports = ChatMessage;
-
-
-// const ChatSessionSchema = new mongoose.Schema({
-//   userId: { type: String, required: true },
-//   messages: [
-//     {
-//       role: { type: String, enum: ["user", "assistant"], required: true },
-//       content: { type: String, required: true },
-//       timestamp: { type: Date, default: Date.now },
-//     },
-//   ],
-//   createdAt: { type: Date, default: Date.now },
-//   lastUpdated: { type: Date, default: Date.now },
-// });

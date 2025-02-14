@@ -181,21 +181,33 @@ VisitorController.updateVisitorById = async ({
   visitorDetails,
 }) => {
   try {
-    const transformedVisitorDetails = Object.entries(visitorDetails).map(
-      ([key, value]) => ({
-        field: key,
-        value: value,
-      })
-    );
-    const visitor = await Visitor.findByIdAndUpdate(
-      id,
-      { location, ip, visitorDetails: transformedVisitorDetails },
-      { new: true }
-    );
-    if (!visitor) {
-      return res.status(404).json({ error: "Visitor not found" });
+    if (visitorDetails) {
+      const transformedVisitorDetails = Object.entries(visitorDetails).map(
+        ([key, value]) => ({
+          field: key,
+          value: value,
+        })
+      );
+      const visitor = await Visitor.findByIdAndUpdate(
+        id,
+        { location, ip, visitorDetails: transformedVisitorDetails },
+        { new: true }
+      );
+      if (!visitor) {
+        return res.status(404).json({ error: "Visitor not found" });
+      }
+      return visitor;
+    } else {
+      const visitor = await Visitor.findByIdAndUpdate(
+        id,
+        { location, ip },
+        { new: true }
+      );
+      if (!visitor) {
+        return res.status(404).json({ error: "Visitor not found" });
+      }
+      return visitor;
     }
-    return visitor;
   } catch (error) {
     return error;
   }

@@ -17,6 +17,7 @@ const trainingListSchema = new mongoose.Schema({
       start: Date,
       end: Date,
     },
+    sourceCode: { type: String },
   },
 
   file: { 
@@ -34,6 +35,13 @@ const trainingListSchema = new mongoose.Schema({
   faq: {
     question: { type: String },
     answer: { type: String },
+  },
+
+  costDetails: {
+    totalCost: { type: Number, default: 0 },
+    embedding: { type: Number, default: 0 },
+    storage: { type: Number, default: 0 },
+    tokens: { type: Number, default: 0 },
   }
 
 

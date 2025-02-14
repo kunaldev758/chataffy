@@ -19,7 +19,6 @@ const conversationSchema = new mongoose.Schema(
       required: true,
     },
     newMessage: { type: Number, default: 0 },
-    isSeen: { type: Boolean, default: false },
     createdAt: {
       type: Date,
       default: Date.now,
