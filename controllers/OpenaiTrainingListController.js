@@ -93,26 +93,34 @@ class VectorStoreManager {
     }
 }
 
-async doesIndexExist() {
+async doesIndexExist(pineconeIndexName) {
   try {
       const indexList = await this.pineconeClient.listIndexes();
-      return indexList.indexes.some(index => index.name === this.pineconeIndexName);
+      return indexList.indexes.some(index => index.name === pineconeIndexName);
   } catch (error) {
       console.error("Error checking if index exists:", error);
       return false; // Assume it doesn't exist in case of an error
   }
 }
 
-async createIndex() {
+async createIndex(pineconeIndexName) {
 try {
+  let spec = {
+    serverless: {
+        cloud: 'aws',  // or 'gcp', 'azure'
+        region: 'us-east-1' // Replace with your desired region
+    }
+};
+
     await this.pineconeClient.createIndex({
-        name: this.pineconeIndexName,
+        name: pineconeIndexName,
         dimension: 1536, // Specify the embedding dimension (OpenAI ada)
-        metric: 'cosine' //  Appropriate metric for semantic search
+        metric: 'cosine', //  Appropriate metric for semantic search
+        spec: spec
     });
     console.log(`Pinecone index "${this.pineconeIndexName}" created successfully.`);
     // Optionally, wait for the index to be ready
-    await this.waitForIndexCreation();
+    await this.waitForIndexCreation(pineconeIndexName);
     return true;
 } catch (error) {
     console.error(`Error creating Pinecone index "${this.pineconeIndexName}":`, error);
@@ -120,21 +128,21 @@ try {
 }
 }
 
-async waitForIndexCreation(timeout = 60000) {  // Default timeout: 60 seconds
+async waitForIndexCreation(pineconeIndexName,timeout = 60000) {  // Default timeout: 60 seconds
 const startTime = Date.now();
 while (Date.now() - startTime < timeout) {
     try {
-        const indexDescription = await this.pineconeClient.describeIndex(this.pineconeIndexName);
+        const indexDescription = await this.pineconeClient.describeIndex(pineconeIndexName);
         if (indexDescription.status.ready) {
-            console.log(`Pinecone index "${this.pineconeIndexName}" is ready.`);
+            console.log(`Pinecone index "${pineconeIndexName}" is ready.`);
             return;
         }
     } catch (error) {
-        console.warn(`Error describing index "${this.pineconeIndexName}", retrying...`, error.message);
+        console.warn(`Error describing index "${pineconeIndexName}", retrying...`, error.message);
     }
     await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
 }
-throw new Error(`Timeout waiting for Pinecone index "${this.pineconeIndexName}" to be created.`);
+throw new Error(`Timeout waiting for Pinecone index "${pineconeIndexName}" to be created.`);
 }
 
 
@@ -234,12 +242,13 @@ class ContentProcessor {
     });
   }
 
-   async processWebPage(trainingListObj, req,pineconeIndexName) {
+   async processWebPage(trainingListObj, req) {
       try {
         await TrainingList.findByIdAndUpdate(trainingListObj._id, {
           "trainingProcessStatus.minifyingStatus": 1,
           "trainingProcessStatus.minifyingDuration.start": Date.now(),
         });
+        req.io.to('user'+trainingListObj.userId).emit('web-page-minifying-started', { trainingListId: trainingListObj._id });
   
         const sourceCode = trainingListObj.webPage.sourceCode;
         const $ = cheerio.load(sourceCode);
@@ -379,6 +388,13 @@ class ContentProcessor {
         const totalTokens = await this.pricingCalculator.estimateTokens(content);
         const embeddingCost = this.pricingCalculator.calculateEmbeddingCost(totalTokens);
         // const storageCost = this.pricingCalculator.calculatePineconeStorageCost(chunks.length);
+
+        try{
+          // const usage = new UsageRoutes();
+    // UsageRoutes.addUsage(userId, "question", costs.total);
+  }catch(error){
+    throw new Error("Not Enough Credits");
+  }
   
         // Upsert vectors into Pinecone
         req.io.to('user'+trainingListObj.userId).emit('web-page-status', { message: "Upserting vectors to pinecone" }); // Update client
@@ -415,7 +431,7 @@ class ContentProcessor {
           "trainingProcessStatus.minifyingDuration.end": Date.now(),
           trainingStatus: 4,
         });
-  
+        req.io.to('user'+trainingListObj.userId).emit('web-page-minified', { trainingListId: trainingListObj._id });
         return { success: true, chunks: chunks.length };
       } catch (error) {
         console.error("Error processing webpage:", error);
@@ -423,6 +439,7 @@ class ContentProcessor {
           "trainingProcessStatus.minifyingStatus": 3,
           trainingStatus: 9,
         });
+        req.io.to('user'+trainingListObj.userId).emit('web-page-minifying-failed', { trainingListId: trainingListObj._id, error: error.message });
         return { success: false, error };
       }
     }
@@ -458,6 +475,13 @@ class ContentProcessor {
       const totalTokens = await this.pricingCalculator.estimateTokens(content);
       const embeddingCost = this.pricingCalculator.calculateEmbeddingCost(totalTokens);
       const storageCost = this.pricingCalculator.calculatePineconeStorageCost(chunks.length);
+
+      try{
+              // const usage = new UsageRoutes();
+        // UsageRoutes.addUsage(userId, "question", costs.total);
+      }catch(error){
+        throw new Error("Not Enough Credits");
+      }
 
       const upsertResult = await this.vectorStoreManager.upsertVectors(
         chunks.map(chunk => chunk.pageContent),
@@ -516,6 +540,7 @@ OpenaiTrainingListController.createFaq = async (req, res) => {
       await trainingList.save();
 
       await Client.updateOne({ id: userId }, { faqAdded: true });
+      req.io.to('user'+userId).emit('faq-added', { trainingList }); // Emit FAQ added event
       res
         .status(201)
         .json({ status_code: 200, message: "FAQ added successfully" });
@@ -625,6 +650,23 @@ async function webPageMinifying(client, userId, req,pineconeIndexName) {
       const contentProcessor = new ContentProcessor(pineconeIndexName);
       // await contentProcessor.initialize();
 
+         // **NEW: Check if the index exists and create it if it doesn't.**
+    const vectorStoreManager = contentProcessor.vectorStoreManager; // Access the manager through the processor
+
+    if (!await vectorStoreManager.doesIndexExist(pineconeIndexName)) {
+      console.log(`Index "${pineconeIndexName}" does not exist. Creating...`);
+      const created = await vectorStoreManager.createIndex(pineconeIndexName);
+
+      if (!created) {
+        console.error("Failed to create Pinecone index!");
+        return res.status(500).json({ status: false, message: "Failed to create Pinecone index.  Training aborted." });
+      }
+      console.log(`Index "${pineconeIndexName}" created successfully.`);
+    } else {
+      console.log(`Index "${pineconeIndexName}" already exists.`);
+    }
+
+
       await Promise.all(trainingListObjArray.map(async (trainingListObj) => {
         try {
           const processResult = await contentProcessor.processWebPage(trainingListObj, req,pineconeIndexName);
@@ -689,6 +731,7 @@ async function webPageCrawling(client, userId, req,pineconeIndexName) {
           'trainingProcessStatus.crawlingStatus': 1, 
           'trainingProcessStatus.crawlingDuration.start': Date.now()
         });
+        req.io.to('user'+userId).emit('web-page-crawling-started', { trainingListId: trainingListObj._id });
         const url = trainingListObj.webPage.url;        
         try {
           let config = {
@@ -705,6 +748,7 @@ async function webPageCrawling(client, userId, req,pineconeIndexName) {
             'trainingProcessStatus.crawlingDuration.end': Date.now(), 
             'trainingStatus': 2, 
           });
+          req.io.to('user'+userId).emit('web-page-crawled', { trainingListId: trainingListObj._id });
           trainingListObj.trainingStatus = 2;
         }
         catch(error) {
@@ -714,6 +758,7 @@ async function webPageCrawling(client, userId, req,pineconeIndexName) {
             'lastEdit': Date.now(), 
             'trainingStatus': 9,  // Error
           });
+          req.io.to('user'+userId).emit('web-page-crawling-failed', { trainingListId: trainingListObj._id, error: error.message });
           trainingListObj.trainingStatus = 9;
           console.log(error);
         }
@@ -776,6 +821,7 @@ OpenaiTrainingListController.createSnippet = async (req, res) => {
         });
         await trainingList.save();
         results.push({ type: "snippet", success: true });
+        req.io.to('user'+userId).emit('doc-snippet-added', { trainingList }); // Emit doc/snippet added event
       }
     }
 
@@ -804,6 +850,7 @@ OpenaiTrainingListController.createSnippet = async (req, res) => {
         });
         await trainingList.save();
         results.push({ type: "file", success: true });
+        req.io.to('user'+userId).emit('doc-snippet-added', { trainingList }); // Emit doc/snippet added event
       }
     }
 
@@ -1114,6 +1161,20 @@ OpenaiTrainingListController.toggleActiveStatus = async (req, res) => {
   } catch (error) {
     console.log("Error in status change");
     console.log(error);
+  }
+};
+
+OpenaiTrainingListController.getTrainingStatus = async (req, res) => {
+  const clientId = req.body.userId;
+  try {
+    const data = await Client.findOne({ userId: clientId });
+    res.status(200).send({
+      webpageStatus: data.webPageAdded,
+      faqStatus: data.faqAdded,
+      docSnippetStatus: data.docSnippetAdded,
+    });
+  } catch (err) {
+    res.status(500).send({ message: "Error in fetching status" });
   }
 };
 

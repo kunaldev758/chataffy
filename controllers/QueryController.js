@@ -4,6 +4,9 @@ const { Pinecone } = require("@pinecone-database/pinecone");
 const OpenAI = require("openai");
 const ChatMessageController = require("../controllers/ChatMessageController");
 const Usage = require("../models/UsageSchema");
+const Client = require("../models/Client");
+const Widget = require("../models/Widget");
+const OpenAIUsageController = require("../controllers/OpenAIUsageController");
 
 class PricingCalculator {
   constructor() {
@@ -124,16 +127,16 @@ class QuestionAnsweringSystem {
       .join("\n");
   }
 
-  async generateAnswer(question, context, chatHistory) {
+  async generateAnswer(question, context, chatHistory,organisation) {
     try {
       const response = await this.openai.chat.completions.create({
         model: "gpt-3.5-turbo",
         messages: [
           {
             role: "system",
-            content: `You are a helpful chat agent for seoKart. 
+            content: `You are a helpful chat agent for ${organisation}. 
                 - Always be professional, friendly, and helpful
-                - Focus on providing information about seoKart 
+                - Focus on providing information about ${organisation} 
                 - If a question is outside your knowledge, politely redirect or suggest visiting the website
                 - Use a conversational but professional tone
                 - Represent the brand's values and mission`,
@@ -205,7 +208,12 @@ class QuestionAnsweringSystem {
       });
 
       // Query Pinecone
-      const index = this.pinecone.index(process.env.PINECONE_INDEX_NAME);
+      // const pineconeneIndexName = await Client.findOne({ userId: userId });
+      const client = await Client.findOne({ userId });
+      const widget = await Widget.findOne({ userId });
+      const pineconeIndexName = client.pineconeIndexName;
+
+      const index = this.pinecone.index(pineconeIndexName);
       const queryResponse = await index.query({
         vector: questionEmbedding,
         topK,
@@ -219,10 +227,10 @@ class QuestionAnsweringSystem {
       let answer;
       if (relevantMatches.length === 0) {
         (answer = `I apologize, but I couldn't find specific information about "${question}" in our knowledge base. 
-            For the most accurate and up-to-date information, I recommend visiting our website 
+            For the most accurate and up-to-date information, I recommend visiting our website: ${widget.website} 
             or checking our contact page .`),
           `Thank you for your question. While I couldn't locate exact details about "${question}", 
-            I'd be happy to help you find more information. Please consider visiting our website 
+            I'd be happy to help you find more information. Please consider visiting our website : ${widget.website}
             or reaching out to our support team.`,
           `I appreciate your inquiry about "${question}". However, this specific detail isn't 
             currently in my knowledge base. For comprehensive information, please visit 
@@ -230,7 +238,12 @@ class QuestionAnsweringSystem {
       } else {
         // Get context and generate answer
         const context = await this.getRelevantContext(relevantMatches);
-        answer = await this.generateAnswer(question, context, chatHistory);
+        answer = await this.generateAnswer(
+          question,
+          context,
+          chatHistory,
+          widget.organisation
+        );
 
         // Calculate and track chat completion cost
         const inputTokens = await this.pricingCalculator.estimateTokens(
@@ -256,6 +269,13 @@ class QuestionAnsweringSystem {
       // Calculate total cost
       costs.total =
         costs.embedding + costs.pineconeQuery + costs.chatCompletion;
+      try {
+        // const usage = new UsageRoutes();
+        OpenAIUsageController.recordUsageOfChat(userId, "question", costs.total);
+      } catch (error) {
+        // console.log("error in usage",error);
+        throw new Error("Not Enough Credits");
+      }
 
       // Prepare sources if requested
       const sources = includeSources

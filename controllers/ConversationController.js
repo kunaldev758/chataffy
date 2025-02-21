@@ -121,16 +121,36 @@ ConversationController.searchByTagOrName = async (query, userId) => {
       $and: [{ userId: userId }, { $or: regexConditions }],
     });
 
+  // const updatedVisitors = await Promise.all(
+  //   visitors.map(async (visitorDoc) => {
+  //     const visitor = visitorDoc.toObject(); 
+  //     const conversation = await Conversation.findOne({
+  //       visitor: visitor._id,
+  //     });
+  //     visitor["conversation"] = conversation; 
+  //     return visitor; 
+  //   })
+  // );
+
   const updatedVisitors = await Promise.all(
     visitors.map(async (visitorDoc) => {
-      const visitor = visitorDoc.toObject(); 
+      const visitor = visitorDoc.toObject();
       const conversation = await Conversation.findOne({
         visitor: visitor._id,
-      });
-      visitor["conversation"] = conversation; 
-      return visitor; 
+      }).lean(); // use lean() for a plain JS object
+  
+      if (conversation) {
+        conversation["visitor"] = visitor; // Embed visitor in conversation
+        return conversation;
+      }
+  
+      return null; // Handle cases where there is no conversation
     })
   );
+  
+  // Optional: Filter out null values if you only care about visitors with conversations
+  const filteredConversations = updatedVisitors.filter((conv) => conv !== null);
+  
 
    // Fetch conversations for tags
    const tagConversations = await Promise.all(
@@ -138,13 +158,13 @@ ConversationController.searchByTagOrName = async (query, userId) => {
       const conversation = await Conversation.findOne({ _id: tag.conversation });
       let visitor = await Visitor.findOne({_id:conversation.visitor});
       visitor = visitor.toObject(); 
-      visitor["conversation"] = conversation; 
+      conversation["visitor"] = visitor; 
       return visitor;
     })
   );
 
   const combinedVisitors  = [
-    ...updatedVisitors,
+    ...filteredConversations,
     ...tagConversations.filter(Boolean), 
   ];
 

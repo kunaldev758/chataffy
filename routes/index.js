@@ -39,9 +39,9 @@ router.post('/openaiCreateFaq', OpenaiTrainingListController.createFaq);
 router.post('/openaiToggleActiveStatus', OpenaiTrainingListController.toggleActiveStatus);
 router.post('/getOpenaiTrainingListDetail', OpenaiTrainingListController.getTrainingListDetail);
 
-// router.post('/getTrainingStatus',OpenaiTrainingListController.getTrainingStatus); //add this route
+router.post('/getTrainingStatus',OpenaiTrainingListController.getTrainingStatus); //add this route
 
-router.get('/open-ai-usages-total-cost', OpenAIUsageController.sumTotalCost);
+// router.get('/open-ai-usages-total-cost', OpenAIUsageController.sumTotalCost);
 
 router.post('/getUserCredits', CreditsController.getUserCredits);
 
