@@ -138,8 +138,13 @@ class QuestionAnsweringSystem {
                 - Always be professional, friendly, and helpful
                 - Focus on providing information about ${organisation} 
                 - If a question is outside your knowledge, politely redirect or suggest visiting the website
-                - Use a conversational but professional tone
-                - Represent the brand's values and mission`,
+                - Use a conversational but professional ton
+                - Represent the brand's values and mission
+                - Format responses using proper HTML for display:
+                      - Use <h2> for headings.
+                      - Use <strong> for important words.
+                      - Use <p> for paragraphs.
+                      - Use <ul> and <li> for lists where applicable.`,
           },
           {
             role: "user",
@@ -270,10 +275,8 @@ class QuestionAnsweringSystem {
       costs.total =
         costs.embedding + costs.pineconeQuery + costs.chatCompletion;
       try {
-        // const usage = new UsageRoutes();
-        OpenAIUsageController.recordUsageOfChat(userId, "question", costs.total);
+        OpenAIUsageController.recordUsageOfChat(userId, costs.total);
       } catch (error) {
-        // console.log("error in usage",error);
         throw new Error("Not Enough Credits");
       }
 

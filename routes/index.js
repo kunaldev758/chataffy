@@ -18,7 +18,6 @@ const ChatMessageController = require('../controllers/ChatMessageController');
 const UserController = require('../controllers/UserController');
 const CreditsController = require('../controllers/CreditsController');
 const WidgetController = require('../controllers/WidgetController');
-const OpenAIUsageController = require('../controllers/OpenAIUsageController');
 const middleware = require('../middleware/authMiddleware');
 
 
@@ -40,8 +39,6 @@ router.post('/openaiToggleActiveStatus', OpenaiTrainingListController.toggleActi
 router.post('/getOpenaiTrainingListDetail', OpenaiTrainingListController.getTrainingListDetail);
 
 router.post('/getTrainingStatus',OpenaiTrainingListController.getTrainingStatus); //add this route
-
-// router.get('/open-ai-usages-total-cost', OpenAIUsageController.sumTotalCost);
 
 router.post('/getUserCredits', CreditsController.getUserCredits);
 

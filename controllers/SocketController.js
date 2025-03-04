@@ -35,8 +35,6 @@ const myMiddleware = async (socket, next) => {
     const { token, visitorId, widgetId, widgetAuthToken } =
       socket.handshake.query;
 
-    // socket.conversationId = conversationId;
-
     if (token && !widgetId) {
       // Client Authentication
       const decoded = await verifyToken(token);

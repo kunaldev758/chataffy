@@ -52,7 +52,6 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
     }
 
     const location = await Visitor.find({userId:userId}, { location: 1, _id: 0 })
-    console.log(location,"the location")
    const locationData = transformData(location)
 
     return {

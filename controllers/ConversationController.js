@@ -121,17 +121,6 @@ ConversationController.searchByTagOrName = async (query, userId) => {
       $and: [{ userId: userId }, { $or: regexConditions }],
     });
 
-  // const updatedVisitors = await Promise.all(
-  //   visitors.map(async (visitorDoc) => {
-  //     const visitor = visitorDoc.toObject(); 
-  //     const conversation = await Conversation.findOne({
-  //       visitor: visitor._id,
-  //     });
-  //     visitor["conversation"] = conversation; 
-  //     return visitor; 
-  //   })
-  // );
-
   const updatedVisitors = await Promise.all(
     visitors.map(async (visitorDoc) => {
       const visitor = visitorDoc.toObject();
@@ -155,11 +144,16 @@ ConversationController.searchByTagOrName = async (query, userId) => {
    // Fetch conversations for tags
    const tagConversations = await Promise.all(
     tags.map(async (tag) => {
-      const conversation = await Conversation.findOne({ _id: tag.conversation });
-      let visitor = await Visitor.findOne({_id:conversation.visitor});
-      visitor = visitor.toObject(); 
-      conversation["visitor"] = visitor; 
-      return visitor;
+      // const visitor = visitorDoc.toObject();
+      const conversation = await Conversation.findOne({ _id: tag.conversation }).lean();
+  
+      if (conversation) {
+        const visitor = await Visitor.findOne({ _id: conversation.visitor }).lean();
+        conversation["visitor"] = visitor; // Embed visitor in conversation
+        return conversation;
+      }
+  
+      return null; // Handle cases where there is no conversation
     })
   );
 

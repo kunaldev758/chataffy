@@ -1,7 +1,5 @@
 const mongoose = require('mongoose');
 const {Schema} = mongoose;
-// const {dbName} = require('../../config/database');
-// const db = mongoose.connection.useDb(dbName);
 
 const conversationTagSchema = new mongoose.Schema({
   name: {
