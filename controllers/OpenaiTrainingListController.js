@@ -17,6 +17,8 @@ const Sitemap = require("../models/Sitemap");
 const TrainingList = require("../models/OpenaiTrainingList");
 const urlModule = require("url");
 
+const { Queue } = require("bullmq");
+
 const commonHelper = require("../helpers/commonHelper.js");
 const ObjectId = require("mongoose").Types.ObjectId;
 
@@ -26,6 +28,21 @@ const clientStatus = {};
 // let contentProcessor; // Declare contentProcessor outside
 const allowedTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "dl", "dt", "dd","a" ]; // Define allowedTags
 
+// Redis connection settings
+const redisOptions = {
+  connection: {
+    // host: "127.0.0.1",
+    // port: 6379,
+    url:"rediss://default:AVNS_hgyd-Akk8_1yNrsH9_U@valkey-26e6c5af-chataffy-kunalagrawal-c505.l.aivencloud.com:10064",
+    maxRetriesPerRequest: null,
+  },
+};
+
+// Create a job queue
+const scrapeQueue = new Queue("scrapeQueue", redisOptions);
+
+
+
 class VectorStoreManager {
   constructor(pineconeIndexName) {
     this.pineconeClient = new Pinecone({
@@ -34,7 +51,6 @@ class VectorStoreManager {
     });
 
     this.pineconeIndex = this.pineconeClient.index(
-      //process.env.PINECONE_INDEX_NAME
       pineconeIndexName
     );
 
@@ -787,6 +803,60 @@ async function webPageCrawling(client, userId, req,pineconeIndexName) {
   }
 }
 
+async function insertOrUpdateSitemapRecords(urls, userId, sitemapId) {
+  const insertedRecords = [];
+  const updatedRecords = [];
+  const duplicateRecords = [];
+
+  const existingRecords = await Sitemap.find({ url: { $in: urls }, userId });
+
+  for (const url of urls) {
+    const existingRecord = existingRecords.find((record) => record.url === url);
+
+    if (existingRecord) {
+      if (!existingRecord.parentSitemapIds.includes(sitemapId)) {
+        existingRecord.parentSitemapIds.push(sitemapId);
+        updatedRecords.push(existingRecord);
+      } else {
+        duplicateRecords.push(existingRecord._id);
+      }
+    } else {
+      const sitemap = new Sitemap({
+        userId,
+        url,
+        parentSitemapIds: [sitemapId],
+      });
+      await sitemap.save();
+      insertedRecords.push(sitemap);
+    }
+  }
+  // Save changes to existing records concurrently
+  await Promise.all(existingRecords.map((record) => record.save()));
+  return { insertedRecords, updatedRecords, duplicateRecords };
+}
+
+async function createTrainingListAndWebPages(urls, userId, sitemapId) {
+  try {
+    // Step 1: Insert into TrainingList
+    const trainingListDocuments = urls.map((url) => ({
+      userId: userId,
+      title: url,
+      type: 0,
+
+      webPage: {
+        url,
+        sitemapIds: [sitemapId],
+      },
+    }));
+
+    const trainingListResult = await TrainingList.insertMany(
+      trainingListDocuments
+    ); //, { session }
+  } catch (error) {
+    console.error("Error inserting data:", error);
+  }
+}
+
 // Updated createSnippet method
 OpenaiTrainingListController.createSnippet = async (req, res) => {
   try {
@@ -900,59 +970,7 @@ OpenaiTrainingListController.getTrainingListDetail = async (req, res) => {
   }
 };
 
-async function insertOrUpdateSitemapRecords(urls, userId, sitemapId) {
-  const insertedRecords = [];
-  const updatedRecords = [];
-  const duplicateRecords = [];
 
-  const existingRecords = await Sitemap.find({ url: { $in: urls }, userId });
-
-  for (const url of urls) {
-    const existingRecord = existingRecords.find((record) => record.url === url);
-
-    if (existingRecord) {
-      if (!existingRecord.parentSitemapIds.includes(sitemapId)) {
-        existingRecord.parentSitemapIds.push(sitemapId);
-        updatedRecords.push(existingRecord);
-      } else {
-        duplicateRecords.push(existingRecord._id);
-      }
-    } else {
-      const sitemap = new Sitemap({
-        userId,
-        url,
-        parentSitemapIds: [sitemapId],
-      });
-      await sitemap.save();
-      insertedRecords.push(sitemap);
-    }
-  }
-  // Save changes to existing records concurrently
-  await Promise.all(existingRecords.map((record) => record.save()));
-  return { insertedRecords, updatedRecords, duplicateRecords };
-}
-
-async function createTrainingListAndWebPages(urls, userId, sitemapId) {
-  try {
-    // Step 1: Insert into TrainingList
-    const trainingListDocuments = urls.map((url) => ({
-      userId: userId,
-      title: url,
-      type: 0,
-
-      webPage: {
-        url,
-        sitemapIds: [sitemapId],
-      },
-    }));
-
-    const trainingListResult = await TrainingList.insertMany(
-      trainingListDocuments
-    ); //, { session }
-  } catch (error) {
-    console.error("Error inserting data:", error);
-  }
-}
 
 OpenaiTrainingListController.getWebPageUrlCount = async (userId) => {
   try {
