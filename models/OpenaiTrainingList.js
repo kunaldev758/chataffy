@@ -17,6 +17,12 @@ const trainingListSchema = new mongoose.Schema({
       start: Date,
       end: Date,
     },
+    minifyingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
+    minifyingDuration: {
+      start: Date,
+      end: Date,
+    },
+    mappingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
     sourceCode: { type: String },
   },
 

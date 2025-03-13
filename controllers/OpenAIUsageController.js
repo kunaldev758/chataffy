@@ -24,7 +24,6 @@ class UsageController {
   // Record usage and update client credits
   static async recordUsage(userId, operation, details) {  
     try {
-
       // Calculate cost in dollars
       const cost = this.calculateCost(
         details.inputTokens,
@@ -36,7 +35,7 @@ class UsageController {
       const creditsRequired = this.dollarsToCredits(cost);
 
       // Check if client has enough credits
-      const client = await Client.findOne({ userId }).session(session);
+      const client = await Client.findOne({ userId });
       if (!client) {
         throw new Error('Client not found');
       }
@@ -55,25 +54,23 @@ class UsageController {
           cost,
         },
       });
-      await usage.save({ session });
+      await usage.save();
 
       // Update client credits
       await Client.findOneAndUpdate(
         { userId },
-        { $inc: { 'credits.used': creditsRequired } },
-        // { session, new: true }
+        { $inc: { 'credits.used': creditsRequired } }
       );
 
-      await session.commitTransaction();
-      return { usage, creditsUsed: creditsRequired, remainingCredits: remainingCredits - creditsRequired };
+      return { 
+        usage, 
+        creditsUsed: creditsRequired, 
+        remainingCredits: remainingCredits - creditsRequired 
+      };
     } catch (error) {
-      await session.abortTransaction();
       throw error;
-    } finally {
-      session.endSession();
     }
   }
-
 
   static async recordUsageOfChat(userId, cost) {  
     try {
@@ -90,13 +87,17 @@ class UsageController {
       if (remainingCredits < creditsRequired) {
         throw new Error('Insufficient credits');
       }
+      
       // Update client credits
       await Client.findOneAndUpdate(
         { userId },
-        { $inc: { 'credits.used': creditsRequired } },
+        { $inc: { 'credits.used': creditsRequired } }
       );
 
-      return { creditsUsed: creditsRequired, remainingCredits: remainingCredits - creditsRequired };
+      return { 
+        creditsUsed: creditsRequired, 
+        remainingCredits: remainingCredits - creditsRequired 
+      };
     } catch (error) {
       throw error;
     } 
@@ -124,11 +125,9 @@ class UsageController {
   }
 }
 
-const OpenAIUsageController = {};
-
-// Express route handlers
+const OpenAIUsageController = {
   // Get all usages
-  OpenAIUsageController.getAllUsages =  async (req, res) => {
+  getAllUsages: async (req, res) => {
     try {
       const usages = await Usage.find();
       res.json(usages);
@@ -138,7 +137,7 @@ const OpenAIUsageController = {};
   },
 
   // Get usage by ID
-  OpenAIUsageController.getUsageById = async (req, res) => {
+  getUsageById: async (req, res) => {
     try {
       const usage = await Usage.findById(req.params.id);
       if (!usage) {
@@ -151,7 +150,7 @@ const OpenAIUsageController = {};
   },
 
   // Get user usage statistics
-  OpenAIUsageController.getUserStats =  async (req, res) => {
+  getUserStats: async (req, res) => {
     try {
       const stats = await UsageController.getUserUsageStats(req.params.userId);
       res.json(stats);
@@ -161,27 +160,33 @@ const OpenAIUsageController = {};
   },
 
   // Record new usage
-  OpenAIUsageController.recordUsage = async (req, res) => {
+  recordUsage: async (userId, operation, details ) => {
     try {
-      const { userId, operation, details } = req.body;
       const result = await UsageController.recordUsage(userId, operation, details);
-      res.json(result);
+      return result;
     } catch (error) {
-      res.status(500).json({ error: error.message });
+      return error;
     }
   },
 
-  OpenAIUsageController.recordUsageOfChat = async (userId,cost) => {
+  recordUsageOfChat: async (userId, cost) => {
     try {
-      // const { userId, cost, details } = req.body;
       const result = await UsageController.recordUsageOfChat(userId, cost);
-      // res.json(result);
       return result;
     } catch (error) {
-      // res.status(500).json({ error: error.message });
+      throw error;
+    }
+  },
+
+  checkUserCredits: async (userId, cost) => {
+    try {
+      const result = await UsageController.dollarsToCredits(cost);
+      // await UsageController.recordUsageOfChat(userId, cost);
+      return result;
+    } catch (error) {
       throw error;
     }
   }
-// };
+};
 
-module.exports = OpenAIUsageController ;
+module.exports = OpenAIUsageController;

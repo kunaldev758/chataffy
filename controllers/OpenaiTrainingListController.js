@@ -1,529 +1,18 @@
 /* OpenAI */
 require("dotenv").config();
-const fs = require("fs");
-const path = require("path");
-const pdfParse = require("pdf-parse");
-const mammoth = require("mammoth");
-const officeParser = require("officeparser");
-
-const { OpenAIEmbeddings } = require("@langchain/openai");
-const { MarkdownTextSplitter } = require("langchain/text_splitter");
-const { Pinecone } = require("@pinecone-database/pinecone");
 
 const axios = require("axios");
 const cheerio = require("cheerio");
 const Client = require("../models/Client");
 const Sitemap = require("../models/Sitemap");
 const TrainingList = require("../models/OpenaiTrainingList");
-const urlModule = require("url");
 
-const { Queue } = require("bullmq");
+const webPageQueue = require("../services/webPageCrawler");
 
 const commonHelper = require("../helpers/commonHelper.js");
 const ObjectId = require("mongoose").Types.ObjectId;
 
 const OpenaiTrainingListController = {};
-const clientStatus = {};
-
-// let contentProcessor; // Declare contentProcessor outside
-const allowedTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "dl", "dt", "dd","a" ]; // Define allowedTags
-
-// Redis connection settings
-const redisOptions = {
-  connection: {
-    // host: "127.0.0.1",
-    // port: 6379,
-    url:"rediss://default:AVNS_hgyd-Akk8_1yNrsH9_U@valkey-26e6c5af-chataffy-kunalagrawal-c505.l.aivencloud.com:10064",
-    maxRetriesPerRequest: null,
-  },
-};
-
-// Create a job queue
-const scrapeQueue = new Queue("scrapeQueue", redisOptions);
-
-
-
-class VectorStoreManager {
-  constructor(pineconeIndexName) {
-    this.pineconeClient = new Pinecone({
-      apiKey: process.env.PINECONE_API_KEY,
-      maxRetries: 5,
-    });
-
-    this.pineconeIndex = this.pineconeClient.index(
-      pineconeIndexName
-    );
-
-    // Initialize OpenAI embeddings
-    this.embeddings = new OpenAIEmbeddings({
-      openAIApiKey: process.env.OPENAI_API_KEY,
-    });
-  }
-  // generateVectorId(chunk) {
-  //   // Create a hash from the chunk text (can be customized if needed)
-  //   return crypto.createHash('sha256').update(chunk).digest('hex');
-  // }
-  
-
-  async upsertVectors(chunks, metadata) {
-    try {
-        const batchSize = 100; // Adjust based on your needs
-        const upsertBatches = [];
-        let vectorId = 0;
-
-        // Create embeddings for chunks
-        const embeddings = await this.embeddings.embedDocuments(chunks);
-
-        // Create upsert objects with metadata
-        const pageVectors = embeddings.map((embedding, i) => ({ 
-            // id: this.generateVectorId(chunks[i]), // Use your vector ID generation
-            id: `vec${vectorId + i}`,
-            values: embedding,
-            metadata: {
-                text: chunks[i],
-                ...metadata,
-                chunk_index: i,
-                total_chunks: chunks.length
-            }
-        }));
-
-        // Add vectors to batches
-        for (let i = 0; i < pageVectors.length; i += batchSize) {
-            upsertBatches.push(pageVectors.slice(i, i + batchSize));
-        }
-
-        // Upsert batches to Pinecone
-        console.log(`Upserting ${pageVectors.length} vectors in ${upsertBatches.length} batches`);
-
-        for (let i = 0; i < upsertBatches.length; i++) {
-            const batch = upsertBatches[i];
-            await this.pineconeIndex.upsert(batch);
-            console.log(`Upserted batch ${i + 1}/${upsertBatches.length}`);
-        }
-
-        return { success: true, vectorCount: pageVectors.length };
-
-    } catch (error) {
-        console.error("Error upserting vectors to Pinecone:", error);
-        return { success: false, error };
-    }
-}
-
-async doesIndexExist(pineconeIndexName) {
-  try {
-      const indexList = await this.pineconeClient.listIndexes();
-      return indexList.indexes.some(index => index.name === pineconeIndexName);
-  } catch (error) {
-      console.error("Error checking if index exists:", error);
-      return false; // Assume it doesn't exist in case of an error
-  }
-}
-
-async createIndex(pineconeIndexName) {
-try {
-  let spec = {
-    serverless: {
-        cloud: 'aws',  // or 'gcp', 'azure'
-        region: 'us-east-1' // Replace with your desired region
-    }
-};
-
-    await this.pineconeClient.createIndex({
-        name: pineconeIndexName,
-        dimension: 1536, // Specify the embedding dimension (OpenAI ada)
-        metric: 'cosine', //  Appropriate metric for semantic search
-        spec: spec
-    });
-    console.log(`Pinecone index "${this.pineconeIndexName}" created successfully.`);
-    // Optionally, wait for the index to be ready
-    await this.waitForIndexCreation(pineconeIndexName);
-    return true;
-} catch (error) {
-    console.error(`Error creating Pinecone index "${this.pineconeIndexName}":`, error);
-    return false;
-}
-}
-
-async waitForIndexCreation(pineconeIndexName,timeout = 60000) {  // Default timeout: 60 seconds
-const startTime = Date.now();
-while (Date.now() - startTime < timeout) {
-    try {
-        const indexDescription = await this.pineconeClient.describeIndex(pineconeIndexName);
-        if (indexDescription.status.ready) {
-            console.log(`Pinecone index "${pineconeIndexName}" is ready.`);
-            return;
-        }
-    } catch (error) {
-        console.warn(`Error describing index "${pineconeIndexName}", retrying...`, error.message);
-    }
-    await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
-}
-throw new Error(`Timeout waiting for Pinecone index "${pineconeIndexName}" to be created.`);
-}
-
-
-}
-
-class TrainingPricingCalculator {
-  constructor() {
-    // Current pricing rates (as of 2024)
-    this.rates = {
-      embedding: {
-        ada: 0.0001, // per 1K tokens
-      },
-      chatCompletion: {
-        "gpt-3.5-turbo": {
-          input: 0.001, // per 1K tokens
-          output: 0.002, // per 1K tokens
-        },
-      },
-      pinecone: {
-        query: 0.0002, // per query
-        vector: 0.0002, // per vector per month
-      },
-    };
-  }
-
-  async estimateTokens(text) {
-    // Rough approximation: 1 token ≈ 4 characters
-    return Math.ceil(text.length / 4);
-  }
-
-  calculateEmbeddingCost(tokens) {
-    return (tokens / 1000) * this.rates.embedding.ada;
-  }
-
-  calculateChatCompletionCost(
-    inputTokens,
-    outputTokens,
-    model = "gpt-3.5-turbo"
-  ) {
-    const inputCost =
-      (inputTokens / 1000) * this.rates.chatCompletion[model].input;
-    const outputCost =
-      (outputTokens / 1000) * this.rates.chatCompletion[model].output;
-    return inputCost + outputCost;
-  }
-
-  calculatePineconeQueryCost(queryCount) {
-    return queryCount * this.rates.pinecone.query;
-  }
-
-  calculatePineconeStorageCost(ChunkLength) {
-    return ChunkLength * this.rates.pinecone.vector;
-  }
-}
-
-class ContentProcessor {
-  constructor(pineconeIndexName) {
-    this.textSplitter = new MarkdownTextSplitter({
-      chunkSize: 1000,
-      chunkOverlap: 200,
-    });
-    this.vectorStoreManager = new VectorStoreManager(pineconeIndexName);
-    this.pricingCalculator = new TrainingPricingCalculator();
-  }
-
-
-  async readFileContent(filePath, mimeType) {
-    return new Promise((resolve, reject) => {
-      if (mimeType === "text/plain") {
-        fs.readFile(filePath, "utf8", (err, data) => {
-          if (err) reject(err);
-          else resolve(data);
-        });
-      } else if (mimeType === "application/pdf") {
-        fs.readFile(filePath, (err, data) => {
-          if (err) reject(err);
-          pdfParse(data)
-            .then((data) => resolve(data.text))
-            .catch(reject);
-        });
-      } else if (
-        mimeType ===
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-      ) {
-        mammoth
-          .extractRawText({ path: filePath })
-          .then((result) => resolve(result.value))
-          .catch(reject);
-      } else if (mimeType === "application/msword") {
-        officeParser.parseOfficeAsync(filePath, (err, data) => {
-          if (err) reject(err);
-          else resolve(data);
-        });
-      } else {
-        resolve("");
-      }
-    });
-  }
-
-   async processWebPage(trainingListObj, req) {
-      try {
-        await TrainingList.findByIdAndUpdate(trainingListObj._id, {
-          "trainingProcessStatus.minifyingStatus": 1,
-          "trainingProcessStatus.minifyingDuration.start": Date.now(),
-        });
-        req.io.to('user'+trainingListObj.userId).emit('web-page-minifying-started', { trainingListId: trainingListObj._id });
-  
-        const sourceCode = trainingListObj.webPage.sourceCode;
-        const $ = cheerio.load(sourceCode);
-        const webPageURL = trainingListObj.webPage.url;
-  
-        // Handle singular tags appropriately
-        const title = $("title").text();
-        const metaDescription = $('meta[name="description"]').attr("content");
-        $("br, hr").remove(); // or replace with a suitable representation
-        // Remove style, script tags
-        $("style, script").remove();
-        // Remove comments
-        $("*")
-          .contents()
-          .filter(function () {
-            return this.nodeType === 8;
-          })
-          .remove();
-        // Handle other singular tags appropriately
-        $("img, input").remove(); // or handle differently based on your requirements
-  
-        // Function to convert relative URLs to absolute
-        function convertToAbsoluteUrl(relativeUrl, baseUrl) {
-          return urlModule.resolve(baseUrl, relativeUrl);
-        }
-  
-        // Update relative URLs to absolute URLs
-        $("a").each((i, el) => {
-          const href = $(el).attr("href");
-          if (href && !href.startsWith("http") && href !== "#") {
-            // !href.startsWith('#')
-            $(el).attr("href", convertToAbsoluteUrl(href, webPageURL));
-          }
-        });
-  
-        // Replace iframes with a message or remove them if no src attribute
-        $("iframe").each((i, el) => {
-          const src = $(el).attr("src");
-          if (src) {
-            $(el).replaceWith(`${convertToAbsoluteUrl(src, webPageURL)}`);
-          } else {
-            $(el).remove();
-          }
-        });
-  
-        // Replace form elements with a message
-        $("form").each((i, el) => {
-          $(el).prepend(`Form on URL: ${webPageURL}`);
-        });
-  
-        // Replace all tags other than allowed tags with their inner HTML recursively
-        function replaceNonAllowedTags(element) {
-          $(element)
-            .contents()
-            .each(function () {
-              if (this.nodeType === 1) {
-                replaceNonAllowedTags(this);
-                // Check if the current node is not in the allowed tag list
-                if (!allowedTags.includes(this.name)) {
-                  // Check if there is exactly 1 immediate child node of type 1
-                  const childNodes = $(this)
-                    .children()
-                    .filter(function () {
-                      return this.nodeType === 1;
-                    });
-  
-                  if (childNodes.length === 1) {
-                    // Replace the outer node with its inner HTML
-                    const innerHtml = $(this).html() || "";
-                    $(this).replaceWith(innerHtml);
-                  }
-                }
-              }
-            });
-        }
-        replaceNonAllowedTags("body");
-  
-        // Remove empty elements recursively
-        function removeEmptyElements(element) {
-          $(element)
-            .contents()
-            .each(function () {
-              if (this.nodeType === 1) {
-                removeEmptyElements(this);
-                // if ($(this).is(":empty")) {
-                if ($(this).is(":empty") || /^\s*$/.test($(this).text())) {
-                  $(this).remove();
-                }
-              }
-            });
-        }
-        removeEmptyElements("body");
-        $("*").each(function () {
-          if ($(this).is("p, h1, h2, h3, h4, h5, h6, li")) {
-            // Preserve anchor tags while trimming text
-            $(this)
-              .contents()
-              .filter(function () {
-                return this.nodeType === 3; // Filter for text nodes
-              })
-              .each(function () {
-                this.nodeValue = this.nodeValue.trim(); // Trim text content
-              });
-          }
-        });
-  
-        // Remove unused attributes
-        // $('*').removeAttr('style');
-        $("*").each(function () {
-          const allowedAttributes = ["src", "href"];
-  
-          // Get all attributes of the current element
-          const attributes = this.attribs;
-  
-          // Check each attribute
-          for (const attr in attributes) {
-            if (attributes[attr] && !allowedAttributes.includes(attr)) {
-              // Remove the non-allowed attributes
-              delete attributes[attr];
-            }
-          }
-        });
-  
-        // removeEmptyElements("body");
-  
-        const content = $("body").html().replace(/\s+/g, " ").trim();
-  
-        // Split content into chunks using LangChain's text splitter
-        const chunks = await this.textSplitter.createDocuments([content], {
-          url: webPageURL,
-          title: title,
-          type: "webpage",
-          userId: trainingListObj.userId,
-        });
-  
-        // Calculate costs
-        const totalTokens = await this.pricingCalculator.estimateTokens(content);
-        const embeddingCost = this.pricingCalculator.calculateEmbeddingCost(totalTokens);
-        // const storageCost = this.pricingCalculator.calculatePineconeStorageCost(chunks.length);
-
-        try{
-          // const usage = new UsageRoutes();
-    // UsageRoutes.addUsage(userId, "question", costs.total);
-  }catch(error){
-    throw new Error("Not Enough Credits");
-  }
-  
-        // Upsert vectors into Pinecone
-        req.io.to('user'+trainingListObj.userId).emit('web-page-status', { message: "Upserting vectors to pinecone" }); // Update client
-        const upsertResult = await this.vectorStoreManager.upsertVectors(
-          chunks.map(chunk => chunk.pageContent),
-          {
-            url: webPageURL,
-            title: title,
-            type: "webpage",
-            userId: trainingListObj.userId,
-          }
-        );
-        if (!upsertResult.success) {
-          console.error("Failed to upsert vectors:", upsertResult.error);
-          throw new Error("Failed to upsert vectors to Pinecone");
-        }
-  
-        // Calculate costs
-        // const embeddingCost = this.pricingCalculator.calculateEmbeddingCost(totalTokens);
-        // const storageCost = this.pricingCalculator.calculatePineconeStorageCost(upsertResult.vectorCount);
-  
-        // Update training list with status
-        await TrainingList.findByIdAndUpdate(trainingListObj._id, {
-          "webPage.title": title,
-          "webPage.metaDescription": metaDescription,
-          "webPage.content": content,
-          costDetails: {
-            tokens: totalTokens,
-            embedding: embeddingCost,
-            storage: storageCost,
-            totalCost: embeddingCost + storageCost,
-          },
-          "trainingProcessStatus.minifyingStatus": 2,
-          "trainingProcessStatus.minifyingDuration.end": Date.now(),
-          trainingStatus: 4,
-        });
-        req.io.to('user'+trainingListObj.userId).emit('web-page-minified', { trainingListId: trainingListObj._id });
-        return { success: true, chunks: chunks.length };
-      } catch (error) {
-        console.error("Error processing webpage:", error);
-        await TrainingList.findByIdAndUpdate(trainingListObj._id, {
-          "trainingProcessStatus.minifyingStatus": 3,
-          trainingStatus: 9,
-        });
-        req.io.to('user'+trainingListObj.userId).emit('web-page-minifying-failed', { trainingListId: trainingListObj._id, error: error.message });
-        return { success: false, error };
-      }
-    }
-
-  async processFileOrSnippet(data) {
-    try {
-      let content, metadata;
-
-      if (data.file) {
-        content = await this.readFileContent(
-          data.file.path,
-          data.file.mimetype
-        );
-        metadata = {
-          title: data.file.originalname,
-          type: "file",
-          mimeType: data.file.mimetype,
-          userId: data.userId,
-        };
-      } else {
-        content = data.content;
-        metadata = {
-          title: data.title,
-          type: "snippet",
-          userId: data.userId,
-        };
-      }
-
-      const chunks = await this.textSplitter.createDocuments([content], {
-        metadata,
-      });
-
-      const totalTokens = await this.pricingCalculator.estimateTokens(content);
-      const embeddingCost = this.pricingCalculator.calculateEmbeddingCost(totalTokens);
-      const storageCost = this.pricingCalculator.calculatePineconeStorageCost(chunks.length);
-
-      try{
-              // const usage = new UsageRoutes();
-        // UsageRoutes.addUsage(userId, "question", costs.total);
-      }catch(error){
-        throw new Error("Not Enough Credits");
-      }
-
-      const upsertResult = await this.vectorStoreManager.upsertVectors(
-        chunks.map(chunk => chunk.pageContent),
-        metadata // Pass metadata here
-      );
-      if (!upsertResult.success) {
-        console.error("Failed to upsert vectors:", upsertResult.error);
-        throw new Error("Failed to upsert vectors to Pinecone");
-      }
-
-      return {
-        success: true,
-        costs: {
-          tokens: totalTokens,
-          embedding: embeddingCost,
-          storage: storageCost,
-          total: embeddingCost + storageCost,
-        },
-        chunks: chunks.length,
-      };
-    } catch (error) {
-      console.error("Error processing file/snippet:", error);
-      return { success: false, error };
-    }
-  }
-}
 
 // Update createFaq method
 OpenaiTrainingListController.createFaq = async (req, res) => {
@@ -538,8 +27,8 @@ OpenaiTrainingListController.createFaq = async (req, res) => {
     const pineconeIndexName = client.pineconeIndexName;
 
     const content = `Question: ${question}\nAnswer: ${answer}`;
-    let contentProcessor = new ContentProcessor(pineconeIndexName);
-    const result = await contentProcessor.processFileOrSnippet({
+    // let contentProcessor = new ContentProcessor(pineconeIndexName);
+    const result = await processFileOrSnippet({
       title: question,
       content,
       userId,
@@ -608,9 +97,12 @@ OpenaiTrainingListController.scrape = async (req, res) => {
               .map((index, element) => $(element).text())
               .get(); ;  
             if(webPageLocs.length) {
-              await createTrainingListAndWebPages(webPageLocs, userId, sitemapObj._id);
+              const trainingListIds = await createTrainingListAndWebPages(webPageLocs, userId, sitemapObj._id);
               req.io.to('user'+userId).emit('web-pages-added');
-              webPageCrawling(client, userId, req, pineconeIndexName);
+               // Add web pages to queue using bullmq
+               for (const trainingListId of trainingListIds) {
+                await webPageQueue.add('webPageScraping', { trainingListId, pineconeIndexName }); // Job Name and data
+              }
             }
 
             // const delayInMilliseconds = 1000;
@@ -646,162 +138,6 @@ OpenaiTrainingListController.scrape = async (req, res) => {
   }
 };
 
-async function webPageMinifying(client, userId, req,pineconeIndexName) {
-  try {
-    if(clientStatus[userId] && clientStatus[userId].webPageMinifying) {
-      // setTimeout
-      return;
-    }
-    clientStatus[userId] = { webPageMinifying: true };
-    let trainingListObjArray = [];
-    do {
-      trainingListObjArray = await TrainingList.find({
-        userId,
-        type: 0,
-        // 'webPage.crawlingStatus': 2,
-        trainingStatus: 2
-      }).limit(10);
-
-      // Initialize ContentProcessor outside the loop
-      const contentProcessor = new ContentProcessor(pineconeIndexName);
-      // await contentProcessor.initialize();
-
-         // **NEW: Check if the index exists and create it if it doesn't.**
-    const vectorStoreManager = contentProcessor.vectorStoreManager; // Access the manager through the processor
-
-    if (!await vectorStoreManager.doesIndexExist(pineconeIndexName)) {
-      console.log(`Index "${pineconeIndexName}" does not exist. Creating...`);
-      const created = await vectorStoreManager.createIndex(pineconeIndexName);
-
-      if (!created) {
-        console.error("Failed to create Pinecone index!");
-        return res.status(500).json({ status: false, message: "Failed to create Pinecone index.  Training aborted." });
-      }
-      console.log(`Index "${pineconeIndexName}" created successfully.`);
-    } else {
-      console.log(`Index "${pineconeIndexName}" already exists.`);
-    }
-
-
-      await Promise.all(trainingListObjArray.map(async (trainingListObj) => {
-        try {
-          const processResult = await contentProcessor.processWebPage(trainingListObj, req,pineconeIndexName);
-
-          if (!processResult.success) {
-            console.error(`Error processing ${trainingListObj.webPage.url}:`, processResult.error);
-            await TrainingList.findByIdAndUpdate(trainingListObj._id, {
-              'lastEdit': Date.now(),
-              'trainingProcessStatus.minifyingStatus': 3,
-              'trainingStatus': 9
-            });
-            trainingListObj.trainingStatus = 9;
-          } else {
-            console.log(`Successfully processed ${trainingListObj.webPage.url}`);
-            trainingListObj.trainingStatus = 3; // Mark as minified
-          }
-        } catch (error) {
-          console.error(`Unexpected error during processing ${trainingListObj.webPage.url}:`, error);
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, {
-            'lastEdit': Date.now(),
-            'trainingProcessStatus.minifyingStatus': 3,
-            'trainingStatus': 9
-          });
-          trainingListObj.trainingStatus = 9;
-        }
-      }));
-
-      if (trainingListObjArray.length) {
-        const list = trainingListObjArray.map(({ _id, trainingStatus }) => ({ _id, trainingStatus }));
-        req.io.to('user' + userId).emit('web-pages-minified', {
-          list
-        });
-
-        //webPageMapping(client, userId, req);
-      }
-    } while (trainingListObjArray.length > 0);
-    // }
-    clientStatus[userId] = { webPageMinifying: false };
-  } catch (error) {
-    console.error("Error in webpage mapping", error);
-    clientStatus[userId] = { webPageMinifying: false };
-  }
-}
-
-async function webPageCrawling(client, userId, req,pineconeIndexName) {
-  try {
-    if(clientStatus[userId] && clientStatus[userId].webPageCrawling) {
-      // setTimeout
-      return;
-    }
-    clientStatus[userId] = { webPageCrawling: true };
-    let trainingListObjArray = [];
-    do {
-      trainingListObjArray = await TrainingList.find({
-        userId,
-        type: 0,
-        trainingStatus: 1,
-      }).limit(10);
-      
-      await Promise.all(trainingListObjArray.map(async (trainingListObj) => {        
-        await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-          'trainingProcessStatus.crawlingStatus': 1, 
-          'trainingProcessStatus.crawlingDuration.start': Date.now()
-        });
-        req.io.to('user'+userId).emit('web-page-crawling-started', { trainingListId: trainingListObj._id });
-        const url = trainingListObj.webPage.url;        
-        try {
-          let config = {
-            method: 'get',
-            maxBodyLength: Infinity,
-            url: url,
-            headers: { }
-          };
-          const response = await axios.request(config);
-          
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-            'webPage.sourceCode': response.data,
-            'trainingProcessStatus.crawlingStatus': 2,
-            'trainingProcessStatus.crawlingDuration.end': Date.now(), 
-            'trainingStatus': 2, 
-          });
-          req.io.to('user'+userId).emit('web-page-crawled', { trainingListId: trainingListObj._id });
-          trainingListObj.trainingStatus = 2;
-        }
-        catch(error) {
-          console.log("Error in scrapping "+url);
-          await TrainingList.findByIdAndUpdate(trainingListObj._id, { 
-            'trainingProcessStatus.crawlingStatus': 3,
-            'lastEdit': Date.now(), 
-            'trainingStatus': 9,  // Error
-          });
-          req.io.to('user'+userId).emit('web-page-crawling-failed', { trainingListId: trainingListObj._id, error: error.message });
-          trainingListObj.trainingStatus = 9;
-          console.log(error);
-        }
-      }));
-      
-      if(trainingListObjArray.length) {
-        const updatedCrawledCount = await TrainingList.countDocuments({
-          userId: new ObjectId(userId),
-          type: 0,
-          'trainingProcessStatus.crawlingStatus': 2
-        }).exec();
-        const list = trainingListObjArray.map(({ _id, trainingStatus }) => ({ _id, trainingStatus }));
-        req.io.to('user'+userId).emit('web-pages-crawled',{
-          updatedCrawledCount,
-          list
-        });
-
-        webPageMinifying(client, userId, req, pineconeIndexName);
-      }
-    } while (trainingListObjArray.length > 0); // Loop end
-    clientStatus[userId] = { webPageCrawling: false };
-  }
-  catch(error) {
-    console.error("Error in webpage scrapping", error);
-    clientStatus[userId] = { webPageCrawling: false };
-  }
-}
 
 async function insertOrUpdateSitemapRecords(urls, userId, sitemapId) {
   const insertedRecords = [];
@@ -837,21 +173,22 @@ async function insertOrUpdateSitemapRecords(urls, userId, sitemapId) {
 
 async function createTrainingListAndWebPages(urls, userId, sitemapId) {
   try {
+    const trainingListIds = [];
     // Step 1: Insert into TrainingList
-    const trainingListDocuments = urls.map((url) => ({
-      userId: userId,
-      title: url,
-      type: 0,
-
-      webPage: {
-        url,
-        sitemapIds: [sitemapId],
-      },
-    }));
-
-    const trainingListResult = await TrainingList.insertMany(
-      trainingListDocuments
-    ); //, { session }
+    for (const url of urls) {
+      const trainingListObj = await TrainingList.create({
+        userId: userId,
+        title: url,
+        type: 0,
+  
+        webPage: {
+          url,
+          sitemapIds: [sitemapId],
+        },
+      });
+      trainingListIds.push(trainingListObj._id);
+    }
+    return trainingListIds;
   } catch (error) {
     console.error("Error inserting data:", error);
   }
@@ -871,7 +208,7 @@ OpenaiTrainingListController.createSnippet = async (req, res) => {
 
     const pineconeIndexName = client.pineconeIndexName;
 
-    let contentProcessor = new ContentProcessor(pineconeIndexName);
+    // let contentProcessor = new ContentProcessor(pineconeIndexName);
     let results = [];
 
     if (title && content) {

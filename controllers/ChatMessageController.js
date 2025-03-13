@@ -1,5 +1,4 @@
 const ChatMessage = require("../models/ChatMessage");
-const OpenAITrainingList = require("../models/OpenaiTrainingList");
 const Conversation = require("../models/Conversation");
 
 const ChatMessageController = {};
@@ -160,22 +159,6 @@ ChatMessageController.deleteChatMessageById = async (req, res) => {
     res.sendStatus(204);
   } catch (error) {
     res.status(500).json({ error: "Failed to delete chat message" });
-  }
-};
-
-ChatMessageController.getMessageSources = async (req, res) => {
-  const { trainingListIds } = req.body; // Assuming you receive an array of training list IDs
-  try {
-    // Find training lists directly based on the received IDs
-    const trainingLists = await OpenAITrainingList.find({
-      _id: { $in: trainingListIds },
-    });
-
-    // Respond with the found training lists
-    res.json({ trainingLists });
-  } catch (error) {
-    // Error handling
-    res.status(500).json({ error: "Failed to get training lists" });
   }
 };
 

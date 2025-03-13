@@ -4,7 +4,6 @@ const { encode } = require("html-entities");
 const { JSDOM } = require("jsdom");
 const { Node, document } = new JSDOM("").window;
 
-const SocketController = {};
 const CreditsController = require("../controllers/CreditsController");
 const OpenaiTrainingListController = require("../controllers/OpenaiTrainingListController");
 const ChatMessageController = require("../controllers/ChatMessageController");
@@ -81,7 +80,7 @@ const myMiddleware = async (socket, next) => {
   }
 };
 
-SocketController.handleSocketEvents = (io) => {
+const initializeSocketEvents = (io) => {
   io.use(myMiddleware);
 
   io.on("connection", (socket) => {
@@ -655,4 +654,6 @@ SocketController.handleSocketEvents = (io) => {
   });
 };
 
-module.exports = SocketController;
+module.exports = {
+  initializeSocketEvents
+};

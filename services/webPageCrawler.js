@@ -1,45 +1,74 @@
 // services/webPageCrawler.js
 const axios = require("axios");
-const { emitSocketEvent } = require("../helpers/socketHelper");
+const { Worker,Queue } = require("bullmq");
 const TrainingList = require("../models/OpenaiTrainingList");
+const minifyingQueue = require("./webPageMinifier");
 
-async function crawlWebPage(trainingListObj, io) {
-  const userId = trainingListObj.userId;
-  const trainingListId = trainingListObj._id;
+const redisConfig = {
+  url: "rediss://default:AVNS_hgyd-Akk8_1yNrsH9_U@valkey-26e6c5af-chataffy-kunalagrawal-c505.l.aivencloud.com:10064",
+  maxRetriesPerRequest: null,
+};
+const webPageQueue = new Queue('webPageScraping', { connection: redisConfig });
 
-  try {
-    emitSocketEvent(io, userId, "webPageCrawlingStarted", { trainingListId });
+const worker = new Worker(
+  "webPageScraping",
+  async (job) => {
+    const { trainingListId, pineconeIndexName } = job.data;
+    console.log(`Processing job for trainingListId: ${trainingListId}`);
+    // Fetch the TrainingList object
+    const trainingListObj = await TrainingList.findOne({ _id: trainingListId });
 
-    const config = {
-      method: "get",
-      maxBodyLength: Infinity,
-      url: trainingListObj.webPage.url,
-      headers: {},
-    };
+    if (!trainingListObj) {
+      console.error(`TrainingList not found with id: ${trainingListId}`);
+      return; // Or throw an error to retry the job
+    }
 
-    const response = await axios.request(config);
+    const url = trainingListObj.webPage.url;
 
-    await TrainingList.findByIdAndUpdate(trainingListId, {
-      "webPage.sourceCode": response.data,
-      "trainingProcessStatus.crawlingStatus": 2,
-      "trainingProcessStatus.crawlingDuration.end": Date.now(),
-      trainingStatus: 2,
-    });
-    emitSocketEvent(io, userId, "webPageCrawled", { trainingListId });
-    return { success: true };
-  } catch (error) {
-    console.error(`Error crawling ${trainingListObj.webPage.url}:`, error);
-    await TrainingList.findByIdAndUpdate(trainingListId, {
-      "trainingProcessStatus.crawlingStatus": 3,
-      lastEdit: Date.now(),
-      trainingStatus: 9,
-    });
-    emitSocketEvent(io, userId, "webPageCrawlingFailed", {
-      trainingListId,
-      error: error.message,
-    });
-    return { success: false, error: error.message };
-  }
-}
+    try {
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, {
+        "webPage.crawlingStatus": 1,
+        "webPage.crawlingDuration.start": Date.now(),
+      });
 
-module.exports = { crawlWebPage };
+      // Fetch the web page content
+      const response = await axios.get(url); // Use axios.get directly
+      const sourceCode = response.data;
+
+      // Update the TrainingList object with the fetched content
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, {
+        "webPage.sourceCode": sourceCode,
+        "webPage.crawlingStatus": 2,
+        "webPage.crawlingDuration.end": Date.now(),
+        trainingStatus: 2,
+      });
+
+      console.log(`Successfully scraped: ${url}`);
+      await minifyingQueue.add("webPageMinifying", {
+        trainingListId,
+        pineconeIndexName,
+      }); // Job Name and data
+    } catch (error) {
+      console.error(`Error scraping ${url}:`, error);
+
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, {
+        "webPage.crawlingStatus": 3,
+        lastEdit: Date.now(),
+        trainingStatus: 9, // Error
+      });
+    }
+  },
+  { connection: redisConfig ,concurrency: 5}
+); // Adjust concurrency as needed
+
+worker.on("completed", (job) => {
+  console.log(`Job with id ${job.id} has completed`);
+});
+
+worker.on("failed", (job, err) => {
+  console.log(`Job with id ${job.id} has failed with error ${err.message}`);
+});
+
+console.log("Worker started...");
+
+module.exports = webPageQueue;

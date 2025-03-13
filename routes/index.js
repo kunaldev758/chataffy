@@ -38,12 +38,12 @@ router.post('/openaiCreateFaq', OpenaiTrainingListController.createFaq);
 router.post('/openaiToggleActiveStatus', OpenaiTrainingListController.toggleActiveStatus);
 router.post('/getOpenaiTrainingListDetail', OpenaiTrainingListController.getTrainingListDetail);
 
-router.post('/getTrainingStatus',OpenaiTrainingListController.getTrainingStatus); //add this route
+router.post('/getTrainingStatus',OpenaiTrainingListController.getTrainingStatus);
 
 router.post('/getUserCredits', CreditsController.getUserCredits);
 
 router.post('/getConversationMessages', ChatMessageController.getAllChatMessagesAPI);
-router.post('/getMessageSources', ChatMessageController.getMessageSources);
+// router.post('/getMessageSources', ChatMessageController.getMessageSources);
 router.post('/getOldConversationMessages', ChatMessageController.getAllOldChatMessages);
 
 router.post('/getWidgetToken', WidgetController.getWidgetToken);

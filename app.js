@@ -3,19 +3,30 @@ const http = require('http');
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const path = require('path');
-const {Server } = require('socket.io');
+// const {Server } = require('socket.io');
 const apiRoutes = require('./routes/');
-const SocketController = require('./controllers/SocketController');
+// const SocketController = require('./controllers/SocketController');
+// const { initializeSocket } = require('./helpers/socketHelper');
+const socketService = require("./helpers/socketHelper"); 
+// const socketHelper = require('./helpers/socketHelper');
+// const SocketController = require('./controllers/SocketController');
 const cors = require('cors')
 dotenv.config();
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: process.env.CLIENT_URL, // Replace with your frontend's URL
-    methods: ["GET", "POST"],
-  },
-});
+// Initialize WebSocket once
+// Initialize socket event handlers
+// Initialize socket.io
+const io = socketService.initialize(server);
+// const io = socketService.getIO();
+// SocketController.initializeSocketEvents(io);
+// socketService.initialize(server);
+// const io = new Server(server, {
+//   cors: {
+//     origin: process.env.CLIENT_URL, // Replace with your frontend's URL
+//     methods: ["GET", "POST"],
+//   },
+// });
 
 mongoose.connect(process.env.MONGODB_URI);
 
@@ -32,10 +43,14 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/api', apiRoutes);
 
 // Socket.IO connection
-  SocketController.handleSocketEvents(io);
+// module.exports = {io};
+  // SocketController.handleSocketEvents(io);
 
 // Start the server
-const PORT = process.env.PORT || 9000;
-server.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
+// const PORT = process.env.PORT || 9000;
+// server.listen(PORT, () => {
+//   console.log(`Server is running on http://localhost:${PORT}`);
+// });
+
+
+module.exports = { app, server };

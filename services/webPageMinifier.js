@@ -1,85 +1,206 @@
 // services/webPageMinifier.js
-const { emitSocketEvent } = require("../helpers/socketHelper");
-const ContentProcessor = require("./contentProcessor");
+const { Worker,Queue } = require("bullmq");
+const cheerio = require("cheerio");
 const TrainingList = require("../models/OpenaiTrainingList");
+const pineconeTrainQueue = require("./TrainData");
+const urlModule = require("url");
 
-async function minifyWebPage(trainingListObj, io, pineconeIndexName) {
-  const userId = trainingListObj.userId;
-  const trainingListId = trainingListObj._id;
+const allowedTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "dl", "dt", "dd","a" ];
+const redisConfig = {
+    url:"rediss://default:AVNS_hgyd-Akk8_1yNrsH9_U@valkey-26e6c5af-chataffy-kunalagrawal-c505.l.aivencloud.com:10064",
+    maxRetriesPerRequest: null,
+};
+const minifyingQueue = new Queue('webPageMinifying', { connection: redisConfig });  
 
-  try {
-    emitSocketEvent(io, userId, "webPageMinifyingStarted", { trainingListId });
+const worker = new Worker(
+  "webPageMinifying",
+  async (job) => {
+    const { trainingListId, pineconeIndexName } = job.data;
+    console.log(`Processing job for trainingListId: ${trainingListId}`);
 
-    const contentProcessor = new ContentProcessor(pineconeIndexName);
-    const vectorStoreManager = contentProcessor.vectorStoreManager;
+    // Fetch the TrainingList object
+    const trainingListObj = await TrainingList.findOne({ _id: trainingListId });
 
-    if (!(await vectorStoreManager.doesIndexExist(pineconeIndexName))) {
-      console.log(`Index "${pineconeIndexName}" does not exist. Creating...`);
-      const created = await vectorStoreManager.createIndex(pineconeIndexName);
+    if (!trainingListObj) {
+      console.error(`TrainingList not found with id: ${trainingListId}`);
+      return; // Or throw an error to retry the job
+    }
 
-      if (!created) {
-        console.error("Failed to create Pinecone index!");
-        emitSocketEvent(io, userId, "trainingFailed", {
-          error: "Failed to create Pinecone index. Training aborted.",
-        });
-        return {
-          success: false,
-          error: "Failed to create Pinecone index. Training aborted.",
-        };
+    const url = trainingListObj.webPage.url;
+
+    try {
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, {
+        "webPage.minifyingStatus": 1,
+        "webPage.minifyingDuration.start": Date.now(),
+      });
+
+      const processResult = await processWebPage(trainingListObj);
+      if (processResult) {
+        const { content, title,metaDescription,webPageURL } = processResult;
+        await pineconeTrainQueue.add("pineconeTraining", {
+          type :"webpage", 
+          pineconeIndexName, 
+          content, 
+          webPageURL, 
+          title,
+          trainingListId,
+          metaDescription
+        }); // Job Name and data
+      } else {
+        throw new Error("Failed to process web page");
       }
-      console.log(`Index "${pineconeIndexName}" created successfully.`);
-    } else {
-      console.log(`Index "${pineconeIndexName}" already exists.`);
-    }
+    } catch (error) {
+      console.error(`Error scraping ${url}:`, error);
 
-    const processResult = await contentProcessor.processWebPage(trainingListObj);
-
-    if (!processResult.success) {
-      console.error(
-        `Error processing ${trainingListObj.webPage.url}:`,
-        processResult.error
-      );
-      await TrainingList.findByIdAndUpdate(trainingListId, {
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, {
+        "webPage.minifyingStatus": 3,
         lastEdit: Date.now(),
-        "trainingProcessStatus.minifyingStatus": 3,
-        trainingStatus: 9,
+        trainingStatus: 9, // Error
       });
-      emitSocketEvent(io, userId, "webPageMinifyingFailed", {
-        trainingListId,
-        error: processResult.error,
-      });
-      return { success: false, error: processResult.error };
+    }
+  },
+  { connection: redisConfig, concurrency: 5 }
+); // Adjust concurrency as needed
+
+worker.on("completed", (job) => {
+  console.log(`Job with id ${job.id} has completed`);
+});
+
+worker.on("failed", (job, err) => {
+  console.log(`Job with id ${job.id} has failed with error ${err.message}`);
+});
+
+console.log("Worker started...");
+
+async function processWebPage(trainingListObj) {
+  try {
+    const sourceCode = trainingListObj.webPage.sourceCode;
+    const $ = cheerio.load(sourceCode);
+    const webPageURL = trainingListObj.webPage.url;
+
+    // Handle singular tags appropriately
+    const title = $("title").text();
+    const metaDescription = $('meta[name="description"]').attr("content");
+    $("br, hr").remove(); // or replace with a suitable representation
+    // Remove style, script tags
+    $("style, script").remove();
+    // Remove comments
+    $("*")
+      .contents()
+      .filter(function () {
+        return this.nodeType === 8;
+      })
+      .remove();
+    // Handle other singular tags appropriately
+    $("img, input").remove(); // or handle differently based on your requirements
+
+    // Function to convert relative URLs to absolute
+    function convertToAbsoluteUrl(relativeUrl, baseUrl) {
+      return urlModule.resolve(baseUrl, relativeUrl);
     }
 
-    await TrainingList.findByIdAndUpdate(trainingListObj._id, {
-      "webPage.title": processResult.title,
-      "webPage.metaDescription": processResult.metaDescription,
-      "webPage.content": processResult.content,
-      costDetails: {
-        tokens: processResult.totalTokens,
-        embedding: processResult.embeddingCost,
-        storage: processResult.storageCost,
-        totalCost: processResult.embeddingCost + processResult.storageCost,
-      },
-      "trainingProcessStatus.minifyingStatus": 2,
-      "trainingProcessStatus.minifyingDuration.end": Date.now(),
-      trainingStatus: 4,
+    // Update relative URLs to absolute URLs
+    $("a").each((i, el) => {
+      const href = $(el).attr("href");
+      if (href && !href.startsWith("http") && href !== "#") {
+        // !href.startsWith('#')
+        $(el).attr("href", convertToAbsoluteUrl(href, webPageURL));
+      }
     });
-    emitSocketEvent(io, userId, "webPageMinified", { trainingListId });
-    return { success: true, chunks: processResult.chunks };
+
+    // Replace iframes with a message or remove them if no src attribute
+    $("iframe").each((i, el) => {
+      const src = $(el).attr("src");
+      if (src) {
+        $(el).replaceWith(`${convertToAbsoluteUrl(src, webPageURL)}`);
+      } else {
+        $(el).remove();
+      }
+    });
+
+    // Replace form elements with a message
+    $("form").each((i, el) => {
+      $(el).prepend(`Form on URL: ${webPageURL}`);
+    });
+
+    // Replace all tags other than allowed tags with their inner HTML recursively
+    function replaceNonAllowedTags(element) {
+      $(element)
+        .contents()
+        .each(function () {
+          if (this.nodeType === 1) {
+            replaceNonAllowedTags(this);
+            // Check if the current node is not in the allowed tag list
+            if (!allowedTags.includes(this.name)) {
+              // Check if there is exactly 1 immediate child node of type 1
+              const childNodes = $(this)
+                .children()
+                .filter(function () {
+                  return this.nodeType === 1;
+                });
+
+              if (childNodes.length === 1) {
+                // Replace the outer node with its inner HTML
+                const innerHtml = $(this).html() || "";
+                $(this).replaceWith(innerHtml);
+              }
+            }
+          }
+        });
+    }
+    replaceNonAllowedTags("body");
+
+    // Remove empty elements recursively
+    function removeEmptyElements(element) {
+      $(element)
+        .contents()
+        .each(function () {
+          if (this.nodeType === 1) {
+            removeEmptyElements(this);
+            // if ($(this).is(":empty")) {
+            if ($(this).is(":empty") || /^\s*$/.test($(this).text())) {
+              $(this).remove();
+            }
+          }
+        });
+    }
+    removeEmptyElements("body");
+    $("*").each(function () {
+      if ($(this).is("p, h1, h2, h3, h4, h5, h6, li")) {
+        // Preserve anchor tags while trimming text
+        $(this)
+          .contents()
+          .filter(function () {
+            return this.nodeType === 3; // Filter for text nodes
+          })
+          .each(function () {
+            this.nodeValue = this.nodeValue.trim(); // Trim text content
+          });
+      }
+    });
+
+    // Remove unused attributes
+    // $('*').removeAttr('style');
+    $("*").each(function () {
+      const allowedAttributes = ["src", "href"];
+
+      // Get all attributes of the current element
+      const attributes = this.attribs;
+
+      // Check each attribute
+      for (const attr in attributes) {
+        if (attributes[attr] && !allowedAttributes.includes(attr)) {
+          // Remove the non-allowed attributes
+          delete attributes[attr];
+        }
+      }
+    });
+
+    const content = $("body").html().replace(/\s+/g, " ").trim();
+    return {content,webPageURL,title,metaDescription};
   } catch (error) {
-    console.error(`Error minifying ${trainingListObj.webPage.url}:`, error);
-    await TrainingList.findByIdAndUpdate(trainingListId, {
-      lastEdit: Date.now(),
-      "trainingProcessStatus.minifyingStatus": 3,
-      trainingStatus: 9,
-    });
-    emitSocketEvent(io, userId, "webPageMinifyingFailed", {
-      trainingListId,
-      error: error.message,
-    });
-    return { success: false, error: error.message };
+    console.error("Error processing webpage:", error);
   }
 }
 
-module.exports = { minifyWebPage };
+module.exports = minifyingQueue ;
