@@ -10,6 +10,7 @@ const TrainingList = require("../models/OpenaiTrainingList");
 const webPageQueue = require("../services/webPageCrawler");
 
 const commonHelper = require("../helpers/commonHelper.js");
+const ScrapeTracker = require("../services/ScrapeTracker.js");
 const ObjectId = require("mongoose").Types.ObjectId;
 
 const OpenaiTrainingListController = {};
@@ -81,6 +82,11 @@ OpenaiTrainingListController.scrape = async (req, res) => {
         res.status(201).json({ status_code: 200, message: "Scraping process initiated." });
         client.sitemapScrappingStatus = 1;
         await client.save();
+
+          // Variables to track total pages
+          let totalPagesToScrape = 0;
+          let totalTrainingListIds = [];
+
         // Recursive function to scrape nested sitemaps
         while(sitemapObj) {
           try {
@@ -95,13 +101,48 @@ OpenaiTrainingListController.scrape = async (req, res) => {
 
             const webPageLocs = $("loc:not(sitemap loc)")
               .map((index, element) => $(element).text())
-              .get(); ;  
+              .get();   
             if(webPageLocs.length) {
+              totalPagesToScrape += webPageLocs.length;
+              if (!ScrapeTracker.getTracking(userId)) {
+                ScrapeTracker.initTracking(userId, totalPagesToScrape);
+              } else {
+                // Update total pages count
+                ScrapeTracker.getTracking(userId).totalPages += webPageLocs.length;
+              }
+                // Emit initial progress
+                // req.io.to('user'+userId).emit('scraping-progress', {
+                //   status: 'starting',
+                //   stage: 'scraping',
+                //   total: ScrapeTracker.getTracking(userId).totalPages,
+                //   scrapingCompleted: 0,
+                //   minifyingCompleted: 0,
+                //   trainingCompleted: 0,
+                //   failed: 0,
+                //   overallProgress: 0
+                // });
+                 // Use the socket controller instead of req.io
+              SocketController.emitToUser(userId, 'scraping-progress', {
+                status: 'starting',
+                stage: 'scraping',
+                total: ScrapeTracker.getTracking(userId).totalPages,
+                scrapingCompleted: 0,
+                minifyingCompleted: 0,
+                trainingCompleted: 0,
+                failed: 0,
+                overallProgress: 0
+              });
+
               const trainingListIds = await createTrainingListAndWebPages(webPageLocs, userId, sitemapObj._id);
+              totalTrainingListIds = [...totalTrainingListIds, ...trainingListIds];
+                // Add training list IDs to tracker
+                trainingListIds.forEach(id => {
+                  ScrapeTracker.addTrainingListId(userId, id);
+                });
               req.io.to('user'+userId).emit('web-pages-added');
                // Add web pages to queue using bullmq
                for (const trainingListId of trainingListIds) {
-                await webPageQueue.add('webPageScraping', { trainingListId, pineconeIndexName }); // Job Name and data
+                // await webPageQueue.add('webPageScraping', { trainingListId, pineconeIndexName }); // Job Name and data
               }
             }
 

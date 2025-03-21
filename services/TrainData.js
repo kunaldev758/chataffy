@@ -6,6 +6,7 @@ const { MarkdownTextSplitter } = require("langchain/text_splitter");
 const TrainingList = require("../models/OpenaiTrainingList");
 const OpenAIUsageController = require("../controllers/OpenAIUsageController");
 const { emitEvent } = require('../helpers/socketHelper');
+// const ScrapeTracker = require("../helpers/scrapeTracker");
 
 const redisConfig = {
   url: "rediss://default:AVNS_hgyd-Akk8_1yNrsH9_U@valkey-26e6c5af-chataffy-kunalagrawal-c505.l.aivencloud.com:10064",
@@ -87,6 +88,7 @@ const worker = new Worker(
       throw new Error(); // Or throw an error to retry the job
     }
     userId = trainingListObj.userId;
+    let pageUserId = userId;
 
     try {
       // Initialize ContentProcessor outside the loop

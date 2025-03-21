@@ -17,6 +17,19 @@ const ConversationTagController = require("../controllers/ConversationTagControl
 const DashboardController = require("../controllers/DashboardController");
 const QueryController = require("../controllers/QueryController");
 
+let io = null;
+const activeUsers = new Map(); // Maps userId to socket instances
+
+// Initialize with io instance
+const initializeSocketController = (_io) => {
+  io = _io;
+  return { 
+    socketMiddleware: myMiddleware,
+    initializeSocketEvents
+  };
+};
+
+
 const verifyToken = (token) => {
   return new Promise((resolve, reject) => {
     jwt.verify(token, process.env.JWT_SECRET_KEY, (err, decoded) => {
@@ -45,6 +58,13 @@ const myMiddleware = async (socket, next) => {
 
       socket.userId = user._id;
       socket.type = "client";
+
+       // Store socket instance for later use
+       if (!activeUsers.has(user._id.toString())) {
+        activeUsers.set(user._id.toString(), []);
+      }
+      activeUsers.get(user._id.toString()).push(socket);
+
     } else if (visitorId && widgetId && widgetAuthToken) {
       // Visitor Authentication
       const widget = await Widget.findOne({
@@ -80,11 +100,25 @@ const myMiddleware = async (socket, next) => {
   }
 };
 
-const initializeSocketEvents = (io) => {
-  io.use(myMiddleware);
+const initializeSocketEvents = (socket) => {
+  // io.use(myMiddleware);
+  const { type, userId, visitorId } = socket;
 
-  io.on("connection", (socket) => {
-    const { type, userId, visitorId } = socket;
+  socket.on('disconnect', () => {
+    if (userId) {
+      const userSockets = activeUsers.get(userId.toString());
+      if (userSockets) {
+        const index = userSockets.indexOf(socket);
+        if (index !== -1) {
+          userSockets.splice(index, 1);
+        }
+        // If no more sockets for this user, remove the entry
+        if (userSockets.length === 0) {
+          activeUsers.delete(userId.toString());
+        }
+      }
+    }
+  });
 
     if (type === "client") {
       // Join client to their unique room
@@ -651,9 +685,55 @@ const initializeSocketEvents = (io) => {
         socket.leave(VisitorRoom);
       });
     }
-  });
+
+};
+
+// External functions to be used in other controllers
+const emitToUser = (userId, eventName, data) => {
+  if (!io) {
+    console.error('Socket IO not initialized');
+    return false;
+  }
+  
+  // Method 1: Emit to room - if user is connected to the room
+  const userRoom = `user-${userId}`;
+  io.to(userRoom).emit(eventName, data);
+  
+  // Method 2: Emit to specific socket instances if needed
+  const userSockets = activeUsers.get(userId.toString());
+  if (userSockets && userSockets.length > 0) {
+    userSockets.forEach(socket => {
+      socket.emit(eventName, data);
+    });
+    return true;
+  }
+  
+  return false; // No active user found
+};
+
+const emitToRoom = (room, eventName, data) => {
+  if (!io) {
+    console.error('Socket IO not initialized');
+    return false;
+  }
+  
+  io.to(room).emit(eventName, data);
+  return true;
+};
+
+const emitToAll = (eventName, data) => {
+  if (!io) {
+    console.error('Socket IO not initialized');
+    return false;
+  }
+  
+  io.emit(eventName, data);
+  return true;
 };
 
 module.exports = {
-  initializeSocketEvents
+  initializeSocketEvents,
+  emitToUser,
+  emitToRoom,
+  emitToAll,
 };

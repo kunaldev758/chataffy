@@ -104,6 +104,11 @@ UserController.loginUser = async (req, res) => {
     const token = user.generateAuthToken();
     user.auth_token = token;
     await user.save();
+
+    if (req.io) {
+      req.io.emit('user-logged-in', { userId: user._id });
+    }
+    
     res.json({ status_code: 200, status: true, token,userId:user?._id, message: 'Login successful' });
   } catch (error) {
     commonHelper.logErrorToFile(error);

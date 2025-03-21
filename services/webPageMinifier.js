@@ -4,6 +4,7 @@ const cheerio = require("cheerio");
 const TrainingList = require("../models/OpenaiTrainingList");
 const pineconeTrainQueue = require("./TrainData");
 const urlModule = require("url");
+const ScrapeTracker = require("./scrapeTracker");
 
 const allowedTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "dl", "dt", "dd","a" ];
 const redisConfig = {
@@ -27,6 +28,7 @@ const worker = new Worker(
     }
 
     const url = trainingListObj.webPage.url;
+    const pageUserId = trainingListObj.userId;
 
     try {
       await TrainingList.findByIdAndUpdate(trainingListObj._id, {
@@ -37,6 +39,29 @@ const worker = new Worker(
       const processResult = await processWebPage(trainingListObj);
       if (processResult) {
         const { content, title,metaDescription,webPageURL } = processResult;
+
+  // Update tracking information
+  if (ScrapeTracker.getTracking(pageUserId)) {
+    ScrapeTracker.updateTracking(pageUserId, 'minifying', true);
+    
+    // Get updated tracking info
+    const trackingInfo = ScrapeTracker.getTracking(pageUserId);
+    
+    // Emit progress update
+    if (global.io) {
+      global.io.to('user'+pageUserId).emit('scraping-progress', {
+        status: 'in-progress',
+        stage: 'minifying',
+        total: trackingInfo.totalPages,
+        scrapingCompleted: trackingInfo.scrapingCompleted,
+        minifyingCompleted: trackingInfo.minifyingCompleted,
+        trainingCompleted: trackingInfo.trainingCompleted,
+        failed: trackingInfo.failedPages,
+        overallProgress: calculateOverallProgress(trackingInfo)
+      });
+    }
+  }
+
         await pineconeTrainQueue.add("pineconeTraining", {
           type :"webpage", 
           pineconeIndexName, 
@@ -57,6 +82,29 @@ const worker = new Worker(
         lastEdit: Date.now(),
         trainingStatus: 9, // Error
       });
+
+ // Update tracking for failed page
+ if (ScrapeTracker.getTracking(pageUserId)) {
+  ScrapeTracker.updateTracking(pageUserId, 'minifying', false);
+  
+  // Get updated tracking info
+  const trackingInfo = ScrapeTracker.getTracking(pageUserId);
+  
+  // Emit progress update
+  if (global.io) {
+    global.io.to('user'+pageUserId).emit('scraping-progress', {
+      status: 'in-progress',
+      stage: 'minifying',
+      total: trackingInfo.totalPages,
+      scrapingCompleted: trackingInfo.scrapingCompleted,
+      minifyingCompleted: trackingInfo.minifyingCompleted,
+      trainingCompleted: trackingInfo.trainingCompleted,
+      failed: trackingInfo.failedPages,
+      overallProgress: calculateOverallProgress(trackingInfo)
+    });
+  }
+}
+
     }
   },
   { connection: redisConfig, concurrency: 5 }
