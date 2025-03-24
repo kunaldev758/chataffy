@@ -10,9 +10,13 @@ const TrainingList = require("../models/OpenaiTrainingList");
 const webPageQueue = require("../services/webPageCrawler");
 
 const commonHelper = require("../helpers/commonHelper.js");
-const ScrapeTracker = require("../services/ScrapeTracker.js");
+const ScrapeTracker = require("../services/scrapeTracker.js");
 const ObjectId = require("mongoose").Types.ObjectId;
-
+// const SocketController = require('./SocketController.js')
+// const {getSocketController} = require('../socket')
+// const socketController = getSocketController();
+// const { emitToUser } = initializeSocketController();
+const appEvents = require('../events.js');
 const OpenaiTrainingListController = {};
 
 // Update createFaq method
@@ -111,18 +115,7 @@ OpenaiTrainingListController.scrape = async (req, res) => {
                 ScrapeTracker.getTracking(userId).totalPages += webPageLocs.length;
               }
                 // Emit initial progress
-                // req.io.to('user'+userId).emit('scraping-progress', {
-                //   status: 'starting',
-                //   stage: 'scraping',
-                //   total: ScrapeTracker.getTracking(userId).totalPages,
-                //   scrapingCompleted: 0,
-                //   minifyingCompleted: 0,
-                //   trainingCompleted: 0,
-                //   failed: 0,
-                //   overallProgress: 0
-                // });
-                 // Use the socket controller instead of req.io
-              SocketController.emitToUser(userId, 'scraping-progress', {
+                appEvents.emit('userEvent', userId, 'scraping-progress', {
                 status: 'starting',
                 stage: 'scraping',
                 total: ScrapeTracker.getTracking(userId).totalPages,
@@ -139,10 +132,11 @@ OpenaiTrainingListController.scrape = async (req, res) => {
                 trainingListIds.forEach(id => {
                   ScrapeTracker.addTrainingListId(userId, id);
                 });
-              req.io.to('user'+userId).emit('web-pages-added');
+              // req.io.to('user'+userId).emit('web-pages-added');
+               appEvents.emit('userEvent', userId, 'web-pages-added')
                // Add web pages to queue using bullmq
                for (const trainingListId of trainingListIds) {
-                // await webPageQueue.add('webPageScraping', { trainingListId, pineconeIndexName }); // Job Name and data
+                await webPageQueue.add('webPageScraping', { trainingListId, pineconeIndexName }); // Job Name and data
               }
             }
 
@@ -175,7 +169,7 @@ OpenaiTrainingListController.scrape = async (req, res) => {
   } catch (error) {
     console.error(error);
     // Emit socket event: Scraping failed
-    req.io.emit("scrapingFailed", { message: "Scraping process failed." });
+    // req.io.emit("scrapingFailed", { message: "Scraping process failed." });
   }
 };
 

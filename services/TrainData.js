@@ -6,7 +6,8 @@ const { MarkdownTextSplitter } = require("langchain/text_splitter");
 const TrainingList = require("../models/OpenaiTrainingList");
 const OpenAIUsageController = require("../controllers/OpenAIUsageController");
 const { emitEvent } = require('../helpers/socketHelper');
-// const ScrapeTracker = require("../helpers/scrapeTracker");
+const ScrapeTracker = require("./scrapeTracker");
+const appEvents = require('../events.js');
 
 const redisConfig = {
   url: "rediss://default:AVNS_hgyd-Akk8_1yNrsH9_U@valkey-26e6c5af-chataffy-kunalagrawal-c505.l.aivencloud.com:10064",
@@ -189,6 +190,49 @@ const worker = new Worker(
         "webPage.mappingStatus": 2,
         trainingStatus: 4,
       });
+
+      if (ScrapeTracker.getTracking(pageUserId)) {
+        ScrapeTracker.updateTracking(pageUserId, 'training', true);
+        
+        // Get updated tracking info
+        const trackingInfo = ScrapeTracker.getTracking(pageUserId);
+        
+        // Check if all pages are processed
+        const isComplete = 
+          trackingInfo.trainingCompleted + trackingInfo.failedPages >= trackingInfo.totalPages;
+        
+        // Emit progress update
+        // if (global.io) {
+          appEvents.emit('userEvent', userId, 'scraping-progress', {
+          // global.io.to('user'+pageUserId).emit('scraping-progress', {
+            status: isComplete ? 'complete' : 'in-progress',
+            stage: 'training',
+            total: trackingInfo.totalPages,
+            scrapingCompleted: trackingInfo.scrapingCompleted,
+            minifyingCompleted: trackingInfo.minifyingCompleted,
+            trainingCompleted: trackingInfo.trainingCompleted,
+            failed: trackingInfo.failedPages,
+            overallProgress: calculateOverallProgress(trackingInfo)
+          });
+          
+          // If complete, send completion event
+          if (isComplete) {
+            appEvents.emit('userEvent', userId, 'scraping-complete', {
+            // global.io.to('user'+pageUserId).emit('scraping-complete', {
+              total: trackingInfo.totalPages,
+              processed: trackingInfo.trainingCompleted,
+              failed: trackingInfo.failedPages,
+              duration: Date.now() - trackingInfo.startTime
+            });
+            
+            // Clear tracking data after completion
+            setTimeout(() => {
+              ScrapeTracker.clearTracking(pageUserId);
+            }, 60000); // Clear after 1 minute
+          }
+        // }
+      }
+
 
       sendClientEvent(userId, "web-page-completed", {
         trainingListId,

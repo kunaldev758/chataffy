@@ -5,6 +5,7 @@ const TrainingList = require("../models/OpenaiTrainingList");
 const pineconeTrainQueue = require("./TrainData");
 const urlModule = require("url");
 const ScrapeTracker = require("./scrapeTracker");
+const appEvents = require('../events.js');
 
 const allowedTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "dl", "dt", "dd","a" ];
 const redisConfig = {
@@ -48,8 +49,8 @@ const worker = new Worker(
     const trackingInfo = ScrapeTracker.getTracking(pageUserId);
     
     // Emit progress update
-    if (global.io) {
-      global.io.to('user'+pageUserId).emit('scraping-progress', {
+    // if (global.io) {
+      appEvents.emit('userEvent', userId, 'scraping-progress', {
         status: 'in-progress',
         stage: 'minifying',
         total: trackingInfo.totalPages,
@@ -57,9 +58,9 @@ const worker = new Worker(
         minifyingCompleted: trackingInfo.minifyingCompleted,
         trainingCompleted: trackingInfo.trainingCompleted,
         failed: trackingInfo.failedPages,
-        overallProgress: calculateOverallProgress(trackingInfo)
+        // overallProgress: calculateOverallProgress(trackingInfo)
       });
-    }
+    // }
   }
 
         await pineconeTrainQueue.add("pineconeTraining", {
@@ -91,8 +92,8 @@ const worker = new Worker(
   const trackingInfo = ScrapeTracker.getTracking(pageUserId);
   
   // Emit progress update
-  if (global.io) {
-    global.io.to('user'+pageUserId).emit('scraping-progress', {
+  // if (global.io) {
+    appEvents.emit('userEvent', userId, 'scraping-progress', {
       status: 'in-progress',
       stage: 'minifying',
       total: trackingInfo.totalPages,
@@ -100,9 +101,9 @@ const worker = new Worker(
       minifyingCompleted: trackingInfo.minifyingCompleted,
       trainingCompleted: trackingInfo.trainingCompleted,
       failed: trackingInfo.failedPages,
-      overallProgress: calculateOverallProgress(trackingInfo)
+      // overallProgress: calculateOverallProgress(trackingInfo)
     });
-  }
+  // }
 }
 
     }

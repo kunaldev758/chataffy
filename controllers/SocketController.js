@@ -1,739 +1,757 @@
-const jwt = require("jsonwebtoken");
-
-const { encode } = require("html-entities");
-const { JSDOM } = require("jsdom");
-const { Node, document } = new JSDOM("").window;
-
-const CreditsController = require("../controllers/CreditsController");
-const OpenaiTrainingListController = require("../controllers/OpenaiTrainingListController");
-const ChatMessageController = require("../controllers/ChatMessageController");
-const VisitorController = require("../controllers/VisitorController");
-const ConversationController = require("../controllers/ConversationController");
-const User = require("../models/User");
-const Widget = require("../models/Widget");
-const Visitor = require("../models/Visitor");
-const Conversation = require("../models/Conversation");
-const ConversationTagController = require("../controllers/ConversationTagController");
-const DashboardController = require("../controllers/DashboardController");
-const QueryController = require("../controllers/QueryController");
-
-let io = null;
-const activeUsers = new Map(); // Maps userId to socket instances
-
-// Initialize with io instance
-const initializeSocketController = (_io) => {
-  io = _io;
-  return { 
-    socketMiddleware: myMiddleware,
-    initializeSocketEvents
-  };
-};
-
-
-const verifyToken = (token) => {
-  return new Promise((resolve, reject) => {
-    jwt.verify(token, process.env.JWT_SECRET_KEY, (err, decoded) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(decoded);
-      }
-    });
-  });
-};
-// Middleware function
-const myMiddleware = async (socket, next) => {
-  try {
-    const { token, visitorId, widgetId, widgetAuthToken } =
-      socket.handshake.query;
-
-    if (token && !widgetId) {
-      // Client Authentication
-      const decoded = await verifyToken(token);
-      if (!decoded) throw new Error("Invalid token.");
-
-      const user = await User.findById(decoded._id);
-      if (!user || user.auth_token !== token)
-        throw new Error("User not found or token mismatch.");
-
-      socket.userId = user._id;
-      socket.type = "client";
-
-       // Store socket instance for later use
-       if (!activeUsers.has(user._id.toString())) {
-        activeUsers.set(user._id.toString(), []);
-      }
-      activeUsers.get(user._id.toString()).push(socket);
-
-    } else if (visitorId && widgetId && widgetAuthToken) {
-      // Visitor Authentication
-      const widget = await Widget.findOne({
-        _id: widgetId,
-        widgetToken: widgetAuthToken,
-      });
-      if (!widget) throw new Error("Widget authentication failed.");
-
-      socket.userId = widget.userId;
-      socket.type = "visitor";
-
-      if (visitorId && visitorId != "undefined") {
-        const visitor = await Visitor.findOne({ visitorId: visitorId });
-        socket.visitorId =
-          visitor && visitor.userId.toString() === socket.userId.toString()
-            ? visitor._id
-            : (await VisitorController.createVisitor(socket.userId, visitorId))
-                ._id;
-      } else {
-        const visitor = await VisitorController.createVisitor(
-          socket.userId,
-          visitorId
-        );
-        socket.visitorId = visitor._id;
-      }
-    } else {
-      throw new Error("Invalid connection type or credentials.");
-    }
-    next();
-  } catch (error) {
-    console.error("Socket Middleware Error:", error.message);
-    next(new Error("Authentication failed."));
-  }
-};
-
-const initializeSocketEvents = (socket) => {
-  // io.use(myMiddleware);
-  const { type, userId, visitorId } = socket;
-
-  socket.on('disconnect', () => {
-    if (userId) {
-      const userSockets = activeUsers.get(userId.toString());
-      if (userSockets) {
-        const index = userSockets.indexOf(socket);
-        if (index !== -1) {
-          userSockets.splice(index, 1);
-        }
-        // If no more sockets for this user, remove the entry
-        if (userSockets.length === 0) {
-          activeUsers.delete(userId.toString());
-        }
-      }
-    }
-  });
-
-    if (type === "client") {
-      // Join client to their unique room
-      let conversationRoom = ``;
-      const clientRoom = `user-${userId}`;
-      socket.join(clientRoom);
-
-      socket.on("client-connect", async () => {
-        socket.emit("client-connect-response", {
-          response: "Received data from message",
-        });
-      });
-
-      socket.on("get-credit-count", async (data) => {
-        const credits = await CreditsController.getUserCredits(userId);
-        socket.emit("get-credit-count-response", {
-          response: "Received data from message",
-          data: credits,
-        });
-      });
-      socket.on("get-training-list-count", async (data) => {
-        const webPagesCount =
-          await OpenaiTrainingListController.getWebPageUrlCount(userId);
-        const docSnippets = await OpenaiTrainingListController.getSnippetCount(
-          userId
-        );
-        // {crawledDocs: 0, totalDocs: 0};
-        const faqs = await OpenaiTrainingListController.getFaqCount(userId);
-        // {crawledFaqs: 0,totalFaqs: 0};
-        socket.emit("get-training-list-count-response", {
-          response: "Received data from message",
-          data: { ...webPagesCount, ...docSnippets, ...faqs },
-        });
-      });
-      socket.on("get-training-list", async (data) => {
-        const { skip, limit, sourcetype, actionType } = data;
-        const webPages = await OpenaiTrainingListController.getWebPageList(
-          userId,
-          skip,
-          limit,
-          sourcetype,
-          actionType
-        );
-        socket.emit("get-training-list-response", {
-          response: "Received data from message",
-          data: webPages,
-        });
-      });
-
-      socket.on("get-open-conversations-list", async (data) => {
-        try {
-          const conv = await Conversation.find({
-            userId: userId,
-            conversationOpenStatus: "open",
-          }).sort({ createdAt: -1 });
-
-          const updatedVisitors = await Promise.all(
-            conv.map(async (conv) => {
-              const conversation = conv.toObject();
-              const visitor = await Visitor.findOne({ _id: conv.visitor });
-              conversation["visitor"] = visitor;
-              return conversation;
-            })
-          );
-
-          // Emit the response back to the frontend
-          socket.emit("get-open-conversations-list-response", {
-            status: "success",
-            conversations: updatedVisitors,
-          });
-        } catch (error) {
-          console.error("Error fetching conversations list:", error);
-
-          // Emit an error response
-          socket.emit("get-open-conversations-list-response", {
-            status: "error",
-            message: "Failed to fetch conversations list",
-          });
-        }
-      });
-
-      socket.on("get-close-conversations-list", async (data) => {
-        try {
-          const conv = await Conversation.find({
-            userId: userId,
-            conversationOpenStatus: "close",
-          }).sort({ createdAt: -1 });
-
-          const updatedVisitors = await Promise.all(
-            conv.map(async (conv) => {
-              const conversation = conv.toObject();
-              const visitor = await Visitor.findOne({ _id: conv.visitor });
-              conversation["visitor"] = visitor;
-              return conversation;
-            })
-          );
-
-          // Emit the response back to the frontend
-          socket.emit("get-close-conversations-list-response", {
-            status: "success",
-            conversations: updatedVisitors,
-          });
-        } catch (error) {
-          console.error("Error fetching close conversations list:", error);
-          // Emit an error response
-          socket.emit("get-close-conversations-list-response", {
-            status: "error",
-            message: "Failed to fetch close conversations list",
-          });
-        }
-      });
-
-      socket.on("set-conversation-id", async ({ conversationId }, callback) => {
-        try {
-          socket.leave(conversationRoom);
-          conversationRoom = `conversation-${conversationId}`;
-          socket.join(conversationRoom);
-        } catch (error) {
-          console.error("set-conversation-id error:", error.message);
-          callback?.({ success: false, error: error.message });
-        }
-      });
-
-      socket.on("message-seen", async ({ conversationId }, callback) => {
-        try {
-          await Conversation.updateOne(
-            { _id: conversationId },
-            { $set: { newMessage: 0 } }
-          );
-        } catch (error) {
-          console.error("update message-seen error:", error.message);
-          callback?.({ success: false, error: error.message });
-        }
-      });
-
-      socket.on(
-        "client-send-message",
-        async ({ message, visitorId }, callback) => {
-          try {
-            const conversation =
-              await ConversationController.getOpenConversation(
-                visitorId,
-                userId
-              );
-            const conversationId = conversation?._id || null;
-
-            const chatMessage = await ChatMessageController.createChatMessage(
-              conversationId,
-              visitorId,
-              "agent",
-              message,
-              userId
-            );
-
-            io.to(`conversation-${visitorId}`).emit(
-              "conversation-append-message",
-              { chatMessage }
-            );
-            callback?.({ success: true, chatMessage });
-          } catch (error) {
-            console.error("client-send-message error:", error.message);
-            callback?.({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on(
-        "client-send-add-note",
-        async ({ message, visitorId, conversationId }, callback) => {
-          try {
-            const note = await ChatMessageController.addNoteToChat(
-              visitorId,
-              "agent",
-              message,
-              conversationId,
-              userId
-            );
-            callback?.({ success: true, note });
-          } catch (error) {
-            console.error("client-send-add-note error:", error.message);
-            callback?.({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on(
-        "get-all-note-messages",
-        async ({ conversationId }, callback) => {
-          try {
-            const notes = await ChatMessageController.getAllChatNotesMessages(
-              conversationId
-            );
-            callback?.({ success: true, notes: notes });
-          } catch (error) {
-            console.error("get-all-note-messages error:", error.message);
-            callback?.({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on(
-        "get-visitor-old-conversations",
-        async ({ visitorId }, callback) => {
-          try {
-            const conversations =
-              await ConversationController.getAllOldConversations(visitorId);
-            callback?.({ success: true, conversations: conversations });
-          } catch (error) {
-            console.error(
-              "get-visitor-old-conversations error:",
-              error.message
-            );
-            callback?.({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on(
-        "add-conversation-tag",
-        async ({ name, conversationId }, callback) => {
-          try {
-            const updatedTags = await ConversationTagController.createTag({
-              name,
-              conversationId,
-              userId,
-            });
-            callback({ success: true, tags: updatedTags });
-          } catch (error) {
-            callback({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on(
-        "get-conversation-tags",
-        async ({ conversationId }, callback) => {
-          try {
-            const tags =
-              await ConversationTagController.getAllTagsOfConversation({
-                conversationId,
-              });
-            callback({ success: true, tags });
-          } catch (error) {
-            callback({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on(
-        "remove-conversation-tag",
-        async ({ id, conversationId }, callback) => {
-          try {
-            const updatedTags = await ConversationTagController.deleteTagById({
-              id,
-            });
-            callback({ success: true, tags: updatedTags });
-          } catch (error) {
-            callback({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on(
-        "close-conversation",
-        async ({ conversationId, status }, callback) => {
-          try {
-            let conversation = await Conversation.findOne({
-              _id: conversationId,
-              conversationOpenStatus: "open",
-            });
-            let visitorId = conversation?.visitor;
-
-            await ConversationController.UpdateConversationStatusOpenClose(
-              conversationId,
-              status
-            );
-
-            callback({ success: true });
-            io.to(`conversation-${visitorId}`).emit(
-              "visitor-conversation-close",
-              { conversationStatus: "close" }
-            );
-          } catch (error) {
-            callback({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on(
-        "block-visitor",
-        async ({ visitorId, conversationId }, callback) => {
-          try {
-            await VisitorController.blockVisitor({ visitorId });
-
-            await ConversationController.UpdateConversationStatusOpenClose(
-              conversationId,
-              "close"
-            );
-
-            callback({ success: true });
-            io.to(`conversation-${visitorId}`).emit("visitor-blocked", {
-              conversationStatus: "close",
-            });
-          } catch (error) {
-            callback({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on("close-ai-response", async ({ conversationId }, callback) => {
-        try {
-          await ConversationController.disableAiChat({ conversationId });
-          callback({ success: true });
-        } catch (error) {
-          callback({ success: false, error: error.message });
-        }
-      });
-
-      socket.on("search-conversations", async ({ query }, callback) => {
-        try {
-          const visitors = await ConversationController.searchByTagOrName(
-            query,
-            userId
-          );
-          callback({ success: true, data: visitors });
-        } catch (error) {
-          console.error("Error during search:", error);
-          callback({ success: false, error: error.message });
-        }
-      });
-
-      ///////dashboard////////////
-      socket.on("fetch-dashboard-data", async ({ dateRange }, callback) => {
-        try {
-          // Fetch data from the database based on date range
-          const data = await DashboardController.getDashboardData(
-            dateRange,
-            socket.userId
-          );
-          callback({ success: true, data });
-        } catch (error) {
-          console.error("Error fetching dashboard data:", error);
-          callback({ success: false, error: "Failed to fetch data" });
-        }
-      });
-
-      // Emit real-time updates to all clients
-      // setInterval(async () => {
-      //   const realTimeData = await getRealTimeUpdates(); // Replace with actual DB logic
-      //   io.emit('update-dashboard-data', realTimeData);
-      // }, 5000);
-      ////////////////dash end///////////
-
-      socket.on("disconnect", () => {
-        socket.leave(clientRoom);
-        socket.leave(conversationRoom);
-      });
-    }
-
-    if (type === "visitor") {
-      const VisitorRoom = `conversation-${visitorId}`;
-      socket.join(VisitorRoom);
-
-      socket.on("visitor-ip", async ({ ip }, callback) => {
-        try {
-          const visitorDetail = await Visitor.findOne({ ip: ip });
-          if (visitorDetail.is_blocked == true) {
-            io.to(`conversation-${visitorId}`).emit("visitor-is-blocked", {});
-          }
-        } catch (error) {
-          console.error("visitor-ip error:", error.message);
-          callback?.({ success: false, error: error.message });
-        }
-      });
-
-      socket.on("visitor-connect", async ({ widgetToken }) => {
-        try {
-          // Fetch theme settings for the widget
-          const themeSettings = await Widget.findOne({ widgetToken });
-
-          // Fetch the visitor's conversation history
-          let chatMessages = [];
-          chatMessages = await ChatMessageController.getAllChatMessages(
-            visitorId
-          );
-
-          if (chatMessages.length <= 0) {
-            const conversation =
-              await ConversationController.getOpenConversation(
-                visitorId,
-                userId
-              );
-            const conversationId = conversation?._id || null;
-
-            await ChatMessageController.createChatMessage(
-              conversationId,
-              visitorId,
-              "bot",
-              themeSettings?.welcomeMessage,
-              userId
-            );
-
-            chatMessages = await ChatMessageController.getAllChatMessages(
-              visitorId
-            );
-
-            io.to(`user-${userId}`).emit("visitor-connect-list-update", {});
-          }
-
-          // Emit visitor-connect-response with visitor data
-          socket.emit("visitor-connect-response", {
-            chatMessages,
-            themeSettings,
-          });
-        } catch (error) {
-          console.error("Error handling visitor-connect:", error);
-          socket.emit("error", { message: "Failed to connect visitor" });
-        }
-      });
-
-      socket.on(
-        "save-visitor-details",
-        async ({ location, ip, visitorDetails }, callback) => {
-          try {
-            await VisitorController.updateVisitorById({
-              id: visitorId,
-              location,
-              ip,
-              visitorDetails,
-            });
-          } catch (error) {
-            console.error("save-visitor-details error:", error.message);
-            callback?.({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on("visitor-send-message", async ({ message, id }, callback) => {
-        try {
-          const conversation = await ConversationController.getOpenConversation(
-            visitorId,
-            userId
-          );
-          const conversationId = conversation?._id || null;
-
-          const encodedMessage = encode(message);
-          let chatMessage = await ChatMessageController.createChatMessage(
-            conversationId,
-            visitorId,
-            "visitor",
-            "<p>" + encodedMessage + "</p>",
-            userId
-          );
-
-          io.to(`conversation-${conversationId}`).emit(
-            "conversation-append-message",
-            {
-              chatMessage,
-            }
-          );
-          io.to(`user-${userId}`).emit("new-message-count", {});
-
-          await Conversation.updateOne(
-            { _id: conversationId },
-            { $inc: { newMessage: 1 } }
-          );
-          callback?.({ success: true, chatMessage, id });
-          if (conversation.aiChat) {
-            response_data = await QueryController.handleQuestionAnswer(
-              userId,
-              message,
-              conversationId
-            );
-            io.to(`conversation-${visitorId}`).emit("intermediate-response", {
-              message: "...replying",
-            });
-            io.to(`conversation-${conversationId}`).emit(
-              "intermediate-response",
-              { message: "...replying" }
-            );
-
-            if (response_data.success == true) {
-              const chatMessageResponse =
-                await ChatMessageController.createChatMessage(
-                  conversationId,
-                  "",
-                  "assistant",
-                  response_data.answer,
-                  userId,
-                  response_data?.sources
-                );
-              io.to(`conversation-${visitorId}`).emit(
-                "conversation-append-message",
-                { chatMessage: chatMessageResponse, sources:response_data?.sources }
-              );
-              io.to(`conversation-${conversationId}`).emit(
-                "conversation-append-message",
-                { chatMessage: chatMessageResponse, sources:response_data?.sources }
-              );
-            } else {
-              const chatMessageResponse =
-                await ChatMessageController.createChatMessage(
-                  conversationId,
-                  "",
-                  "assistant",
-                  "error in generating Response",
-                  userId,
-                  // response_data.infoSources
-                );
-              io.to(`conversation-${visitorId}`).emit(
-                "conversation-append-message",
-                { chatMessage: chatMessageResponse }
-              );
-              io.to(`conversation-${conversationId}`).emit(
-                "conversation-append-message",
-                { chatMessage: chatMessageResponse }
-              );
-            }
-          }
-        } catch (error) {
-          console.error("visitor-send-message error:", error.message);
-          callback?.({ success: false, error: error.message });
-        }
-      });
-
-      socket.on(
-        "conversation-feedback",
-        async ({ conversationId, feedback }, callback) => {
-          try {
-            const updatedMessage = await ConversationController.updateFeedback(
-              conversationId,
-              feedback
-            );
-            callback?.({ success: true, updatedMessage });
-          } catch (error) {
-            console.error("message-feedback error:", error.message);
-            callback?.({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on(
-        "close-conversation-visitor",
-        async ({ conversationId, status }, callback) => {
-          try {
-            await ConversationController.UpdateConversationStatusOpenClose(
-              conversationId,
-              status
-            );
-            callback?.({ success: true });
-
-            io.to(`conversation-${conversationId}`).emit("visitor-close-chat", {
-              conversationStatus: "close",
-            });
-            socket.leave(conversationRoom);
-          } catch (error) {
-            console.error("close-conversation error:", error.message);
-            callback?.({ success: false, error: error.message });
-          }
-        }
-      );
-
-      socket.on("disconnect", () => {
-        socket.leave(VisitorRoom);
-      });
-    }
-
-};
-
-// External functions to be used in other controllers
-const emitToUser = (userId, eventName, data) => {
-  if (!io) {
-    console.error('Socket IO not initialized');
-    return false;
-  }
+// const jwt = require("jsonwebtoken");
+
+// const { encode } = require("html-entities");
+// const { JSDOM } = require("jsdom");
+// const { Node, document } = new JSDOM("").window;
+
+// const CreditsController = require("../controllers/CreditsController");
+// const OpenaiTrainingListController = require("../controllers/OpenaiTrainingListController");
+// const ChatMessageController = require("../controllers/ChatMessageController");
+// const VisitorController = require("../controllers/VisitorController");
+// const ConversationController = require("../controllers/ConversationController");
+// const User = require("../models/User");
+// const Widget = require("../models/Widget");
+// const Visitor = require("../models/Visitor");
+// const Conversation = require("../models/Conversation");
+// const ConversationTagController = require("../controllers/ConversationTagController");
+// const DashboardController = require("../controllers/DashboardController");
+// const QueryController = require("../controllers/QueryController");
+
+// let io = null;
+// const activeUsers = new Map(); // Maps userId to socket instances
+
+// // Initialize with io instance
+// const initializeSocketController = (_io) => {
+//   io = _io;
+//   return { 
+//     socketMiddleware: myMiddleware,
+//     initializeSocketEvents
+//   };
+// };
+
+
+// const verifyToken = (token) => {
+//   return new Promise((resolve, reject) => {
+//     jwt.verify(token, process.env.JWT_SECRET_KEY, (err, decoded) => {
+//       if (err) {
+//         reject(err);
+//       } else {
+//         resolve(decoded);
+//       }
+//     });
+//   });
+// };
+// // Middleware function
+// const myMiddleware = async (socket, next) => {
+//   try {
+//     const { token, visitorId, widgetId, widgetAuthToken } =
+//       socket.handshake.query;
+
+//     if (token && !widgetId) {
+//       // Client Authentication
+//       const decoded = await verifyToken(token);
+//       if (!decoded) throw new Error("Invalid token.");
+
+//       const user = await User.findById(decoded._id);
+//       if (!user || user.auth_token !== token)
+//         throw new Error("User not found or token mismatch.");
+
+//       socket.userId = user._id;
+//       socket.type = "client";
+
+//        // Store socket instance for later use
+//        if (!activeUsers.has(user._id.toString())) {
+//         activeUsers.set(user._id.toString(), []);
+//       }
+//       activeUsers.get(user._id.toString()).push(socket);
+
+//     } else if (visitorId && widgetId && widgetAuthToken) {
+//       // Visitor Authentication
+//       const widget = await Widget.findOne({
+//         _id: widgetId,
+//         widgetToken: widgetAuthToken,
+//       });
+//       if (!widget) throw new Error("Widget authentication failed.");
+
+//       socket.userId = widget.userId;
+//       socket.type = "visitor";
+
+//       if (visitorId && visitorId != "undefined") {
+//         const visitor = await Visitor.findOne({ visitorId: visitorId });
+//         socket.visitorId =
+//           visitor && visitor.userId.toString() === socket.userId.toString()
+//             ? visitor._id
+//             : (await VisitorController.createVisitor(socket.userId, visitorId))
+//                 ._id;
+//       } else {
+//         const visitor = await VisitorController.createVisitor(
+//           socket.userId,
+//           visitorId
+//         );
+//         socket.visitorId = visitor._id;
+//       }
+//     } else {
+//       throw new Error("Invalid connection type or credentials.");
+//     }
+//     next();
+//   } catch (error) {
+//     console.error("Socket Middleware Error:", error.message);
+//     next(new Error("Authentication failed."));
+//   }
+// };
+
+// const initializeSocketEvents = (socket) => {
+//   // io.use(myMiddleware);
+//   const { type, userId, visitorId } = socket;
+
+//     // Handle room joining
+//     socket.on('join_room', (userId) => {
+//       if (!userId) {
+//         console.error('No room ID provided');
+//         return;
+//       }
+      
+//       socket.join(`user-${userId}`);
+//       socket.emit('room_joined', userId);
+//       console.log(`Socket ${socket.id} joined room: ${userId}`);
+      
+//       // Optionally notify other room members
+//       // socket.to(userId).emit('user_joined', {
+//       //   socketId: socket.id,
+//       //   type: socket.type
+//       // });
+//     });
+
+//   socket.on('disconnect', () => {
+//     if (userId) {
+//       const userSockets = activeUsers.get(userId.toString());
+//       if (userSockets) {
+//         const index = userSockets.indexOf(socket);
+//         if (index !== -1) {
+//           userSockets.splice(index, 1);
+//         }
+//         // If no more sockets for this user, remove the entry
+//         if (userSockets.length === 0) {
+//           activeUsers.delete(userId.toString());
+//         }
+//       }
+//     }
+//   });
+
+//     if (type === "client") {
+//       // Join client to their unique room
+//       let conversationRoom = ``;
+//       const clientRoom = `user-${userId}`;
+//       // socket.join(clientRoom);
+
+//       socket.on("client-connect", async () => {
+//         socket.emit("client-connect-response", {
+//           response: "Received data from message",
+//         });
+//       });
+
+//       socket.on("get-credit-count", async (data) => {
+//         const credits = await CreditsController.getUserCredits(userId);
+//         socket.emit("get-credit-count-response", {
+//           response: "Received data from message",
+//           data: credits,
+//         });
+//       });
+//       socket.on("get-training-list-count", async (data) => {
+//         const webPagesCount =
+//           await OpenaiTrainingListController.getWebPageUrlCount(userId);
+//         const docSnippets = await OpenaiTrainingListController.getSnippetCount(
+//           userId
+//         );
+//         // {crawledDocs: 0, totalDocs: 0};
+//         const faqs = await OpenaiTrainingListController.getFaqCount(userId);
+//         // {crawledFaqs: 0,totalFaqs: 0};
+//         socket.emit("get-training-list-count-response", {
+//           response: "Received data from message",
+//           data: { ...webPagesCount, ...docSnippets, ...faqs },
+//         });
+//       });
+//       socket.on("get-training-list", async (data) => {
+//         const { skip, limit, sourcetype, actionType } = data;
+//         const webPages = await OpenaiTrainingListController.getWebPageList(
+//           userId,
+//           skip,
+//           limit,
+//           sourcetype,
+//           actionType
+//         );
+//         socket.emit("get-training-list-response", {
+//           response: "Received data from message",
+//           data: webPages,
+//         });
+//       });
+
+//       socket.on("get-open-conversations-list", async (data) => {
+//         try {
+//           const conv = await Conversation.find({
+//             userId: userId,
+//             conversationOpenStatus: "open",
+//           }).sort({ createdAt: -1 });
+
+//           const updatedVisitors = await Promise.all(
+//             conv.map(async (conv) => {
+//               const conversation = conv.toObject();
+//               const visitor = await Visitor.findOne({ _id: conv.visitor });
+//               conversation["visitor"] = visitor;
+//               return conversation;
+//             })
+//           );
+
+//           // Emit the response back to the frontend
+//           socket.emit("get-open-conversations-list-response", {
+//             status: "success",
+//             conversations: updatedVisitors,
+//           });
+//         } catch (error) {
+//           console.error("Error fetching conversations list:", error);
+
+//           // Emit an error response
+//           socket.emit("get-open-conversations-list-response", {
+//             status: "error",
+//             message: "Failed to fetch conversations list",
+//           });
+//         }
+//       });
+
+//       socket.on("get-close-conversations-list", async (data) => {
+//         try {
+//           const conv = await Conversation.find({
+//             userId: userId,
+//             conversationOpenStatus: "close",
+//           }).sort({ createdAt: -1 });
+
+//           const updatedVisitors = await Promise.all(
+//             conv.map(async (conv) => {
+//               const conversation = conv.toObject();
+//               const visitor = await Visitor.findOne({ _id: conv.visitor });
+//               conversation["visitor"] = visitor;
+//               return conversation;
+//             })
+//           );
+
+//           // Emit the response back to the frontend
+//           socket.emit("get-close-conversations-list-response", {
+//             status: "success",
+//             conversations: updatedVisitors,
+//           });
+//         } catch (error) {
+//           console.error("Error fetching close conversations list:", error);
+//           // Emit an error response
+//           socket.emit("get-close-conversations-list-response", {
+//             status: "error",
+//             message: "Failed to fetch close conversations list",
+//           });
+//         }
+//       });
+
+//       socket.on("set-conversation-id", async ({ conversationId }, callback) => {
+//         try {
+//           socket.leave(conversationRoom);
+//           conversationRoom = `conversation-${conversationId}`;
+//           socket.join(conversationRoom);
+//         } catch (error) {
+//           console.error("set-conversation-id error:", error.message);
+//           callback?.({ success: false, error: error.message });
+//         }
+//       });
+
+//       socket.on("message-seen", async ({ conversationId }, callback) => {
+//         try {
+//           await Conversation.updateOne(
+//             { _id: conversationId },
+//             { $set: { newMessage: 0 } }
+//           );
+//         } catch (error) {
+//           console.error("update message-seen error:", error.message);
+//           callback?.({ success: false, error: error.message });
+//         }
+//       });
+
+//       socket.on(
+//         "client-send-message",
+//         async ({ message, visitorId }, callback) => {
+//           try {
+//             const conversation =
+//               await ConversationController.getOpenConversation(
+//                 visitorId,
+//                 userId
+//               );
+//             const conversationId = conversation?._id || null;
+
+//             const chatMessage = await ChatMessageController.createChatMessage(
+//               conversationId,
+//               visitorId,
+//               "agent",
+//               message,
+//               userId
+//             );
+
+//             io.to(`conversation-${visitorId}`).emit(
+//               "conversation-append-message",
+//               { chatMessage }
+//             );
+//             callback?.({ success: true, chatMessage });
+//           } catch (error) {
+//             console.error("client-send-message error:", error.message);
+//             callback?.({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on(
+//         "client-send-add-note",
+//         async ({ message, visitorId, conversationId }, callback) => {
+//           try {
+//             const note = await ChatMessageController.addNoteToChat(
+//               visitorId,
+//               "agent",
+//               message,
+//               conversationId,
+//               userId
+//             );
+//             callback?.({ success: true, note });
+//           } catch (error) {
+//             console.error("client-send-add-note error:", error.message);
+//             callback?.({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on(
+//         "get-all-note-messages",
+//         async ({ conversationId }, callback) => {
+//           try {
+//             const notes = await ChatMessageController.getAllChatNotesMessages(
+//               conversationId
+//             );
+//             callback?.({ success: true, notes: notes });
+//           } catch (error) {
+//             console.error("get-all-note-messages error:", error.message);
+//             callback?.({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on(
+//         "get-visitor-old-conversations",
+//         async ({ visitorId }, callback) => {
+//           try {
+//             const conversations =
+//               await ConversationController.getAllOldConversations(visitorId);
+//             callback?.({ success: true, conversations: conversations });
+//           } catch (error) {
+//             console.error(
+//               "get-visitor-old-conversations error:",
+//               error.message
+//             );
+//             callback?.({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on(
+//         "add-conversation-tag",
+//         async ({ name, conversationId }, callback) => {
+//           try {
+//             const updatedTags = await ConversationTagController.createTag({
+//               name,
+//               conversationId,
+//               userId,
+//             });
+//             callback({ success: true, tags: updatedTags });
+//           } catch (error) {
+//             callback({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on(
+//         "get-conversation-tags",
+//         async ({ conversationId }, callback) => {
+//           try {
+//             const tags =
+//               await ConversationTagController.getAllTagsOfConversation({
+//                 conversationId,
+//               });
+//             callback({ success: true, tags });
+//           } catch (error) {
+//             callback({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on(
+//         "remove-conversation-tag",
+//         async ({ id, conversationId }, callback) => {
+//           try {
+//             const updatedTags = await ConversationTagController.deleteTagById({
+//               id,
+//             });
+//             callback({ success: true, tags: updatedTags });
+//           } catch (error) {
+//             callback({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on(
+//         "close-conversation",
+//         async ({ conversationId, status }, callback) => {
+//           try {
+//             let conversation = await Conversation.findOne({
+//               _id: conversationId,
+//               conversationOpenStatus: "open",
+//             });
+//             let visitorId = conversation?.visitor;
+
+//             await ConversationController.UpdateConversationStatusOpenClose(
+//               conversationId,
+//               status
+//             );
+
+//             callback({ success: true });
+//             io.to(`conversation-${visitorId}`).emit(
+//               "visitor-conversation-close",
+//               { conversationStatus: "close" }
+//             );
+//           } catch (error) {
+//             callback({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on(
+//         "block-visitor",
+//         async ({ visitorId, conversationId }, callback) => {
+//           try {
+//             await VisitorController.blockVisitor({ visitorId });
+
+//             await ConversationController.UpdateConversationStatusOpenClose(
+//               conversationId,
+//               "close"
+//             );
+
+//             callback({ success: true });
+//             io.to(`conversation-${visitorId}`).emit("visitor-blocked", {
+//               conversationStatus: "close",
+//             });
+//           } catch (error) {
+//             callback({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on("close-ai-response", async ({ conversationId }, callback) => {
+//         try {
+//           await ConversationController.disableAiChat({ conversationId });
+//           callback({ success: true });
+//         } catch (error) {
+//           callback({ success: false, error: error.message });
+//         }
+//       });
+
+//       socket.on("search-conversations", async ({ query }, callback) => {
+//         try {
+//           const visitors = await ConversationController.searchByTagOrName(
+//             query,
+//             userId
+//           );
+//           callback({ success: true, data: visitors });
+//         } catch (error) {
+//           console.error("Error during search:", error);
+//           callback({ success: false, error: error.message });
+//         }
+//       });
+
+//       ///////dashboard////////////
+//       socket.on("fetch-dashboard-data", async ({ dateRange }, callback) => {
+//         try {
+//           // Fetch data from the database based on date range
+//           const data = await DashboardController.getDashboardData(
+//             dateRange,
+//             socket.userId
+//           );
+//           callback({ success: true, data });
+//         } catch (error) {
+//           console.error("Error fetching dashboard data:", error);
+//           callback({ success: false, error: "Failed to fetch data" });
+//         }
+//       });
+
+//       // Emit real-time updates to all clients
+//       // setInterval(async () => {
+//       //   const realTimeData = await getRealTimeUpdates(); // Replace with actual DB logic
+//       //   io.emit('update-dashboard-data', realTimeData);
+//       // }, 5000);
+//       ////////////////dash end///////////
+
+//       socket.on("disconnect", () => {
+//         socket.leave(clientRoom);
+//         socket.leave(conversationRoom);
+//       });
+//     }
+
+//     if (type === "visitor") {
+//       const VisitorRoom = `conversation-${visitorId}`;
+//       socket.join(VisitorRoom);
+
+//       socket.on("visitor-ip", async ({ ip }, callback) => {
+//         try {
+//           const visitorDetail = await Visitor.findOne({ ip: ip });
+//           if (visitorDetail.is_blocked == true) {
+//             io.to(`conversation-${visitorId}`).emit("visitor-is-blocked", {});
+//           }
+//         } catch (error) {
+//           console.error("visitor-ip error:", error.message);
+//           callback?.({ success: false, error: error.message });
+//         }
+//       });
+
+//       socket.on("visitor-connect", async ({ widgetToken }) => {
+//         try {
+//           // Fetch theme settings for the widget
+//           const themeSettings = await Widget.findOne({ widgetToken });
+
+//           // Fetch the visitor's conversation history
+//           let chatMessages = [];
+//           chatMessages = await ChatMessageController.getAllChatMessages(
+//             visitorId
+//           );
+
+//           if (chatMessages.length <= 0) {
+//             const conversation =
+//               await ConversationController.getOpenConversation(
+//                 visitorId,
+//                 userId
+//               );
+//             const conversationId = conversation?._id || null;
+
+//             await ChatMessageController.createChatMessage(
+//               conversationId,
+//               visitorId,
+//               "bot",
+//               themeSettings?.welcomeMessage,
+//               userId
+//             );
+
+//             chatMessages = await ChatMessageController.getAllChatMessages(
+//               visitorId
+//             );
+
+//             io.to(`user-${userId}`).emit("visitor-connect-list-update", {});
+//           }
+
+//           // Emit visitor-connect-response with visitor data
+//           socket.emit("visitor-connect-response", {
+//             chatMessages,
+//             themeSettings,
+//           });
+//         } catch (error) {
+//           console.error("Error handling visitor-connect:", error);
+//           socket.emit("error", { message: "Failed to connect visitor" });
+//         }
+//       });
+
+//       socket.on(
+//         "save-visitor-details",
+//         async ({ location, ip, visitorDetails }, callback) => {
+//           try {
+//             await VisitorController.updateVisitorById({
+//               id: visitorId,
+//               location,
+//               ip,
+//               visitorDetails,
+//             });
+//           } catch (error) {
+//             console.error("save-visitor-details error:", error.message);
+//             callback?.({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on("visitor-send-message", async ({ message, id }, callback) => {
+//         try {
+//           const conversation = await ConversationController.getOpenConversation(
+//             visitorId,
+//             userId
+//           );
+//           const conversationId = conversation?._id || null;
+
+//           const encodedMessage = encode(message);
+//           let chatMessage = await ChatMessageController.createChatMessage(
+//             conversationId,
+//             visitorId,
+//             "visitor",
+//             "<p>" + encodedMessage + "</p>",
+//             userId
+//           );
+
+//           io.to(`conversation-${conversationId}`).emit(
+//             "conversation-append-message",
+//             {
+//               chatMessage,
+//             }
+//           );
+//           io.to(`user-${userId}`).emit("new-message-count", {});
+
+//           await Conversation.updateOne(
+//             { _id: conversationId },
+//             { $inc: { newMessage: 1 } }
+//           );
+//           callback?.({ success: true, chatMessage, id });
+//           if (conversation.aiChat) {
+//             response_data = await QueryController.handleQuestionAnswer(
+//               userId,
+//               message,
+//               conversationId
+//             );
+//             io.to(`conversation-${visitorId}`).emit("intermediate-response", {
+//               message: "...replying",
+//             });
+//             io.to(`conversation-${conversationId}`).emit(
+//               "intermediate-response",
+//               { message: "...replying" }
+//             );
+
+//             if (response_data.success == true) {
+//               const chatMessageResponse =
+//                 await ChatMessageController.createChatMessage(
+//                   conversationId,
+//                   "",
+//                   "assistant",
+//                   response_data.answer,
+//                   userId,
+//                   response_data?.sources
+//                 );
+//               io.to(`conversation-${visitorId}`).emit(
+//                 "conversation-append-message",
+//                 { chatMessage: chatMessageResponse, sources:response_data?.sources }
+//               );
+//               io.to(`conversation-${conversationId}`).emit(
+//                 "conversation-append-message",
+//                 { chatMessage: chatMessageResponse, sources:response_data?.sources }
+//               );
+//             } else {
+//               const chatMessageResponse =
+//                 await ChatMessageController.createChatMessage(
+//                   conversationId,
+//                   "",
+//                   "assistant",
+//                   "error in generating Response",
+//                   userId,
+//                   // response_data.infoSources
+//                 );
+//               io.to(`conversation-${visitorId}`).emit(
+//                 "conversation-append-message",
+//                 { chatMessage: chatMessageResponse }
+//               );
+//               io.to(`conversation-${conversationId}`).emit(
+//                 "conversation-append-message",
+//                 { chatMessage: chatMessageResponse }
+//               );
+//             }
+//           }
+//         } catch (error) {
+//           console.error("visitor-send-message error:", error.message);
+//           callback?.({ success: false, error: error.message });
+//         }
+//       });
+
+//       socket.on(
+//         "conversation-feedback",
+//         async ({ conversationId, feedback }, callback) => {
+//           try {
+//             const updatedMessage = await ConversationController.updateFeedback(
+//               conversationId,
+//               feedback
+//             );
+//             callback?.({ success: true, updatedMessage });
+//           } catch (error) {
+//             console.error("message-feedback error:", error.message);
+//             callback?.({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on(
+//         "close-conversation-visitor",
+//         async ({ conversationId, status }, callback) => {
+//           try {
+//             await ConversationController.UpdateConversationStatusOpenClose(
+//               conversationId,
+//               status
+//             );
+//             callback?.({ success: true });
+
+//             io.to(`conversation-${conversationId}`).emit("visitor-close-chat", {
+//               conversationStatus: "close",
+//             });
+//             socket.leave(conversationRoom);
+//           } catch (error) {
+//             console.error("close-conversation error:", error.message);
+//             callback?.({ success: false, error: error.message });
+//           }
+//         }
+//       );
+
+//       socket.on("disconnect", () => {
+//         socket.leave(VisitorRoom);
+//       });
+//     }
+
+// };
+
+// // External functions to be used in other controllers
+// const emitToUser = (userId, eventName, data) => {
+//   if (!io) {
+//     console.error('Socket IO not initialized');
+//     return false;
+//   }
   
-  // Method 1: Emit to room - if user is connected to the room
-  const userRoom = `user-${userId}`;
-  io.to(userRoom).emit(eventName, data);
+//   // Method 1: Emit to room - if user is connected to the room
+//   const userRoom = `user-${userId}`;
+//   io.to(userRoom).emit(eventName, data);
   
-  // Method 2: Emit to specific socket instances if needed
-  const userSockets = activeUsers.get(userId.toString());
-  if (userSockets && userSockets.length > 0) {
-    userSockets.forEach(socket => {
-      socket.emit(eventName, data);
-    });
-    return true;
-  }
+//   // Method 2: Emit to specific socket instances if needed
+//   const userSockets = activeUsers.get(userId.toString());
+//   if (userSockets && userSockets.length > 0) {
+//     userSockets.forEach(socket => {
+//       socket.emit(eventName, data);
+//     });
+//     return true;
+//   }
   
-  return false; // No active user found
-};
+//   return false; // No active user found
+// };
 
-const emitToRoom = (room, eventName, data) => {
-  if (!io) {
-    console.error('Socket IO not initialized');
-    return false;
-  }
+// const emitToRoom = (room, eventName, data) => {
+//   if (!io) {
+//     console.error('Socket IO not initialized');
+//     return false;
+//   }
   
-  io.to(room).emit(eventName, data);
-  return true;
-};
+//   io.to(room).emit(eventName, data);
+//   return true;
+// };
 
-const emitToAll = (eventName, data) => {
-  if (!io) {
-    console.error('Socket IO not initialized');
-    return false;
-  }
+// const emitToAll = (eventName, data) => {
+//   if (!io) {
+//     console.error('Socket IO not initialized');
+//     return false;
+//   }
   
-  io.emit(eventName, data);
-  return true;
-};
+//   io.emit(eventName, data);
+//   return true;
+// };
 
-module.exports = {
-  initializeSocketEvents,
-  emitToUser,
-  emitToRoom,
-  emitToAll,
-};
+// module.exports = {
+//   initializeSocketController,
+//   emitToUser,
+//   emitToRoom,
+//   emitToAll,
+// };

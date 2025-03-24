@@ -4,6 +4,7 @@ const { Worker, Queue } = require("bullmq");
 const TrainingList = require("../models/OpenaiTrainingList");
 const minifyingQueue = require("./webPageMinifier");
 const ScrapeTracker = require("./scrapeTracker");
+const appEvents = require('../events.js');
 
 const redisConfig = {
   url: "rediss://default:AVNS_hgyd-Akk8_1yNrsH9_U@valkey-26e6c5af-chataffy-kunalagrawal-c505.l.aivencloud.com:10064",
@@ -55,11 +56,11 @@ const worker = new Worker(
         const trackingInfo = ScrapeTracker.getTracking(pageUserId);
 
         // Calculate overall progress (weight each stage differently)
-        const overallProgress = calculateOverallProgress(trackingInfo);
+        // const overallProgress = calculateOverallProgress(trackingInfo);
 
         // Emit progress update
-        if (global.io) {
-          global.io.to("user" + pageUserId).emit("scraping-progress", {
+        // if (global.io) {
+          appEvents.emit('userEvent', userId, 'scraping-progress', {
             status: "in-progress",
             stage: "scraping",
             total: trackingInfo.totalPages,
@@ -67,9 +68,9 @@ const worker = new Worker(
             minifyingCompleted: trackingInfo.minifyingCompleted,
             trainingCompleted: trackingInfo.trainingCompleted,
             failed: trackingInfo.failedPages,
-            overallProgress: overallProgress,
+            // overallProgress: overallProgress,
           });
-        }
+        // }
       }
 
       await minifyingQueue.add("webPageMinifying", {
@@ -92,8 +93,8 @@ const worker = new Worker(
         const trackingInfo = ScrapeTracker.getTracking(pageUserId);
 
         // Emit progress update
-        if (global.io) {
-          global.io.to("user" + pageUserId).emit("scraping-progress", {
+        // if (global.io) {
+          appEvents.emit('userEvent', userId, 'scraping-progress', {
             status: "in-progress",
             stage: "scraping",
             total: trackingInfo.totalPages,
@@ -101,9 +102,9 @@ const worker = new Worker(
             minifyingCompleted: trackingInfo.minifyingCompleted,
             trainingCompleted: trackingInfo.trainingCompleted,
             failed: trackingInfo.failedPages,
-            overallProgress: calculateOverallProgress(trackingInfo),
+            // overallProgress: calculateOverallProgress(trackingInfo),
           });
-        }
+        // }
       }
     }
   },
