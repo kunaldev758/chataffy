@@ -1,4 +1,5 @@
 // services/webPageMinifier.js
+require("dotenv").config();
 const { Worker,Queue } = require("bullmq");
 const cheerio = require("cheerio");
 const TrainingList = require("../models/OpenaiTrainingList");
@@ -9,7 +10,7 @@ const appEvents = require('../events.js');
 
 const allowedTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "dl", "dt", "dd","a" ];
 const redisConfig = {
-    url:"rediss://default:AVNS_hgyd-Akk8_1yNrsH9_U@valkey-26e6c5af-chataffy-kunalagrawal-c505.l.aivencloud.com:10064",
+    url: process.env.REDIS_URL,
     maxRetriesPerRequest: null,
 };
 const minifyingQueue = new Queue('webPageMinifying', { connection: redisConfig });  
@@ -49,8 +50,7 @@ const worker = new Worker(
     const trackingInfo = ScrapeTracker.getTracking(pageUserId);
     
     // Emit progress update
-    // if (global.io) {
-      appEvents.emit('userEvent', userId, 'scraping-progress', {
+      appEvents.emit('userEvent', pageUserId, 'scraping-progress', {
         status: 'in-progress',
         stage: 'minifying',
         total: trackingInfo.totalPages,
@@ -58,9 +58,7 @@ const worker = new Worker(
         minifyingCompleted: trackingInfo.minifyingCompleted,
         trainingCompleted: trackingInfo.trainingCompleted,
         failed: trackingInfo.failedPages,
-        // overallProgress: calculateOverallProgress(trackingInfo)
       });
-    // }
   }
 
         await pineconeTrainQueue.add("pineconeTraining", {
@@ -92,8 +90,7 @@ const worker = new Worker(
   const trackingInfo = ScrapeTracker.getTracking(pageUserId);
   
   // Emit progress update
-  // if (global.io) {
-    appEvents.emit('userEvent', userId, 'scraping-progress', {
+    appEvents.emit('userEvent', pageUserId, 'scraping-progress', {
       status: 'in-progress',
       stage: 'minifying',
       total: trackingInfo.totalPages,
@@ -101,9 +98,7 @@ const worker = new Worker(
       minifyingCompleted: trackingInfo.minifyingCompleted,
       trainingCompleted: trackingInfo.trainingCompleted,
       failed: trackingInfo.failedPages,
-      // overallProgress: calculateOverallProgress(trackingInfo)
     });
-  // }
 }
 
     }

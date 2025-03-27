@@ -1,3 +1,4 @@
+require("dotenv").config();
 const User = require('../models/User');
 const Client = require('../models/Client');
 const Widget = require('../models/Widget');
@@ -15,8 +16,8 @@ const transporter = nodemailer.createTransport(
     port: 587, // Port for the SMTP server (587 for TLS, 465 for SSL)
     secure: false, // Set to true if using SSL
     auth: {
-      user: 'AKIAJL564OQBMV2RXMAA',
-      pass: 'AhEW0kHhaSrOmvhchxLZOjDMCqxGHfAQCNlgFqiEitUE',
+      user: process.env.EMAIL_USERNAME,
+      pass: process.env.EMAIL_PASSWORD,
     },
   })
 );

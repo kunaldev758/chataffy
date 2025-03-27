@@ -1,12 +1,17 @@
 require("dotenv").config();
 const { OpenAIEmbeddings } = require("@langchain/openai");
 const { Pinecone } = require("@pinecone-database/pinecone");
-const OpenAI = require("openai");
+const {OpenAI} = require("openai");
 const ChatMessageController = require("../controllers/ChatMessageController");
 const Usage = require("../models/UsageSchema");
 const Client = require("../models/Client");
 const Widget = require("../models/Widget");
 const OpenAIUsageController = require("../controllers/OpenAIUsageController");
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
 
 class PricingCalculator {
   constructor() {
@@ -56,9 +61,9 @@ class PricingCalculator {
 
 class QuestionAnsweringSystem {
   constructor() {
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
+    // this.openai = new OpenAI({
+    //   apiKey: process.env.OPENAI_API_KEY,
+    // });
 
     this.embeddingModel = new OpenAIEmbeddings({
       openAIApiKey: process.env.OPENAI_API_KEY,
@@ -127,9 +132,9 @@ class QuestionAnsweringSystem {
       .join("\n");
   }
 
-  async generateAnswer(question, context, chatHistory,organisation) {
+  async generateAnswer(question, context, chatHistory, organisation) {
     try {
-      const response = await this.openai.chat.completions.create({
+      const response = await openai.chat.completions.create({
         model: "gpt-3.5-turbo",
         messages: [
           {
@@ -167,6 +172,21 @@ class QuestionAnsweringSystem {
     return sortedMatches.map((match) => match.metadata.text).join("\n\n");
   }
 
+  async getEmbedding(text) {
+    try {
+      const response = await openai.embeddings.create({
+        model: "text-embedding-3-large", // Specify the model
+        input: text,
+      });
+
+      return response.data[0].embedding; // Extract embedding array
+      // return response.data.map(item => item.embedding);
+    } catch (error) {
+      console.error("Error generating embedding:", error);
+      return null;
+    }
+  }
+
   async getAnswer(userId, question, conversationId, options = {}) {
     try {
       const {
@@ -200,6 +220,7 @@ class QuestionAnsweringSystem {
       });
 
       // Generate embedding for the question
+      // const questionEmbedding = await this.getEmbedding(question);
       const questionEmbedding = await this.embeddingModel.embedQuery(question);
 
       // Calculate and track Pinecone query cost
@@ -226,7 +247,7 @@ class QuestionAnsweringSystem {
       });
 
       const relevantMatches = queryResponse.matches.filter(
-        (match) => match.score >= scoreThreshold
+        (match) => match.score >= 0.2
       );
 
       let answer;
@@ -281,12 +302,13 @@ class QuestionAnsweringSystem {
       }
 
       // Prepare sources if requested
-      const sources = includeSources
-        ? relevantMatches.map((match) => ({
-            url: match.metadata.url,
-            score: match.score,
-          }))
-        : [];
+      // const sources = includeSources
+      //   ? relevantMatches.map((match) => ({
+      //       url: match.metadata.url,
+      //       score: match.score,
+      //     }))
+      //   : [];
+      const sources =null;
 
       return {
         success: true,

@@ -8,14 +8,11 @@ const Sitemap = require("../models/Sitemap");
 const TrainingList = require("../models/OpenaiTrainingList");
 
 const webPageQueue = require("../services/webPageCrawler");
-
 const commonHelper = require("../helpers/commonHelper.js");
 const ScrapeTracker = require("../services/scrapeTracker.js");
+
 const ObjectId = require("mongoose").Types.ObjectId;
-// const SocketController = require('./SocketController.js')
-// const {getSocketController} = require('../socket')
-// const socketController = getSocketController();
-// const { emitToUser } = initializeSocketController();
+
 const appEvents = require('../events.js');
 const OpenaiTrainingListController = {};
 
@@ -132,7 +129,6 @@ OpenaiTrainingListController.scrape = async (req, res) => {
                 trainingListIds.forEach(id => {
                   ScrapeTracker.addTrainingListId(userId, id);
                 });
-              // req.io.to('user'+userId).emit('web-pages-added');
                appEvents.emit('userEvent', userId, 'web-pages-added')
                // Add web pages to queue using bullmq
                for (const trainingListId of trainingListIds) {
@@ -145,7 +141,7 @@ OpenaiTrainingListController.scrape = async (req, res) => {
               .map((index, element) => $(element).text())
               .get();
             if(sitemapLocs.length) {
-              const insertedSitemaps = await insertOrUpdateSitemapRecords(sitemapLocs, userId, sitemapObj._id);
+             await insertOrUpdateSitemapRecords(sitemapLocs, userId, sitemapObj._id);
             }
           }
           catch(error) {
@@ -168,8 +164,7 @@ OpenaiTrainingListController.scrape = async (req, res) => {
     }
   } catch (error) {
     console.error(error);
-    // Emit socket event: Scraping failed
-    // req.io.emit("scrapingFailed", { message: "Scraping process failed." });
+    appEvents.emit('userEvent', userId, 'scrapingFailed', { message: "Scraping process failed." });
   }
 };
 
@@ -380,7 +375,6 @@ OpenaiTrainingListController.getWebPageUrlCount = async (userId) => {
       result.length > 0
         ? result[0]
         : { totalUrlCount: 0, crawledPagesCount: 0, mappedPagesCount: 0 };
-    // console.log(result, counts);
     return {
       totalPages: counts.totalUrlCount,
       crawledPages: counts.crawledPagesCount,
@@ -419,7 +413,6 @@ OpenaiTrainingListController.getSnippetCount = async (userId) => {
 
     const counts =
       result.length > 0 ? result[0] : { crawledDocs: 0, totalDocs: 0 };
-    // console.log(result, counts);
     return {
       crawledDocs: counts.crawledDocs,
       totalDocs: counts.totalDocs,
@@ -452,7 +445,6 @@ OpenaiTrainingListController.getFaqCount = async (userId) => {
 
     const counts =
       result.length > 0 ? result[0] : { crawledFaqs: 0, totalFaqs: 0 };
-    // console.log(result, counts);
     return {
       crawledFaqs: counts.crawledFaqs,
       totalFaqs: counts.totalFaqs,
@@ -502,6 +494,9 @@ OpenaiTrainingListController.getWebPageList = async (
       default:
         type = 1;
     }
+    if(skip < 0) {
+      skip = 0;
+    }
 
     const webPages = await TrainingList.aggregate([
       {
@@ -521,10 +516,8 @@ OpenaiTrainingListController.getWebPageList = async (
               timezone: "UTC", // Adjust the timezone if needed
             },
           },
-          timeUsed: 1,
-          crawlingStatus: "$trainingProcessStatus.crawlingStatus",
-          isActive: 1,
-          trainingStatus: 1,
+          isActive: isActive,
+          trainingStatus: 4,
         },
       },
       {

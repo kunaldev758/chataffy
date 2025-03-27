@@ -7,6 +7,7 @@ const ConversationController = require("../controllers/ConversationController");
 const ConversationTagController = require("../controllers/ConversationTagController");
 const DashboardController = require("../controllers/DashboardController");
 const Conversation = require("../models/Conversation");
+const Visitor = require("../models/Visitor");
 
 const initializeClientEvents = (io, socket) => {
   const { userId } = socket;

@@ -1,4 +1,5 @@
 // services/webPageCrawler.js
+require("dotenv").config();
 const axios = require("axios");
 const { Worker, Queue } = require("bullmq");
 const TrainingList = require("../models/OpenaiTrainingList");
@@ -7,7 +8,7 @@ const ScrapeTracker = require("./scrapeTracker");
 const appEvents = require('../events.js');
 
 const redisConfig = {
-  url: "rediss://default:AVNS_hgyd-Akk8_1yNrsH9_U@valkey-26e6c5af-chataffy-kunalagrawal-c505.l.aivencloud.com:10064",
+  url: process.env.REDIS_URL,
   maxRetriesPerRequest: null,
 };
 const webPageQueue = new Queue("webPageScraping", { connection: redisConfig });
@@ -55,12 +56,8 @@ const worker = new Worker(
         // Get updated tracking info
         const trackingInfo = ScrapeTracker.getTracking(pageUserId);
 
-        // Calculate overall progress (weight each stage differently)
-        // const overallProgress = calculateOverallProgress(trackingInfo);
-
         // Emit progress update
-        // if (global.io) {
-          appEvents.emit('userEvent', userId, 'scraping-progress', {
+          appEvents.emit('userEvent', pageUserId, 'scraping-progress', {
             status: "in-progress",
             stage: "scraping",
             total: trackingInfo.totalPages,
@@ -68,9 +65,7 @@ const worker = new Worker(
             minifyingCompleted: trackingInfo.minifyingCompleted,
             trainingCompleted: trackingInfo.trainingCompleted,
             failed: trackingInfo.failedPages,
-            // overallProgress: overallProgress,
           });
-        // }
       }
 
       await minifyingQueue.add("webPageMinifying", {
@@ -93,7 +88,6 @@ const worker = new Worker(
         const trackingInfo = ScrapeTracker.getTracking(pageUserId);
 
         // Emit progress update
-        // if (global.io) {
           appEvents.emit('userEvent', userId, 'scraping-progress', {
             status: "in-progress",
             stage: "scraping",
@@ -102,9 +96,7 @@ const worker = new Worker(
             minifyingCompleted: trackingInfo.minifyingCompleted,
             trainingCompleted: trackingInfo.trainingCompleted,
             failed: trackingInfo.failedPages,
-            // overallProgress: calculateOverallProgress(trackingInfo),
           });
-        // }
       }
     }
   },

@@ -43,7 +43,6 @@ router.post('/getTrainingStatus',OpenaiTrainingListController.getTrainingStatus)
 router.post('/getUserCredits', CreditsController.getUserCredits);
 
 router.post('/getConversationMessages', ChatMessageController.getAllChatMessagesAPI);
-// router.post('/getMessageSources', ChatMessageController.getMessageSources);
 router.post('/getOldConversationMessages', ChatMessageController.getAllOldChatMessages);
 
 router.post('/getWidgetToken', WidgetController.getWidgetToken);

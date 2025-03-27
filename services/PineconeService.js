@@ -1,7 +1,12 @@
 require("dotenv").config();
 const { OpenAIEmbeddings } = require("@langchain/openai");
+// const { OpenAI } = require("openai");
 const { Pinecone } = require("@pinecone-database/pinecone");
+const crypto = require('crypto');
 
+// const openai = new OpenAI({
+//   apiKey: process.env.OPENAI_API_KEY, // Set your API key
+// });
 
 class VectorStoreManager {
   constructor(pineconeIndexName) {
@@ -17,6 +22,20 @@ class VectorStoreManager {
     });
   }
 
+  // async getEmbedding(text) {
+  //   try {
+  //     const response = await openai.embeddings.create({
+  //       model: "text-embedding-3-large", // Specify the model
+  //       input: text,
+  //     });
+  
+  //     return response.data.map(item => item.embedding);// Extract embedding array
+  //   } catch (error) {
+  //     console.error("Error generating embedding:", error);
+  //     return null;
+  //   }
+  // }
+
 generateVectorId(chunk) {
   // Create a hash from the chunk text (can be customized if needed)
   return crypto.createHash('sha256').update(chunk).digest('hex');
@@ -26,12 +45,14 @@ generateVectorId(chunk) {
     try {
       const batchSize = 100;
       const upsertBatches = [];
-      let vectorId = generateVectorId(chunks[0]);
+      // let vectorId = this.generateVectorId(chunks[0]);
 
+      // const embeddings = await this.getEmbedding(chunks);
       const embeddings = await this.embeddings.embedDocuments(chunks);
+      if (!embeddings) throw new Error("Failed to generate embeddings");
 
       const pageVectors = embeddings.map((embedding, i) => ({
-        id: vectorId,
+        id: this.generateVectorId(chunks[i]),
         values: embedding,
         metadata: {
           text: chunks[i],
