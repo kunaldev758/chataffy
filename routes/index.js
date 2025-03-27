@@ -13,51 +13,44 @@ const storage = multer.diskStorage({
   
 const upload = multer({ storage });
   
-
-// const ScraperController = require('../controllers/ScraperController');
-// const TrainingListController = require('../controllers/TrainingListController');
-const TensorflowTrainingListController = require('../controllers/TensorflowTrainingListController');
 const OpenaiTrainingListController = require('../controllers/OpenaiTrainingListController');
 const ChatMessageController = require('../controllers/ChatMessageController');
 const UserController = require('../controllers/UserController');
 const CreditsController = require('../controllers/CreditsController');
 const WidgetController = require('../controllers/WidgetController');
-const OpenAIUsageController = require('../controllers/OpenAIUsageController');
-// const VisitorController = require('../controllers/VisitorController');
 const middleware = require('../middleware/authMiddleware');
+
+
 /* Without middleware */
 router.post('/login', UserController.loginUser);
 router.post('/createUser', UserController.createUser);
 router.post('/verifyEmail', UserController.verifyEmail);
-// router.post('/updateOldVisitors', VisitorController.updateOldVisitors);
 
+router.use(middleware);
+
+router.post('/logout', UserController.logoutUser);
 
 router.post('/openaiCreateSnippet', upload.single('file'), middleware, OpenaiTrainingListController.createSnippet);
-router.use(middleware);
-// router.post('/scrape', ScraperController.scrape);
-router.post('/tensorflowScrape', TensorflowTrainingListController.scrape);
 router.post('/openaiScrape', OpenaiTrainingListController.scrape);
-router.post('/tensorflowCreateSnippet', TensorflowTrainingListController.createSnippet);
-router.post('/tensorflowCreateFaq', TensorflowTrainingListController.createFaq);
-router.post('/openaiCreateFaq', OpenaiTrainingListController.createFaq);
-router.post('/tensorflowToggleActiveStatus', TensorflowTrainingListController.toggleActiveStatus);
-router.post('/openaiToggleActiveStatus', OpenaiTrainingListController.toggleActiveStatus);
-router.post('/getWidgetToken', WidgetController.getWidgetToken);
-router.post('/logout', UserController.logoutUser);
-// router.post('/getTrainingListDetail', TrainingListController.getTrainingListDetail);
-router.post('/getTensorflowTrainingListDetail', TensorflowTrainingListController.getTrainingListDetail);
-router.post('/getOpenaiTrainingListDetail', OpenaiTrainingListController.getTrainingListDetail);
-router.post('/getConversationMessages', ChatMessageController.getAllChatMessagesAPI);
-router.post('/getMessageSources', ChatMessageController.getMessageSources);
-router.post('/getBasicInfo', WidgetController.getBasicInfo);
-router.post('/setBasicInfo', WidgetController.setBasicInfo);
 
-/* Credits */
+
+router.post('/openaiCreateFaq', OpenaiTrainingListController.createFaq);
+router.post('/openaiToggleActiveStatus', OpenaiTrainingListController.toggleActiveStatus);
+router.post('/getOpenaiTrainingListDetail', OpenaiTrainingListController.getTrainingListDetail);
+
+router.post('/getTrainingStatus',OpenaiTrainingListController.getTrainingStatus);
+
 router.post('/getUserCredits', CreditsController.getUserCredits);
 
-// router.use(middleware); // admin
+router.post('/getConversationMessages', ChatMessageController.getAllChatMessagesAPI);
+router.post('/getOldConversationMessages', ChatMessageController.getAllOldChatMessages);
 
+router.post('/getWidgetToken', WidgetController.getWidgetToken);
+router.post('/getBasicInfo', WidgetController.getBasicInfo);
+router.post('/setBasicInfo', WidgetController.setBasicInfo);
+router.post('/uploadLogo', upload.single('logo'),middleware, WidgetController.uploadLogo);
+router.get('/getThemeSettings/:userId',WidgetController.getThemeSettings);
+router.post('/updateThemeSettings',WidgetController.updateThemeSettings);
 
-router.get('/open-ai-usages-total-cost', OpenAIUsageController.sumTotalCost);
 
 module.exports = router;

@@ -2,14 +2,19 @@ const mongoose = require('mongoose');
 const {Schema} = mongoose;
 
 const chatMessageSchema = new Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, required: true , ref: 'User'},
   sender: {
     type: String,
-    required: true,
+    // required: true,
   },
   sender_type: {
     type: String,
-    enum: ['visitor', 'agent', 'bot', 'bot-error', 'system'],
+    enum: ['visitor', 'agent', 'assistant', 'user','bot'],
     required: true,
+  },
+  is_note:{
+    type:String,
+    default:false
   },
   message: {
     type: String,
@@ -20,7 +25,7 @@ const chatMessageSchema = new Schema({
   },
   conversation_id: {
     type: Schema.Types.ObjectId,
-    ref: 'Visitor',
+    ref: 'Conversation',
     required: true,
   }
 },

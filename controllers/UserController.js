@@ -1,3 +1,4 @@
+require("dotenv").config();
 const User = require('../models/User');
 const Client = require('../models/Client');
 const Widget = require('../models/Widget');
@@ -15,8 +16,8 @@ const transporter = nodemailer.createTransport(
     port: 587, // Port for the SMTP server (587 for TLS, 465 for SSL)
     secure: false, // Set to true if using SSL
     auth: {
-      user: 'AKIAJL564OQBMV2RXMAA',
-      pass: 'AhEW0kHhaSrOmvhchxLZOjDMCqxGHfAQCNlgFqiEitUE',
+      user: process.env.EMAIL_USERNAME,
+      pass: process.env.EMAIL_PASSWORD,
     },
   })
 );
@@ -42,6 +43,7 @@ UserController.createUser = async (req, res) => {
     await user.save();
     // Generate client specific details
     const client = new Client({userId});
+    client.pineconeIndexName = `pinecone-${userId}`;
     await client.save();
     // Generate widget token and insert in widget table
     const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
@@ -103,7 +105,12 @@ UserController.loginUser = async (req, res) => {
     const token = user.generateAuthToken();
     user.auth_token = token;
     await user.save();
-    res.json({ status_code: 200, status: true, token, message: 'Login successful' });
+
+    if (req.io) {
+      req.io.emit('user-logged-in', { userId: user._id });
+    }
+    
+    res.json({ status_code: 200, status: true, token,userId:user?._id, message: 'Login successful' });
   } catch (error) {
     commonHelper.logErrorToFile(error);
     res.status(500).json({ status_code: 500, status: false, message: 'Login failed' });

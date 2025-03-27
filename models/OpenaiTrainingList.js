@@ -2,46 +2,28 @@ const mongoose = require("mongoose");
 const trainingListSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, required: true, ref: 'User' },
   title: { type: String },
-  type: { type: Number }, // 0-WebPage, 1-Faq, 2-Snippet 3-File
-  timeUsed: { type: Number, default: 0 },
+  type: { type: Number }, // 0-WebPage, 1-File, 2-Snippet, 3-Faq
   lastEdit: { type: Date, default: Date.now },
   trainingStatus: { type: Number, default: 1 }, // 1-Listed, 2-Crawled, 3-Minified, 4-Mapped
-  trainingProcessStatus: {    
-    crawlingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
-    minifyingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
-    mappingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
-    crawlingDuration: {
-      start: Date,
-      end: Date,
-    },
-    minifyingDuration: {
-      start: Date,
-      end: Date,
-    },
-    mappingDuration: {
-      start: Date,
-      end: Date,
-    },
-  },
   isActive: { type: Number, default: 1}, // 0-InActive, 1-Active, 2-Delete
-  mappings: [{
-    content: { type: String },
-    embedding: { type: Object }, 
-    embeddingValues: { type: Array },
-  }],
 
   webPage: {
     url: { type: String },
     title: { type: String },
     metaDescription: { type: String },
     content: { type: String },
-    sitemapIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Sitemap" }],
+    crawlingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
+    crawlingDuration: {
+      start: Date,
+      end: Date,
+    },
+    minifyingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
+    minifyingDuration: {
+      start: Date,
+      end: Date,
+    },
+    mappingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
     sourceCode: { type: String },
-  },
-
-  snippet: {
-    title: { type: String },
-    content: { type: String },
   },
 
   file: { 
@@ -50,16 +32,28 @@ const trainingListSchema = new mongoose.Schema({
     path: String,
     content: String,
   },
+
+  snippet: {
+    title: { type: String },
+    content: { type: String },
+  },
   
   faq: {
     question: { type: String },
     answer: { type: String },
+  },
+
+  costDetails: {
+    totalCost: { type: Number, default: 0 },
+    embedding: { type: Number, default: 0 },
+    storage: { type: Number, default: 0 },
+    tokens: { type: Number, default: 0 },
   }
 
 
 },
 { timestamps: true });
-trainingListSchema.index({ userId: 1, mappings: 1 });
+trainingListSchema.index({ userId: 1, mappingLocation: "2dsphere" });
 // trainingListSchema.index({ embedding: '2dsphere' });
-const TrainingList = mongoose.model("OpenaiTrainingList", trainingListSchema);
+const TrainingList = mongoose.model("TrainingList", trainingListSchema);
 module.exports = TrainingList;
