@@ -29,11 +29,22 @@ OpenaiTrainingListController.createFaq = async (req, res) => {
     const pineconeIndexName = client.pineconeIndexName;
 
     const content = `Question: ${question}\nAnswer: ${answer}`;
+
+    const trainingList = new TrainingList({
+      userId,
+      title: question,
+      type: 1,
+      faq: { question, answer },
+      costDetails: result.costs,
+    });
+    await trainingList.save();
+
     // let contentProcessor = new ContentProcessor(pineconeIndexName);
     const result = await processFileOrSnippet({
       title: question,
       content,
       userId,
+      type:"faq"
     });
 
     if (result.success) {
