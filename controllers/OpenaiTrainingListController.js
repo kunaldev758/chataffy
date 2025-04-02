@@ -9,7 +9,7 @@ const TrainingList = require("../models/OpenaiTrainingList");
 
 const webPageQueue = require("../services/webPageCrawler");
 const commonHelper = require("../helpers/commonHelper.js");
-const ScrapeTracker = require("../services/scrapeTracker.js");
+const ScrapeTracker = require("../services/ScrapeTracker.js");
 
 const ObjectId = require("mongoose").Types.ObjectId;
 

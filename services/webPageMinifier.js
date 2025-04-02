@@ -5,7 +5,7 @@ const cheerio = require("cheerio");
 const TrainingList = require("../models/OpenaiTrainingList");
 const pineconeTrainQueue = require("./TrainData");
 const urlModule = require("url");
-const ScrapeTracker = require("./scrapeTracker");
+const ScrapeTracker = require("./ScrapeTracker");
 const appEvents = require('../events.js');
 
 const allowedTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "dl", "dt", "dd","a" ];

@@ -4,7 +4,7 @@ const axios = require("axios");
 const { Worker, Queue } = require("bullmq");
 const TrainingList = require("../models/OpenaiTrainingList");
 const minifyingQueue = require("./webPageMinifier");
-const ScrapeTracker = require("./scrapeTracker");
+const ScrapeTracker = require("./ScrapeTracker");
 const appEvents = require('../events.js');
 
 const redisConfig = {

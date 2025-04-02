@@ -6,7 +6,7 @@ const { MarkdownTextSplitter } = require("langchain/text_splitter");
 const TrainingList = require("../models/OpenaiTrainingList");
 const OpenAIUsageController = require("../controllers/OpenAIUsageController");
 const UnifiedPricingService = require("./UnifiedPricingService");
-const ScrapeTracker = require("./scrapeTracker");
+const ScrapeTracker = require("./ScrapeTracker");
 const appEvents = require("../events.js");
 
 const redisConfig = {
