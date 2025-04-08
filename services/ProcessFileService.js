@@ -1,40 +1,62 @@
-async function processFileOrSnippet(data) {
-    try {
-      let content, metadata;
+const { pineconeTrainQueue } = require("./TrainData");
+const {readFileContent} = require("./FileType"); // Assuming you have a function to read file content
 
-      if (data.file) {
-        content = await this.readFileContent(
-          data.file.path,
-          data.file.mimetype
-        );
-        metadata = {
-          title: data.file.originalname,
-          type: "file",
-          mimeType: data.file.mimetype,
-          userId: data.userId,
-        };
-      } else {
-        content = data.content;
-        metadata = {
-          title: data.title,
-          type: "snippet",
-          userId: data.userId,
-        };
-      }
-      TrainData.pineconeTraining(metadata.type, metadata.title, content, metadata.userId, metadata);
- 
+async function processFileOrSnippet(data) {
+  try {
+    if (data.type == 1) { //file
+      let content = await readFileContent(data.file.path, data.file.mimetype);
+      await pineconeTrainQueue.add("pineconeTraining", {
+        type: data.type,
+        title: data.file.originalname,
+        content,
+        // fileName: data.fileName,
+        // userId: data.userId,
+        // originalFileName: data.originalFileName,
+        pineconeIndexName:data.pineconeIndexName,
+        trainingListId:data.trainingListId,
+      }); // Job Name and data
+
       return {
         success: true,
-        costs: {
-          tokens: totalTokens,
-          embedding: embeddingCost,
-          storage: storageCost,
-          total: embeddingCost + storageCost,
-        },
-        chunks: chunks.length,
+        content,
       };
-    } catch (error) {
-      console.error("Error processing file/snippet:", error);
-      return { success: false, error };
     }
+
+    if (data.type == 2) { //snippet
+      await pineconeTrainQueue.add("pineconeTraining", {
+        type: data.type,
+        title: data.title,
+        content:data.content,
+        // userId: data.userId,
+        pineconeIndexName: data.pineconeIndexName,
+        trainingListId: data.trainingListId,
+      }); // Job Name and data
+
+      return {
+        success: true,
+      };
+    }
+
+    if (data.type == 3) { //faq
+      await pineconeTrainQueue.add("pineconeTraining", {
+        type: data.type,
+        title: data.title,
+        content:data.content,
+        // userId: data.userId,
+        pineconeIndexName: data.pineconeIndexName,
+        trainingListId: data.trainingListId,
+      }); // Job Name and data
+
+      return {
+        success: true,
+      };
+    }
+  } catch (error) {
+    console.error("Error processing file/snippet:", error);
+    return { success: false, error };
   }
+}
+
+module.exports = {
+  processFileOrSnippet,
+};

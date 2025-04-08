@@ -43,7 +43,7 @@ async function checkUserCredits(userId, estimatedCost) {
   }
 }
 
-// // Record usage for the operation
+// Record usage for the operation
 async function recordUsage(userId, totalTokens, embeddingCost) {
   try {
     const result = await OpenAIUsageController.recordUsage(
@@ -67,19 +67,23 @@ async function recordUsage(userId, totalTokens, embeddingCost) {
   }
 }
 
+// Helper function to get content type name
+function getContentTypeName(typeCode) {
+  const types = ["webpage", "file", "snippet", "faq"];
+  return types[typeCode] || "unknown";
+}
+
 const worker = new Worker(
   "pineconeTraining",
   async (job) => {
     const {
-      type,
+      type,  // 0-WebPage, 1-File, 2-Snippet, 3-Faq
       pineconeIndexName,
-      content,
-      webPageURL,
-      title,
       trainingListId,
-      metaDescription,
+      // Other props might be included depending on type
     } = job.data;
-    console.log(`Processing job for trainingListId: ${trainingListId}`);
+    
+    console.log(`Processing job for trainingListId: ${trainingListId}, type: ${type}`);
     let userId = null;
 
     // Fetch the TrainingList object
@@ -87,106 +91,169 @@ const worker = new Worker(
 
     if (!trainingListObj) {
       console.error(`TrainingList not found with id: ${trainingListId}`);
-      throw new Error(); // Or throw an error to retry the job
+      throw new Error("Training list not found");
     }
+    
     userId = trainingListObj.userId;
-    let pageUserId = userId;
-
+    let contentToProcess = "";
+    let metadata = {};
+    const contentType = parseInt(type);
+    
     try {
-      // Initialize ContentProcessor outside the loop
+      // Extract content and metadata based on content type
+      switch (contentType) {
+        case 0: // WebPage
+          contentToProcess = job.data.content
+          metadata = {
+            url: job.data.webPageURL ,
+            title: job.data.title ,
+            type: "webpage",
+            userId: userId,
+            metaDescription: job.data.metaDescription 
+          };
+          break;
+          
+        case 1: // File
+          contentToProcess = job.data.content;
+          metadata = {
+            fileName: job.data.fileName,
+            originalFileName: job.data.originalFileName,
+            title: job.data.title,
+            type: "file",
+            userId: userId
+          };
+          break;
+          
+        case 2: // Snippet
+          contentToProcess = job.data.content;
+          metadata = {
+            title: job.data.title,
+            type: "snippet",
+            userId: userId
+          };
+          break;
+          
+        case 3: // FAQ
+          // For FAQ, we combine question and answer with proper formatting
+          contentToProcess =job.data.content;
+          metadata = {
+            question: job.data.title,
+            type: "faq",
+            userId: userId
+          };
+          break;
+          
+        default:
+          throw new Error(`Unsupported content type: ${contentType}`);
+      }
+      
+      if (!contentToProcess) {
+        throw new Error("No content found to process");
+      }
+
+      // Initialize VectorStoreManager
       const vectorStoreManager = new VectorStoreManager(pineconeIndexName);
 
       // Calculate costs
-      const totalTokens = await pricingService.estimateTokens(content);
-      const embeddingCost = await pricingService.calculateEmbeddingCost(
-        totalTokens
-      );
-      // const storageCost = this.pricingService.calculatePineconeStorageCost(chunks.length);
+      const totalTokens = await pricingService.estimateTokens(contentToProcess);
+      const embeddingCost = await pricingService.calculateEmbeddingCost(totalTokens);
 
+      // Check if user has enough credits
       const hasCredits = await checkUserCredits(userId, embeddingCost);
       if (!hasCredits) {
-        await TrainingList.findByIdAndUpdate(trainingListObj._id, {
-          trainingStatus: 10,
-          "webPage.mappingStatus": 3,
-          lastEdit: Date.now(),
-        });
+        // Update status based on content type
+        const updateObj = { trainingStatus: 10, lastEdit: Date.now() };
+        
+        // Add type-specific status update
+        if (contentType === 0) updateObj["webPage.mappingStatus"] = 3;
+        
+        await TrainingList.findByIdAndUpdate(trainingListObj._id, updateObj);
 
-        sendClientEvent(userId, "web-page-error-insufficient-credits", {
+        sendClientEvent(userId, "content-error-insufficient-credits", {
           trainingListId,
+          contentType,
+          typeName: getContentTypeName(contentType),
           error: "Insufficient credits to process this content",
         });
 
-        // Return a specific error that can be caught by the queue system
         throw new Error("INSUFFICIENT_CREDITS");
       }
 
-      // 3. Check if index exists, create if not
+      // Check if index exists, create if not
       if (!(await vectorStoreManager.doesIndexExist(pineconeIndexName))) {
         console.log(`Creating index "${pineconeIndexName}"...`);
         const created = await vectorStoreManager.createIndex(pineconeIndexName);
         if (!created) {
-          sendClientEvent(userId, "web-page-error", {
+          sendClientEvent(userId, "content-error", {
             trainingListId,
+            contentType,
+            typeName: getContentTypeName(contentType),
             error: "Failed to create Pinecone Index",
           });
+          throw new Error("Failed to create Pinecone index");
         }
       }
-      // 4. Split content into chunks
+      
+      // Configure text splitter based on content type
+      let chunkSize = 1000;
+      let chunkOverlap = 200;
+      
+      // Adjust chunk size for different content types
+      if (contentType === 3) { // FAQ
+        chunkSize = 2000; // Larger chunks for FAQs to keep Q&A together
+      } else if (contentType === 2) { // Snippet
+        chunkSize = 1500; // Medium size for snippets
+        chunkOverlap = 150;
+      }
+      
       const textSplitter = new MarkdownTextSplitter({
-        chunkSize: 1000,
-        chunkOverlap: 200,
+        chunkSize,
+        chunkOverlap,
       });
 
-      const chunks = await textSplitter.createDocuments([content], {
-        url: webPageURL,
-        title: title,
-        type: type,
-        userId: userId,
-      });
+      const chunks = await textSplitter.createDocuments([contentToProcess], metadata);
 
-      // 5. Record usage before performing the expensive operation
+      // Record usage before performing the expensive operation
       await recordUsage(userId, totalTokens, embeddingCost);
 
-      // 6. Upsert vectors into Pinecone
-
+      // Upsert vectors into Pinecone
       if (chunks.length) {
         const upsertResult = await vectorStoreManager.upsertVectors(
           chunks.map((chunk) => chunk.pageContent),
-          {
-            url: webPageURL,
-            title: title,
-            type: type,
-            userId: userId,
-          }
+          metadata
         );
 
         if (!upsertResult.success) {
           throw new Error(
-            "Failed to upsert vectors: " +
-              (upsertResult.error || "Unknown error")
+            "Failed to upsert vectors: " + (upsertResult.error || "Unknown error")
           );
         }
       }
 
-      // 7. Update training list with successful status
-      await TrainingList.findByIdAndUpdate(trainingListObj._id, {
-        "webPage.title": title,
-        "webPage.metaDescription": metaDescription,
-        "webPage.content": content,
+      // Update training list with successful status
+      const updateObj = {
         costDetails: {
           tokens: totalTokens,
           embedding: embeddingCost,
           totalCost: embeddingCost,
         },
-        "webPage.mappingStatus": 2,
-        trainingStatus: 4,
-      });
+        trainingStatus: 4, // Mapped
+        lastEdit: Date.now()
+      };
+      
+      // Add type-specific status update for web pages
+      if (contentType === 0) {
+        updateObj["webPage.mappingStatus"] = 2; // Success
+      }
+      
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, updateObj);
 
-      if (ScrapeTracker.getTracking(pageUserId)) {
-        ScrapeTracker.updateTracking(pageUserId, "training", true);
+      // Handle special tracking for web pages
+      if (contentType === 0 && ScrapeTracker.getTracking(userId)) {
+        ScrapeTracker.updateTracking(userId, "training", true);
 
         // Get updated tracking info
-        const trackingInfo = ScrapeTracker.getTracking(pageUserId);
+        const trackingInfo = ScrapeTracker.getTracking(userId);
 
         // Check if all pages are processed
         const isComplete =
@@ -206,12 +273,7 @@ const worker = new Worker(
 
         // If complete, send completion event
         if (isComplete) {
-          await Client.findByIdAndUpdate(
-            { userId: userId },
-            {
-              webPageAdded: true,
-            }
-          );
+          await Client.updateOne({ userId: userId }, { webPageAdded: true });
           appEvents.emit("userEvent", userId, "scraping-complete", {
             total: trackingInfo.totalPages,
             processed: trackingInfo.trainingCompleted,
@@ -221,36 +283,52 @@ const worker = new Worker(
 
           // Clear tracking data after completion
           setTimeout(() => {
-            ScrapeTracker.clearTracking(pageUserId);
+            ScrapeTracker.clearTracking(userId);
           }, 60000); // Clear after 1 minute
         }
       }
 
-      sendClientEvent(userId, "web-page-completed", {
+      // Send content-specific completion event
+      sendClientEvent(userId, "content-completed", {
         trainingListId,
+        contentType,
+        typeName: getContentTypeName(contentType),
         chunks: chunks.length,
       });
 
       return { success: true, chunks: chunks.length };
     } catch (error) {
-      console.error("Error in pinecone training", error);
-      await TrainingList.findByIdAndUpdate(trainingListObj._id, {
-        "webPage.mappingStatus": 3,
-        trainingStatus: 9,
-      });
+      console.error(`Error in pinecone training for type ${contentType}:`, error);
+      
+      // Update status based on content type
+      const updateObj = { trainingStatus: 9, lastEdit: Date.now() }; // Failed
+      
+      // Add type-specific status update for web pages
+      if (contentType === 0) {
+        updateObj["webPage.mappingStatus"] = 3; // Failed
+      }
+      
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, updateObj);
+      
       // If it's a credits issue, we might want to pause the queue or take specific action
       if (error.message === "INSUFFICIENT_CREDITS") {
-        // You could implement queue pausing logic here
         console.log(
           `Pausing processing for user ${userId} due to insufficient credits`
         );
       }
 
-      return { success: false, error };
+      // Update ScrapeTracker if applicable (for web pages)
+      if (contentType === 0 && ScrapeTracker.getTracking(userId)) {
+        ScrapeTracker.updateTracking(userId, "training", false);
+      }
+
+      return { success: false, error: error.message };
     }
   },
   { connection: redisConfig, concurrency: 5, lockDuration: 30000 }
 );
+
+// Worker event handlers
 worker.on("completed", (job) => {
   console.log(`Job with id ${job.id} has completed`);
 });
@@ -261,14 +339,70 @@ worker.on("failed", (job, err) => {
   // If the error is due to insufficient credits, you might want to
   // pause other jobs for the same user to prevent wasteful processing
   if (err.message === "INSUFFICIENT_CREDITS" && job.data) {
-    const { trainingListId } = job.data;
-    // Here you would implement logic to find and pause other jobs for this user
+    const { trainingListId, type } = job.data;
     console.log(
-      `Pausing other jobs related to training list ${trainingListId} due to insufficient credits`
+      `Pausing other jobs related to training list ${trainingListId} (type: ${type}) due to insufficient credits`
     );
+    // Implement additional pausing logic here if needed
   }
 });
 
-console.log("Worker started...");
+// Function to add jobs to the queue
+// async function addTrainingJob(trainingListId) {
+//   try {
+//     // Fetch the training list to determine its type
+//     const trainingList = await TrainingList.findById(trainingListId);
+//     if (!trainingList) {
+//       throw new Error(`Training list not found: ${trainingListId}`);
+//     }
 
-module.exports = pineconeTrainQueue;
+//     const pineconeIndexName = `user-${trainingList.userId}`;
+//     const contentType = trainingList.type; // 0-WebPage, 1-File, 2-Snippet, 3-Faq
+    
+//     // Base job data
+//     const jobData = {
+//       type: contentType,
+//       pineconeIndexName,
+//       trainingListId,
+//     };
+    
+//     // Add type-specific data (mainly for backward compatibility with web pages)
+//     if (contentType === 0 && trainingList.webPage) {
+//       jobData.webPageURL = trainingList.webPage.url;
+//       jobData.title = trainingList.webPage.title || trainingList.title;
+//       jobData.content = trainingList.webPage.content;
+//       jobData.metaDescription = trainingList.webPage.metaDescription;
+//     }
+    
+//     // Update training status
+//     const updateObj = { trainingStatus: 1, lastEdit: Date.now() }; // Listed
+    
+//     // Set appropriate mapping status for web pages
+//     if (contentType === 0) {
+//       updateObj["webPage.mappingStatus"] = 1; // In Progress
+//     }
+    
+//     await TrainingList.findByIdAndUpdate(trainingListId, updateObj);
+    
+//     // Add to queue
+//     await pineconeTrainQueue.add('train-content', jobData, {
+//       attempts: 3,
+//       backoff: {
+//         type: 'exponential',
+//         delay: 5000,
+//       },
+//     });
+    
+//     return { success: true };
+//   } catch (error) {
+//     console.error(`Failed to add training job for ${trainingListId}:`, error);
+//     return { success: false, error: error.message };
+//   }
+// }
+
+console.log("Pinecone training worker started...");
+
+// Export both queue and helper function
+module.exports = {
+  pineconeTrainQueue,
+};

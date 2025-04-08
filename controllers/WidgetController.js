@@ -118,7 +118,8 @@ WidgetController.updateThemeSettings = async (req, res) => {
     if(userId){
       const widget = await Widget.findOne({ userId });
       if(widget){
-        await Widget.updateOne({userId},{ logo:themeSettings.logo,
+        await Widget.updateOne({userId},{ 
+          // logo:themeSettings.logo,
           titleBar : themeSettings.titleBar,
           welcomeMessage : themeSettings.welcomeMessage,
           showLogo : themeSettings.showLogo,

@@ -1,19 +1,36 @@
 // services/webPageMinifier.js
 require("dotenv").config();
-const { Worker,Queue } = require("bullmq");
+const { Worker, Queue } = require("bullmq");
 const cheerio = require("cheerio");
 const TrainingList = require("../models/OpenaiTrainingList");
-const pineconeTrainQueue = require("./TrainData");
+const { pineconeTrainQueue } = require("./TrainData");
 const urlModule = require("url");
 const ScrapeTracker = require("./ScrapeTracker");
-const appEvents = require('../events.js');
+const appEvents = require("../events.js");
 
-const allowedTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "dl", "dt", "dd","a" ];
+const allowedTags = [
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "p",
+  "ul",
+  "ol",
+  "li",
+  "dl",
+  "dt",
+  "dd",
+  "a",
+];
 const redisConfig = {
-    url: process.env.REDIS_URL,
-    maxRetriesPerRequest: null,
+  url: process.env.REDIS_URL,
+  maxRetriesPerRequest: null,
 };
-const minifyingQueue = new Queue('webPageMinifying', { connection: redisConfig });  
+const minifyingQueue = new Queue("webPageMinifying", {
+  connection: redisConfig,
+});
 
 const worker = new Worker(
   "webPageMinifying",
@@ -40,35 +57,35 @@ const worker = new Worker(
 
       const processResult = await processWebPage(trainingListObj);
       if (processResult) {
-        const { content, title,metaDescription,webPageURL } = processResult;
+        const { content, title, metaDescription, webPageURL } = processResult;
 
-  // Update tracking information
-  if (ScrapeTracker.getTracking(pageUserId)) {
-    ScrapeTracker.updateTracking(pageUserId, 'minifying', true);
-    
-    // Get updated tracking info
-    const trackingInfo = ScrapeTracker.getTracking(pageUserId);
-    
-    // Emit progress update
-      appEvents.emit('userEvent', pageUserId, 'scraping-progress', {
-        status: 'in-progress',
-        stage: 'minifying',
-        total: trackingInfo.totalPages,
-        scrapingCompleted: trackingInfo.scrapingCompleted,
-        minifyingCompleted: trackingInfo.minifyingCompleted,
-        trainingCompleted: trackingInfo.trainingCompleted,
-        failed: trackingInfo.failedPages,
-      });
-  }
+        // Update tracking information
+        if (ScrapeTracker.getTracking(pageUserId)) {
+          ScrapeTracker.updateTracking(pageUserId, "minifying", true);
+
+          // Get updated tracking info
+          const trackingInfo = ScrapeTracker.getTracking(pageUserId);
+
+          // Emit progress update
+          appEvents.emit("userEvent", pageUserId, "scraping-progress", {
+            status: "in-progress",
+            stage: "minifying",
+            total: trackingInfo.totalPages,
+            scrapingCompleted: trackingInfo.scrapingCompleted,
+            minifyingCompleted: trackingInfo.minifyingCompleted,
+            trainingCompleted: trackingInfo.trainingCompleted,
+            failed: trackingInfo.failedPages,
+          });
+        }
 
         await pineconeTrainQueue.add("pineconeTraining", {
-          type :"webpage", 
-          pineconeIndexName, 
-          content, 
-          webPageURL, 
+          type: 0,
+          pineconeIndexName,
+          content,
+          webPageURL,
           title,
           trainingListId,
-          metaDescription
+          metaDescription,
         }); // Job Name and data
       } else {
         throw new Error("Failed to process web page");
@@ -82,25 +99,24 @@ const worker = new Worker(
         trainingStatus: 9, // Error
       });
 
- // Update tracking for failed page
- if (ScrapeTracker.getTracking(pageUserId)) {
-  ScrapeTracker.updateTracking(pageUserId, 'minifying', false);
-  
-  // Get updated tracking info
-  const trackingInfo = ScrapeTracker.getTracking(pageUserId);
-  
-  // Emit progress update
-    appEvents.emit('userEvent', pageUserId, 'scraping-progress', {
-      status: 'in-progress',
-      stage: 'minifying',
-      total: trackingInfo.totalPages,
-      scrapingCompleted: trackingInfo.scrapingCompleted,
-      minifyingCompleted: trackingInfo.minifyingCompleted,
-      trainingCompleted: trackingInfo.trainingCompleted,
-      failed: trackingInfo.failedPages,
-    });
-}
+      // Update tracking for failed page
+      if (ScrapeTracker.getTracking(pageUserId)) {
+        ScrapeTracker.updateTracking(pageUserId, "minifying", false);
 
+        // Get updated tracking info
+        const trackingInfo = ScrapeTracker.getTracking(pageUserId);
+
+        // Emit progress update
+        appEvents.emit("userEvent", pageUserId, "scraping-progress", {
+          status: "in-progress",
+          stage: "minifying",
+          total: trackingInfo.totalPages,
+          scrapingCompleted: trackingInfo.scrapingCompleted,
+          minifyingCompleted: trackingInfo.minifyingCompleted,
+          trainingCompleted: trackingInfo.trainingCompleted,
+          failed: trackingInfo.failedPages,
+        });
+      }
     }
   },
   { connection: redisConfig, concurrency: 5 }
@@ -241,10 +257,10 @@ async function processWebPage(trainingListObj) {
     });
 
     const content = $("body").html().replace(/\s+/g, " ").trim();
-    return {content,webPageURL,title,metaDescription};
+    return { content, webPageURL, title, metaDescription };
   } catch (error) {
     console.error("Error processing webpage:", error);
   }
 }
 
-module.exports = minifyingQueue ;
+module.exports = minifyingQueue;

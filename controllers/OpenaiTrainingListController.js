@@ -10,6 +10,7 @@ const TrainingList = require("../models/OpenaiTrainingList");
 const webPageQueue = require("../services/webPageCrawler");
 const commonHelper = require("../helpers/commonHelper.js");
 const ScrapeTracker = require("../services/ScrapeTracker.js");
+const {processFileOrSnippet} = require("../services/ProcessFileService.js");
 
 const ObjectId = require("mongoose").Types.ObjectId;
 
@@ -29,28 +30,32 @@ OpenaiTrainingListController.createFaq = async (req, res) => {
     const pineconeIndexName = client.pineconeIndexName;
 
     const content = `Question: ${question}\nAnswer: ${answer}`;
+
+    const trainingList = new TrainingList({
+      userId,
+      title: question,
+      type: 3,
+      faq: { question, answer },
+      // costDetails: result.costs,
+    });
+    await trainingList.save();
+
     // let contentProcessor = new ContentProcessor(pineconeIndexName);
     const result = await processFileOrSnippet({
+      type:3,
       title: question,
       content,
       userId,
+      pineconeIndexName,
+      trainingListId: trainingList._id,
     });
 
     if (result.success) {
-      const trainingList = new TrainingList({
-        userId,
-        title: question,
-        type: 1,
-        faq: { question, answer },
-        costDetails: result.costs,
-      });
-      await trainingList.save();
-
-      await Client.updateOne({ id: userId }, { faqAdded: true });
-      req.io.to('user'+userId).emit('faq-added', { trainingList }); // Emit FAQ added event
-      res
-        .status(201)
-        .json({ status_code: 200, message: "FAQ added successfully" });
+   
+      await Client.updateOne({ userId: userId }, { faqAdded: true });
+      // req.io.to('user'+userId).emit('faq-added', { trainingList }); // Emit FAQ added event
+      appEvents.emit('userEvent', userId, 'faq-added', { trainingList }); // Emit FAQ added event
+      res.status(201).json({ status_code: 200, message: "FAQ added successfully" });
     } else {
       throw new Error(result.error);
     }
@@ -242,57 +247,64 @@ OpenaiTrainingListController.createSnippet = async (req, res) => {
     let results = [];
 
     if (title && content) {
-      const snippetResult = await contentProcessor.processFileOrSnippet({
+
+      const trainingList = new TrainingList({
+        userId,
+        title,
+        type: 2,
+        snippet: { title, content },
+        // costDetails: snippetResult.costs,
+      });
+      await trainingList.save();
+      results.push({ type: "snippet", success: true });
+
+      const snippetResult = await processFileOrSnippet({
+        type: 2,
         title,
         content,
         userId,
+        pineconeIndexName,
+        trainingListId: trainingList._id,
       });
 
       if (snippetResult.success) {
-        const trainingList = new TrainingList({
-          userId,
-          title,
-          type: 2,
-          snippet: { title, content },
-          costDetails: snippetResult.costs,
-        });
-        await trainingList.save();
-        results.push({ type: "snippet", success: true });
-        req.io.to('user'+userId).emit('doc-snippet-added', { trainingList }); // Emit doc/snippet added event
+        // req.io.to('user'+userId).emit('doc-snippet-added', { trainingList }); // Emit doc/snippet added event
+        appEvents.emit('userEvent', userId, 'doc-snippet-added', { trainingList }); // Emit doc/snippet added event
       }
     }
 
     if (file) {
-      const fileResult = await contentProcessor.processFileOrSnippet({
+      const trainingList = new TrainingList({
+        userId,
+        title: file.originalname,
+        type: 1,
+        file: {
+          fileName: file.filename,
+          originalFileName: file.originalname,
+          path: file.path,
+          // content: fileResult.content,
+        },
+        // costDetails: fileResult.costs,
+      });
+      await trainingList.save();
+      results.push({ type: "file", success: true });
+
+      const fileResult = await processFileOrSnippet({
         file,
         userId,
+        pineconeIndexName,
+        type: 1,
+        trainingListId: trainingList._id,
       });
 
       if (fileResult.success) {
-        const fileContent = await contentProcessor.readFileContent(
-          file.path,
-          file.mimetype
-        );
-        const trainingList = new TrainingList({
-          userId,
-          title: file.originalname,
-          type: 3,
-          file: {
-            fileName: file.filename,
-            originalFileName: file.originalname,
-            path: file.path,
-            content: fileContent,
-          },
-          costDetails: fileResult.costs,
-        });
-        await trainingList.save();
-        results.push({ type: "file", success: true });
-        req.io.to('user'+userId).emit('doc-snippet-added', { trainingList }); // Emit doc/snippet added event
+        // req.io.to('user'+userId).emit('doc-snippet-added', { trainingList }); // Emit doc/snippet added event
+        appEvents.emit('userEvent', userId, 'doc-snippet-added', { trainingList }); // Emit doc/snippet added event
       }
     }
 
     if (results.length > 0) {
-      await Client.updateOne({ id: userId }, { docSnippetAdded: true });
+      await Client.updateOne({ userId: userId }, { docSnippetAdded: true });
       res
         .status(201)
         .json({
@@ -352,7 +364,7 @@ OpenaiTrainingListController.getWebPageUrlCount = async (userId) => {
           crawledPagesCount: {
             $sum: {
               $cond: {
-                if: { $eq: ["$trainingProcessStatus.crawlingStatus", 2] },
+                if: { $eq: ["$webPage.crawlingStatus", 2] },
                 then: 1,
                 else: 0,
               },
@@ -361,7 +373,7 @@ OpenaiTrainingListController.getWebPageUrlCount = async (userId) => {
           mappedPagesCount: {
             $sum: {
               $cond: {
-                if: { $eq: ["$trainingProcessStatus.mappingStatus", 2] },
+                if: { $eq: ["$webPage.mappingStatus", 2] },
                 then: 1,
                 else: 0,
               },
@@ -395,7 +407,7 @@ OpenaiTrainingListController.getSnippetCount = async (userId) => {
       {
         $match: {
           userId: new ObjectId(userId),
-          type: { $in: [2, 3] },
+          type: { $in: [1,2] },
         },
       },
       {
@@ -428,7 +440,7 @@ OpenaiTrainingListController.getFaqCount = async (userId) => {
   try {
     const result = await TrainingList.aggregate([
       {
-        $match: { userId: new ObjectId(userId), type: 1 },
+        $match: { userId: new ObjectId(userId), type: 3 },
       },
       {
         $group: {
@@ -465,36 +477,42 @@ OpenaiTrainingListController.getWebPageList = async (
   actionType
 ) => {
   try {
-    let isActive = 0;
-    let type = 1;
+    let isActiveFilter = {};
+    let typeFilter = {};
+    
+    // Handle isActive filter based on actionType
     switch (actionType) {
       case "Action 1":
-        isActive = 1;
+        isActiveFilter = { isActive: 1 }; // Active
         break;
       case "Action 2":
-        isActive = 0;
+        isActiveFilter = { isActive: 0 }; // Inactive
         break;
       default:
-        isActive = 0;
+        // No filter on isActive
+        break;
     }
 
+    // Handle type filter based on sourcetype
     switch (sourcetype) {
       case "Show All Sources":
-        type = 1;
+        typeFilter = { type: { $in: [0, 1, 2, 3] } };
         break;
       case "Web Pages":
-        type = 0;
+        typeFilter = { type: 0 };
         break;
       case "Doc/Snippets":
-        type = 2;
+        typeFilter = { type: { $in: [1, 2] } };
         break;
       case "FAQs":
-        type = 1;
+        typeFilter = { type: 3 }; // According to schema, FAQs are type 3
         break;
       default:
-        type = 1;
+        typeFilter = { type: { $in: [0, 1, 2, 3] } };
     }
-    if(skip < 0) {
+
+    // Ensure skip is not negative
+    if (skip < 0) {
       skip = 0;
     }
 
@@ -502,31 +520,33 @@ OpenaiTrainingListController.getWebPageList = async (
       {
         $match: {
           userId: new ObjectId(userId),
-        },
+          ...typeFilter,
+          ...isActiveFilter
+        }
       },
       {
         $project: {
           title: 1,
-          type: type,
-          isActive: isActive,
+          type: 1,
+          isActive: 1,
+          trainingStatus: 1,
           lastEdit: {
             $dateToString: {
               format: "%B %d, %Y",
               date: "$lastEdit",
-              timezone: "UTC", // Adjust the timezone if needed
-            },
-          },
-          isActive: isActive,
-          trainingStatus: 4,
-        },
+              timezone: "UTC"
+            }
+          }
+        }
       },
       {
-        $skip: skip, // Skip documents for the previous pages
+        $skip: parseInt(skip)
       },
       {
-        $limit: limit, // Limit the number of documents returned
-      },
+        $limit: parseInt(limit)
+      }
     ]);
+    
     return webPages;
   } catch (error) {
     console.log(error);
