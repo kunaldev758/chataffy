@@ -1,11 +1,11 @@
 require("dotenv").config();
 const { Worker, Queue } = require("bullmq");
 const Client = require("../models/Client");
-const VectorStoreManager = require("./PineconeService");
+const VectorStoreManager = require("./PineconeService"); // Assuming this handles Pinecone interaction
 const { MarkdownTextSplitter } = require("langchain/text_splitter");
 const TrainingList = require("../models/OpenaiTrainingList");
 const OpenAIUsageController = require("../controllers/OpenAIUsageController");
-const UnifiedPricingService = require("./UnifiedPricingService");
+const UnifiedPricingService = require("./UnifiedPricingService"); // Import the new service
 const ScrapeTracker = require("./ScrapeTracker");
 const appEvents = require("../events.js");
 
@@ -18,20 +18,19 @@ const pineconeTrainQueue = new Queue("pineconeTraining", {
   connection: redisConfig,
 });
 
-// Send event to client (to be implemented based on your socket setup)
+// Send event to client
 function sendClientEvent(userId, eventName, data) {
-  appEvents.emit("userEvent", userId, eventName, {
-    data,
-  });
+  appEvents.emit("userEvent", userId, eventName, { data });
 }
 
-// Initialize once
-const pricingService = new UnifiedPricingService();
+// Initialize pricing service once
+// TODO: Determine Pinecone tier/pod type dynamically if needed, or use defaults/config
+const pricingService = new UnifiedPricingService(process.env.PINECONE_TIER || 'standard', process.env.PINECONE_POD_TYPE || 's1');
+const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small'; // Define embedding model used
 
 // Check user credits before processing
 async function checkUserCredits(userId, estimatedCost) {
   try {
-    // This should be a method that checks if user has enough credits
     const hasEnoughCredits = await OpenAIUsageController.checkUserCredits(
       userId,
       estimatedCost
@@ -44,22 +43,22 @@ async function checkUserCredits(userId, estimatedCost) {
 }
 
 // Record usage for the operation
-async function recordUsage(userId, totalTokens, embeddingCost) {
+async function recordUsage(userId, totalTokens) {
   try {
+    // Assuming recordUsage expects these specific details
     const result = await OpenAIUsageController.recordUsage(
       userId,
-      "chat_completion",
+      "train-data", // Operation type
       {
         totalTokens,
-        embeddingCost,
-        modelId: "gpt-3.5-turbo",
+        embeddingTokens: totalTokens, // Assuming embedding tokens are the same as total tokens for this operation
+        embeddingModel: EMBEDDING_MODEL, // Pass the actual model used
       }
     );
 
     if (!result.success) {
       throw new Error("Failed to record usage");
     }
-
     return true;
   } catch (error) {
     console.error(`Error recording usage for user ${userId}:`, error);
@@ -77,96 +76,110 @@ const worker = new Worker(
   "pineconeTraining",
   async (job) => {
     const {
-      type,  // 0-WebPage, 1-File, 2-Snippet, 3-Faq
+      type,
       pineconeIndexName,
       trainingListId,
-      // Other props might be included depending on type
+      // Other props
     } = job.data;
-    
+
     console.log(`Processing job for trainingListId: ${trainingListId}, type: ${type}`);
     let userId = null;
+    let trainingListObj; // Define here for broader scope
 
-    // Fetch the TrainingList object
-    const trainingListObj = await TrainingList.findOne({ _id: trainingListId });
-
-    if (!trainingListObj) {
-      console.error(`TrainingList not found with id: ${trainingListId}`);
-      throw new Error("Training list not found");
-    }
-    
-    userId = trainingListObj.userId;
-    let contentToProcess = "";
-    let metadata = {};
-    const contentType = parseInt(type);
-    
     try {
+      // Fetch the TrainingList object
+      trainingListObj = await TrainingList.findOne({ _id: trainingListId }); // Assign to the broader scope variable
+
+      if (!trainingListObj) {
+        console.error(`TrainingList not found with id: ${trainingListId}`);
+        throw new Error("Training list not found");
+      }
+
+      userId = trainingListObj.userId;
+      let contentToProcess = "";
+      let metadata = { userId: userId }; // Always include userId
+      const contentType = parseInt(type);
+      let title = "Untitled"; // Default title
+
       // Extract content and metadata based on content type
       switch (contentType) {
         case 0: // WebPage
-          contentToProcess = job.data.content
+          contentToProcess = job.data.content;
+          title = job.data.title || job.data.webPageURL;
           metadata = {
-            url: job.data.webPageURL ,
-            title: job.data.title ,
+            ...metadata,
+            url: job.data.webPageURL,
+            title: title,
             type: "webpage",
-            userId: userId,
-            metaDescription: job.data.metaDescription 
+            metaDescription: job.data.metaDescription,
           };
           break;
-          
+
         case 1: // File
           contentToProcess = job.data.content;
+          title = job.data.title || job.data.originalFileName;
           metadata = {
+            ...metadata,
             fileName: job.data.fileName,
             originalFileName: job.data.originalFileName,
-            title: job.data.title,
+            title: title,
             type: "file",
-            userId: userId
           };
           break;
-          
+
         case 2: // Snippet
           contentToProcess = job.data.content;
+          title = job.data.title || "Snippet";
           metadata = {
-            title: job.data.title,
+            ...metadata,
+            title: title,
             type: "snippet",
-            userId: userId
           };
           break;
-          
+
         case 3: // FAQ
-          // For FAQ, we combine question and answer with proper formatting
-          contentToProcess =job.data.content;
+          // Combine question (title) and answer (content)
+          title = job.data.title || "FAQ";
+          contentToProcess = `Question: ${job.data.title}\nAnswer: ${job.data.content}`;
           metadata = {
-            question: job.data.title,
+            ...metadata,
+            question: job.data.title, // Keep original question here
+            title: title, // Use a combined title or just the question
             type: "faq",
-            userId: userId
           };
           break;
-          
+
         default:
           throw new Error(`Unsupported content type: ${contentType}`);
       }
-      
+
       if (!contentToProcess) {
-        throw new Error("No content found to process");
+        console.warn(`No content found for trainingListId ${trainingListId}, type ${contentType}. Skipping.`);
+        // Optionally update status to indicate no content or skip
+         await TrainingList.findByIdAndUpdate(trainingListObj._id, {
+            trainingStatus: 5, // Or a new status like 'No Content'
+            lastEdit: Date.now(),
+         });
+         sendClientEvent(userId, "content-skipped-no-content", {
+            trainingListId, contentType, typeName: getContentTypeName(contentType),
+         });
+        return { success: true, skipped: true, reason: "No content" };
       }
 
-      // Initialize VectorStoreManager
-      const vectorStoreManager = new VectorStoreManager(pineconeIndexName);
+      // --- Cost Calculation ---
+      // Use the new pricing service
+      const totalTokens = pricingService.estimateTokens(contentToProcess);
+      const embeddingCost = pricingService.calculateEmbeddingCost(totalTokens, EMBEDDING_MODEL);
+      // --- End Cost Calculation ---
 
-      // Calculate costs
-      const totalTokens = await pricingService.estimateTokens(contentToProcess);
-      const embeddingCost = await pricingService.calculateEmbeddingCost(totalTokens);
+      console.log(`Estimated cost for ${trainingListId}: Tokens=${totalTokens}, Cost=${embeddingCost.toFixed(6)}`);
 
       // Check if user has enough credits
       const hasCredits = await checkUserCredits(userId, embeddingCost);
       if (!hasCredits) {
-        // Update status based on content type
-        const updateObj = { trainingStatus: 10, lastEdit: Date.now() };
-        
-        // Add type-specific status update
-        if (contentType === 0) updateObj["webPage.mappingStatus"] = 3;
-        
+        const updateObj = { trainingStatus: 10, lastEdit: Date.now() }; // Insufficient Credits status
+        if (contentType === 0) updateObj["webPage.mappingStatus"] = 3; // Failed
+
         await TrainingList.findByIdAndUpdate(trainingListObj._id, updateObj);
 
         sendClientEvent(userId, "content-error-insufficient-credits", {
@@ -179,88 +192,76 @@ const worker = new Worker(
         throw new Error("INSUFFICIENT_CREDITS");
       }
 
-      // Check if index exists, create if not
+      // Initialize VectorStoreManager (ensure it uses the correct index name)
+      const vectorStoreManager = new VectorStoreManager(pineconeIndexName);
+
+      // Check/Create Pinecone Index (Consider doing this less frequently, perhaps on client setup)
       if (!(await vectorStoreManager.doesIndexExist(pineconeIndexName))) {
         console.log(`Creating index "${pineconeIndexName}"...`);
         const created = await vectorStoreManager.createIndex(pineconeIndexName);
         if (!created) {
-          sendClientEvent(userId, "content-error", {
-            trainingListId,
-            contentType,
-            typeName: getContentTypeName(contentType),
-            error: "Failed to create Pinecone Index",
-          });
-          throw new Error("Failed to create Pinecone index");
+          throw new Error("Failed to create Pinecone index"); // Let the main error handler catch this
         }
       }
-      
-      // Configure text splitter based on content type
+
+      // Configure text splitter
       let chunkSize = 1000;
       let chunkOverlap = 200;
-      
-      // Adjust chunk size for different content types
       if (contentType === 3) { // FAQ
-        chunkSize = 2000; // Larger chunks for FAQs to keep Q&A together
+        chunkSize = 2000;
+        chunkOverlap = 150;
       } else if (contentType === 2) { // Snippet
-        chunkSize = 1500; // Medium size for snippets
+        chunkSize = 1500;
         chunkOverlap = 150;
       }
-      
-      const textSplitter = new MarkdownTextSplitter({
-        chunkSize,
-        chunkOverlap,
-      });
 
-      const chunks = await textSplitter.createDocuments([contentToProcess], metadata);
+      const textSplitter = new MarkdownTextSplitter({ chunkSize, chunkOverlap });
+      // Pass metadata *object* to createDocuments for association with each chunk
+      const documents = await textSplitter.createDocuments([contentToProcess], [metadata]); // Pass metadata as the second arg
 
-      // Record usage before performing the expensive operation
-      await recordUsage(userId, totalTokens, embeddingCost);
+
+      // Record usage *before* the expensive upsert operation
+      await recordUsage(userId, totalTokens); // Pass calculated cost
 
       // Upsert vectors into Pinecone
-      if (chunks.length) {
-        const upsertResult = await vectorStoreManager.upsertVectors(
-          chunks.map((chunk) => chunk.pageContent),
-          metadata
-        );
+      if (documents.length > 0) {
+          // Assuming upsertVectors takes LangChain documents directly
+          // or adapts them internally. Adjust if it expects plain text/metadata separately.
+          // Ensure your VectorStoreManager correctly handles embedding and upserting
+          // Langchain Documents which contain both pageContent and metadata.
+          const upsertResult = await vectorStoreManager.upsertDocuments(documents); // Changed method name assumption
 
-        if (!upsertResult.success) {
-          throw new Error(
-            "Failed to upsert vectors: " + (upsertResult.error || "Unknown error")
-          );
+        if (!upsertResult || !upsertResult.success) { // Check for success flag
+            console.error("Failed to upsert vectors:", upsertResult?.error);
+            throw new Error("Failed to upsert vectors: " + (upsertResult?.error || "Unknown error"));
         }
+        console.log(`Upserted ${documents.length} chunks for ${trainingListId}`);
+      } else {
+        console.log(`No chunks generated for ${trainingListId}, nothing to upsert.`);
       }
 
       // Update training list with successful status
-      const updateObj = {
-        costDetails: {
-          tokens: totalTokens,
-          embedding: embeddingCost,
-          totalCost: embeddingCost,
-        },
+      const updateSuccessObj = {
+        // You might want to store calculated cost/tokens here if needed for display
+        // costDetails: { tokens: totalTokens, embeddingCost: embeddingCost },
         trainingStatus: 4, // Mapped
-        lastEdit: Date.now()
+        lastEdit: Date.now(),
       };
-      
-      // Add type-specific status update for web pages
+      if (contentType === 0) updateSuccessObj["webPage.mappingStatus"] = 2; // Success
+
+      await TrainingList.findByIdAndUpdate(trainingListObj._id, updateSuccessObj);
+
+      // Handle ScrapeTracker for web pages
       if (contentType === 0) {
-        updateObj["webPage.mappingStatus"] = 2; // Success
-      }
-      
-      await TrainingList.findByIdAndUpdate(trainingListObj._id, updateObj);
+         const trackingInfo = ScrapeTracker.getTracking(userId);
+         if (trackingInfo) {
+            ScrapeTracker.updateTracking(userId, "training", true);
+            const updatedTrackingInfo = ScrapeTracker.getTracking(userId); // Get fresh data
+             const isComplete =
+              updatedTrackingInfo.trainingCompleted + updatedTrackingInfo.failedPages >=
+              updatedTrackingInfo.totalPages;
 
-      // Handle special tracking for web pages
-      if (contentType === 0 && ScrapeTracker.getTracking(userId)) {
-        ScrapeTracker.updateTracking(userId, "training", true);
-
-        // Get updated tracking info
-        const trackingInfo = ScrapeTracker.getTracking(userId);
-
-        // Check if all pages are processed
-        const isComplete =
-          trackingInfo.trainingCompleted + trackingInfo.failedPages >=
-          trackingInfo.totalPages;
-
-        // Emit progress update
+              // Emit progress update
         appEvents.emit("userEvent", userId, "scraping-progress", {
           status: isComplete ? "complete" : "in-progress",
           stage: "training",
@@ -271,138 +272,97 @@ const worker = new Worker(
           failed: trackingInfo.failedPages,
         });
 
-        // If complete, send completion event
-        if (isComplete) {
-          await Client.updateOne({ userId: userId }, { webPageAdded: true });
-          appEvents.emit("userEvent", userId, "scraping-complete", {
-            total: trackingInfo.totalPages,
-            processed: trackingInfo.trainingCompleted,
-            failed: trackingInfo.failedPages,
-            duration: Date.now() - trackingInfo.startTime,
-          });
-
-          // Clear tracking data after completion
-          setTimeout(() => {
-            ScrapeTracker.clearTracking(userId);
-          }, 60000); // Clear after 1 minute
+            if (isComplete) {
+                 await Client.updateOne({ userId: userId }, { webPageAdded: true });
+                 appEvents.emit("userEvent", userId, "scraping-complete", {
+                  total: trackingInfo.totalPages,
+                  processed: trackingInfo.trainingCompleted,
+                  failed: trackingInfo.failedPages,
+                  duration: Date.now() - trackingInfo.startTime,
+                });
+                 setTimeout(() => ScrapeTracker.clearTracking(userId), 60000);
+            }
         }
       }
 
-      // Send content-specific completion event
       sendClientEvent(userId, "content-completed", {
         trainingListId,
         contentType,
         typeName: getContentTypeName(contentType),
-        chunks: chunks.length,
+        chunks: documents.length,
       });
 
-      return { success: true, chunks: chunks.length };
+      return { success: true, chunks: documents.length };
+
     } catch (error) {
-      console.error(`Error in pinecone training for type ${contentType}:`, error);
-      
-      // Update status based on content type
-      const updateObj = { trainingStatus: 9, lastEdit: Date.now() }; // Failed
-      
-      // Add type-specific status update for web pages
-      if (contentType === 0) {
-        updateObj["webPage.mappingStatus"] = 3; // Failed
-      }
-      
-      await TrainingList.findByIdAndUpdate(trainingListObj._id, updateObj);
-      
-      // If it's a credits issue, we might want to pause the queue or take specific action
-      if (error.message === "INSUFFICIENT_CREDITS") {
-        console.log(
-          `Pausing processing for user ${userId} due to insufficient credits`
-        );
+      console.error(`Error processing job ${job.id} (TLID: ${trainingListId}, Type: ${type}):`, error.message);
+
+      // Ensure userId and trainingListObj are available for error handling
+      userId = userId || job.data.userId || trainingListObj?.userId; // Try to get userId
+      const listId = trainingListId || job.data.trainingListId;
+
+      if (listId && userId) {
+        const updateErrorObj = { trainingStatus: 9, lastEdit: Date.now() }; // Failed status
+        const contentType = parseInt(type); // Re-parse type if needed
+         if (!isNaN(contentType) && contentType === 0) {
+             updateErrorObj["webPage.mappingStatus"] = 3; // Failed for webpage
+         }
+        try {
+             await TrainingList.findByIdAndUpdate(listId, updateErrorObj);
+        } catch (updateError) {
+            console.error(`Failed to update TrainingList status to failed for ${listId}:`, updateError);
+        }
+
+         // Update ScrapeTracker on failure for web pages
+         if (!isNaN(contentType) && contentType === 0) {
+            const trackingInfo = ScrapeTracker.getTracking(userId);
+            if (trackingInfo) {
+               ScrapeTracker.updateTracking(userId, "training", false); // Mark as failed
+               // Potentially check completion status here too, similar to success path
+            }
+         }
+
+         // Send specific error event to client
+         const errorType = error.message === "INSUFFICIENT_CREDITS"
+            ? "content-error-insufficient-credits"
+            : "content-error";
+
+         sendClientEvent(userId, errorType, {
+            trainingListId: listId,
+            contentType: isNaN(contentType) ? 'unknown' : contentType,
+            typeName: isNaN(contentType) ? 'unknown' : getContentTypeName(contentType),
+            error: error.message,
+         });
+
+      } else {
+          console.error(`Cannot update status or notify client: userId (${userId}) or trainingListId (${listId}) is missing.`);
       }
 
-      // Update ScrapeTracker if applicable (for web pages)
-      if (contentType === 0 && ScrapeTracker.getTracking(userId)) {
-        ScrapeTracker.updateTracking(userId, "training", false);
-      }
-
-      return { success: false, error: error.message };
+      // Rethrow the error to mark the job as failed in BullMQ
+      throw error; // Don't return { success: false } here, let BullMQ handle the failure
     }
   },
-  { connection: redisConfig, concurrency: 5, lockDuration: 30000 }
+  { connection: redisConfig, concurrency: 5, lockDuration: 60000 } // Increased lock duration
 );
 
-// Worker event handlers
-worker.on("completed", (job) => {
-  console.log(`Job with id ${job.id} has completed`);
+// --- Worker Event Handlers ---
+worker.on("completed", (job, result) => {
+  console.log(`Job ${job.id} (TLID: ${job.data.trainingListId}) completed. Result: ${JSON.stringify(result)}`);
 });
 
 worker.on("failed", (job, err) => {
-  console.log(`Job with id ${job.id} has failed with error ${err.message}`);
-
-  // If the error is due to insufficient credits, you might want to
-  // pause other jobs for the same user to prevent wasteful processing
-  if (err.message === "INSUFFICIENT_CREDITS" && job.data) {
-    const { trainingListId, type } = job.data;
-    console.log(
-      `Pausing other jobs related to training list ${trainingListId} (type: ${type}) due to insufficient credits`
-    );
-    // Implement additional pausing logic here if needed
+  console.error(`Job ${job.id} (TLID: ${job.data.trainingListId}) failed with error: ${err.message}`, err.stack);
+  // Specific handling for insufficient credits if needed (e.g., pausing user's queue)
+  if (err.message === "INSUFFICIENT_CREDITS" && job?.data?.userId) {
+      console.warn(`Insufficient credits detected for user ${job.data.userId}. Consider pausing related jobs.`);
+      // Potential logic to pause queue for this user
   }
 });
 
-// Function to add jobs to the queue
-// async function addTrainingJob(trainingListId) {
-//   try {
-//     // Fetch the training list to determine its type
-//     const trainingList = await TrainingList.findById(trainingListId);
-//     if (!trainingList) {
-//       throw new Error(`Training list not found: ${trainingListId}`);
-//     }
-
-//     const pineconeIndexName = `user-${trainingList.userId}`;
-//     const contentType = trainingList.type; // 0-WebPage, 1-File, 2-Snippet, 3-Faq
-    
-//     // Base job data
-//     const jobData = {
-//       type: contentType,
-//       pineconeIndexName,
-//       trainingListId,
-//     };
-    
-//     // Add type-specific data (mainly for backward compatibility with web pages)
-//     if (contentType === 0 && trainingList.webPage) {
-//       jobData.webPageURL = trainingList.webPage.url;
-//       jobData.title = trainingList.webPage.title || trainingList.title;
-//       jobData.content = trainingList.webPage.content;
-//       jobData.metaDescription = trainingList.webPage.metaDescription;
-//     }
-    
-//     // Update training status
-//     const updateObj = { trainingStatus: 1, lastEdit: Date.now() }; // Listed
-    
-//     // Set appropriate mapping status for web pages
-//     if (contentType === 0) {
-//       updateObj["webPage.mappingStatus"] = 1; // In Progress
-//     }
-    
-//     await TrainingList.findByIdAndUpdate(trainingListId, updateObj);
-    
-//     // Add to queue
-//     await pineconeTrainQueue.add('train-content', jobData, {
-//       attempts: 3,
-//       backoff: {
-//         type: 'exponential',
-//         delay: 5000,
-//       },
-//     });
-    
-//     return { success: true };
-//   } catch (error) {
-//     console.error(`Failed to add training job for ${trainingListId}:`, error);
-//     return { success: false, error: error.message };
-//   }
-// }
+worker.on("error", (err) => {
+  console.error("Worker encountered an error:", err);
+});
 
 console.log("Pinecone training worker started...");
 
-// Export both queue and helper function
-module.exports = {
-  pineconeTrainQueue,
-};
+module.exports = { pineconeTrainQueue }; // Only export the queue usually

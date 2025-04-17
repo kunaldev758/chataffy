@@ -1,354 +1,298 @@
 require("dotenv").config();
 const { OpenAIEmbeddings } = require("@langchain/openai");
 const { Pinecone } = require("@pinecone-database/pinecone");
-const {OpenAI} = require("openai");
+const { OpenAI } = require("openai");
 const ChatMessageController = require("../controllers/ChatMessageController");
-const Usage = require("../models/UsageSchema");
+// const Usage = require("../models/UsageSchema"); // Keep if still used elsewhere, remove if only for old tracking
 const Client = require("../models/Client");
 const Widget = require("../models/Widget");
 const OpenAIUsageController = require("../controllers/OpenAIUsageController");
+const UnifiedPricingService = require("../services/UnifiedPricingService"); // Import the new service
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// --- Configuration ---
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const PINECONE_API_KEY = process.env.PINECONE_API_KEY;
+// Define models used in this service
+const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
+const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-3.5-turbo';
+const PINECONE_TIER = process.env.PINECONE_TIER || 'standard';
+const PINECONE_POD_TYPE = process.env.PINECONE_POD_TYPE || 's1';
+
+// --- Initialize Clients ---
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+const pinecone = new Pinecone({ apiKey: PINECONE_API_KEY, maxRetries: 5 });
 
 
-class PricingCalculator {
-  constructor() {
-    // Current pricing rates (as of 2024)
-    this.rates = {
-      embedding: {
-        ada: 0.0001, // per 1K tokens
-      },
-      chatCompletion: {
-        "gpt-3.5-turbo": {
-          input: 0.001, // per 1K tokens
-          output: 0.002, // per 1K tokens
-        },
-      },
-      pinecone: {
-        query: 0.0002, // per query
-        vector: 0.0002, // per vector per month
-      },
-    };
-  }
-
-  async estimateTokens(text) {
-    // Rough approximation: 1 token ≈ 4 characters
-    return Math.ceil(text.length / 4);
-  }
-
-  calculateEmbeddingCost(tokens) {
-    return (tokens / 1000) * this.rates.embedding.ada;
-  }
-
-  calculateChatCompletionCost(
-    inputTokens,
-    outputTokens,
-    model = "gpt-3.5-turbo"
-  ) {
-    const inputCost =
-      (inputTokens / 1000) * this.rates.chatCompletion[model].input;
-    const outputCost =
-      (outputTokens / 1000) * this.rates.chatCompletion[model].output;
-    return inputCost + outputCost;
-  }
-
-  calculatePineconeQueryCost(queryCount) {
-    return queryCount * this.rates.pinecone.query;
-  }
-}
+// Removed the old PricingCalculator class
 
 class QuestionAnsweringSystem {
   constructor() {
-    // this.openai = new OpenAI({
-    //   apiKey: process.env.OPENAI_API_KEY,
-    // });
-
+    // Explicitly set the model in OpenAIEmbeddings
     this.embeddingModel = new OpenAIEmbeddings({
-      openAIApiKey: process.env.OPENAI_API_KEY,
+      openAIApiKey: OPENAI_API_KEY,
+      modelName: EMBEDDING_MODEL, // Use the configured model
     });
 
-    this.pinecone = new Pinecone({
-      apiKey: process.env.PINECONE_API_KEY,
-      maxRetries: 5,
-    });
+    this.pineconeClient = pinecone; // Use the shared client
 
-    // Maximum number of previous messages to include in context
-    this.pricingCalculator = new PricingCalculator();
+    // Initialize the new pricing service, passing relevant config
+    this.pricingService = new UnifiedPricingService(PINECONE_TIER, PINECONE_POD_TYPE);
+
     this.maxHistoryMessages = 5;
   }
 
-  async trackUsage(userId, operation, details) {
-    const usage = new Usage({
-      userId,
-      operation,
-      details,
-    });
-    await usage.save();
-  }
-
-  // Add method to get usage summary
-  async getUserUsageSummary(userId, startDate, endDate) {
-    const usage = await Usage.aggregate([
-      {
-        $match: {
-          userId,
-          timestamp: { $gte: startDate, $lte: endDate },
-        },
-      },
-      {
-        $group: {
-          _id: "$operation",
-          totalCost: { $sum: "$details.cost" },
-          count: { $sum: 1 },
-        },
-      },
-    ]);
-
-    return {
-      summary: usage,
-      totalCost: usage.reduce((sum, item) => sum + item.totalCost, 0),
-    };
-  }
 
   async getChatHistory(conversationId) {
     try {
-      const session = await ChatMessageController.getRecentChatMessages(
-        conversationId
+      // Limit the number of messages fetched if possible at the DB level
+      const messages = await ChatMessageController.getRecentChatMessages(
+        conversationId,
+        this.maxHistoryMessages * 2 // Fetch a bit more to ensure we get enough user/ai pairs
       );
-      return session;
+      // Return only the last N messages after fetching
+      return messages.slice(-this.maxHistoryMessages);
     } catch (error) {
       console.error("Error getting chat history:", error);
-      throw error;
+      // Return empty array on error to allow processing to continue if possible
+      return [];
     }
   }
 
   formatChatHistory(messages) {
-    // Get last few messages
-    const recentMessages = messages.slice(-this.maxHistoryMessages);
-    return recentMessages
-      .map((msg) => `${msg.sender_type}: ${msg.message}`)
+    return messages
+      .map((msg) => `${msg.sender_type}: ${msg.message}`) // Assuming sender_type is 'user' or 'ai'/'assistant'
       .join("\n");
   }
 
   async generateAnswer(question, context, chatHistory, organisation) {
+    const systemPrompt = `You are a helpful chat agent for ${organisation}.
+- Always be professional, friendly, and helpful.
+- Focus on providing information about ${organisation} based *only* on the provided context.
+- If the context does not contain the answer to the question, state that you couldn't find the information in the knowledge base. Do not make up answers.
+- If a question is completely unrelated to ${organisation} or the provided context, politely state that you can only answer questions about ${organisation}.
+- Suggest visiting the website or contacting support if the information isn't available.
+- Format responses using HTML for better readability.`;
+
+    const userPrompt = `Context from knowledge base:\n---\n${context}\n---\n\nChat History:\n---\n${chatHistory}\n---\n\nBased *only* on the provided context and chat history, answer the following question:\nQuestion: ${question}`;
+
     try {
       const response = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
+        model: CHAT_MODEL, // Use configured chat model
         messages: [
-          {
-            role: "system",
-            content: `You are a helpful chat agent for ${organisation}. 
-                - Always be professional, friendly, and helpful
-                - Focus on providing information about ${organisation} 
-                - If a question is outside your knowledge, politely redirect or suggest visiting the website
-                - Use a conversational but professional ton
-                - Represent the brand's values and mission
-                - Format responses using proper HTML for display:
-                      - Use <h2> for headings.
-                      - Use <strong> for important words.
-                      - Use <p> for paragraphs.
-                      - Use <ul> and <li> for lists where applicable.`,
-          },
-          {
-            role: "user",
-            content: `Context from knowledge base: ${context}\n\nChat History:\n${chatHistory}\n\nCurrent Question: ${question}`,
-          },
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
         ],
-        temperature: 0.7,
-        max_tokens: 500,
+        temperature: 0.5, // Slightly lower temp for more factual answers based on context
+        max_tokens: 400,  // Adjust as needed
       });
 
-      return response.choices[0].message.content;
+      const answer = response.choices[0]?.message?.content?.trim() || "I apologize, I encountered an issue generating a response.";
+      const usage = response.usage; // { prompt_tokens, completion_tokens, total_tokens }
+
+      return { answer, usage }; // Return both answer and token usage
+
     } catch (error) {
-      console.error("Error generating answer:", error);
-      throw error;
+      console.error("Error generating answer with OpenAI:", error);
+      // Provide a safe fallback answer
+      return { answer: "I'm currently unable to generate a response due to a technical issue. Please try again later.", usage: null };
     }
   }
 
-  async getRelevantContext(matches) {
-    const sortedMatches = matches.sort((a, b) => b.score - a.score);
-    return sortedMatches.map((match) => match.metadata.text).join("\n\n");
+  // Simplified context extraction
+  getRelevantContext(matches) {
+    // Sort by score and take top N (already done by Pinecone query 'topK')
+    // Filter by score threshold happens before this function now
+     return matches
+       // .filter(match => match.score >= scoreThreshold) // Apply threshold if not done before
+       .map((match) => match.metadata?.text || match.metadata?.pageContent || '') // Extract text content safely
+       .filter(text => text.length > 0) // Remove empty contexts
+       .join("\n\n---\n\n"); // Separate contexts clearly
   }
 
-  async getEmbedding(text) {
-    try {
-      const response = await openai.embeddings.create({
-        model: "text-embedding-3-large", // Specify the model
-        input: text,
-      });
-
-      return response.data[0].embedding; // Extract embedding array
-      // return response.data.map(item => item.embedding);
-    } catch (error) {
-      console.error("Error generating embedding:", error);
-      return null;
-    }
-  }
+  // getEmbedding method removed - using this.embeddingModel.embedQuery directly
 
   async getAnswer(userId, question, conversationId, options = {}) {
+    const {
+      topK = 5,           // Fetch more candidates initially
+      scoreThreshold = 0.75, // Slightly higher threshold for relevance
+      // includeSources = false, // Decide if source tracking is needed
+    } = options;
+
+    let usageDetails = {
+        embeddingTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+    };
+
     try {
-      const {
-        topK = 3,
-        scoreThreshold = 0.7,
-        includeSources = false,
-      } = options;
-
-      let costs = {
-        embedding: 0,
-        pineconeQuery: 0,
-        chatCompletion: 0,
-        total: 0,
-      };
-
-      // Get chat history
+      // 1. Get Chat History
       const chatSession = await this.getChatHistory(conversationId);
       const chatHistory = this.formatChatHistory(chatSession);
 
-      // Calculate and track embedding cost
-      const questionTokens = await this.pricingCalculator.estimateTokens(
-        question
-      );
-      const embeddingCost =
-        this.pricingCalculator.calculateEmbeddingCost(questionTokens);
-      costs.embedding = embeddingCost;
+      // 2. Calculate Embedding Cost
+      const embeddingTokens = this.pricingService.estimateTokens(question);
+      usageDetails.embeddingTokens = embeddingTokens;
+     // costs.embedding = this.pricingService.calculateEmbeddingCost(questionTokens, EMBEDDING_MODEL);
 
-      await this.trackUsage(userId, "embedding", {
-        inputTokens: questionTokens,
-        cost: embeddingCost,
-      });
-
-      // Generate embedding for the question
-      // const questionEmbedding = await this.getEmbedding(question);
+      // 3. Generate Question Embedding
       const questionEmbedding = await this.embeddingModel.embedQuery(question);
+      if (!questionEmbedding) {
+          throw new Error("Failed to generate question embedding.");
+      }
 
-      // Calculate and track Pinecone query cost
-      const pineconeQueryCost =
-        this.pricingCalculator.calculatePineconeQueryCost(1);
-      costs.pineconeQuery = pineconeQueryCost;
+      // 5. Query Pinecone
+      const clientData = await Client.findOne({ userId }).lean(); // Use lean for performance
+      const widgetData = await Widget.findOne({ userId }).lean(); // Use lean
 
-      await this.trackUsage(userId, "pinecone_query", {
-        vectorCount: 1,
-        cost: pineconeQueryCost,
-      });
+      if (!clientData || !clientData.pineconeIndexName) {
+        throw new Error(`Pinecone index not configured for user ${userId}`);
+      }
+      if (!widgetData) {
+          throw new Error(`Widget data not found for user ${userId}`);
+      }
 
-      // Query Pinecone
-      // const pineconeneIndexName = await Client.findOne({ userId: userId });
-      const client = await Client.findOne({ userId });
-      const widget = await Widget.findOne({ userId });
-      const pineconeIndexName = client.pineconeIndexName;
+      const pineconeIndexName = clientData.pineconeIndexName;
+      const index = this.pineconeClient.index(pineconeIndexName);
 
-      const index = this.pinecone.index(pineconeIndexName);
       const queryResponse = await index.query({
         vector: questionEmbedding,
-        topK,
+        topK: topK, // Retrieve top K candidates
         includeMetadata: true,
+        // filter: { userId: userId } // IMPORTANT: Filter results by userId if metadata contains it
       });
 
+      // Filter matches by score threshold *after* retrieving them
       const relevantMatches = queryResponse.matches.filter(
-        (match) => match.score >= 0.2
+        (match) => match.score >= scoreThreshold
       );
 
-      let answer;
+      console.log(`Pinecone query for "${question.substring(0, 30)}..." found ${queryResponse.matches.length} matches, ${relevantMatches.length} relevant.`);
+
+      let finalAnswer;
+      let completionUsage = null;
+
       if (relevantMatches.length === 0) {
-        (answer = `I apologize, but I couldn't find specific information about "${question}" in our knowledge base. 
-            For the most accurate and up-to-date information, I recommend visiting our website: ${widget.website} 
-            or checking our contact page .`),
-          `Thank you for your question. While I couldn't locate exact details about "${question}", 
-            I'd be happy to help you find more information. Please consider visiting our website : ${widget.website}
-            or reaching out to our support team.`,
-          `I appreciate your inquiry about "${question}". However, this specific detail isn't 
-            currently in my knowledge base. For comprehensive information, please visit 
-            our website or contact our support team.`;
+        // Default answer when no relevant context found
+         finalAnswer = `I couldn't find specific information about "${question}" in the knowledge base. You might find helpful information on the ${widgetData.organisation || 'company'} website: ${widgetData.website || '(Website not provided)'}`;
+
       } else {
-        // Get context and generate answer
-        const context = await this.getRelevantContext(relevantMatches);
-        answer = await this.generateAnswer(
+        // 6. Get Context and Generate Answer via LLM
+        const context = this.getRelevantContext(relevantMatches);
+
+        // Estimate combined input tokens for chat completion (more accurate if possible)
+        const promptForLLM = `Context: ${context}\nHistory: ${chatHistory}\nQuestion: ${question}`;
+        usageDetails.promptTokens = this.pricingService.estimateTokens(promptForLLM); // Estimate based on constructed prompt
+
+        const { answer: generatedAnswer, usage: llmUsage } = await this.generateAnswer(
           question,
           context,
           chatHistory,
-          widget.organisation
+          widgetData.organisation || "the company"
         );
+        finalAnswer = generatedAnswer;
+        completionUsage = llmUsage; // Get actual usage from OpenAI response
 
-        // Calculate and track chat completion cost
-        const inputTokens = await this.pricingCalculator.estimateTokens(
-          question + context + chatHistory
-        );
-        const outputTokens = await this.pricingCalculator.estimateTokens(
-          answer
-        );
-        const completionCost =
-          this.pricingCalculator.calculateChatCompletionCost(
-            inputTokens,
-            outputTokens
-          );
-        costs.chatCompletion = completionCost;
-
-        await this.trackUsage(userId, "chat_completion", {
-          inputTokens,
-          outputTokens,
-          cost: completionCost,
-        });
+        // 7. Calculate Chat Completion Cost (use actual tokens if available)
+        if (completionUsage) {
+            usageDetails.promptTokens = completionUsage.prompt_tokens;
+            usageDetails.completionTokens = completionUsage.completion_tokens;
+        } else {
+            // Fallback to estimation if actual usage not available
+            usageDetails.completionTokens = this.pricingService.estimateTokens(finalAnswer);
+        }
       }
 
-      // Calculate total cost
-      costs.total =
-        costs.embedding + costs.pineconeQuery + costs.chatCompletion;
+      // 8. Calculate Total Cost
+      usageDetails.totalTokens = usageDetails.embeddingTokens + (usageDetails.promptTokens || 0) + (usageDetails.completionTokens || 0);
+
+      console.log(`Usage for ConvID ${conversationId}: Q_Tokens=${usageDetails.embeddingTokens}, P_Tokens=${usageDetails.promptTokens}, C_Tokens=${usageDetails.completionTokens}`);
+
+      // 9. Record Usage (using the total cost)
+      // Assuming recordUsageOfChat mainly cares about the total cost impact on credits
       try {
-        OpenAIUsageController.recordUsageOfChat(userId, costs.total);
-      } catch (error) {
-        throw new Error("Not Enough Credits");
+         await OpenAIUsageController.recordUsage(userId,'chat' , {
+          // costs.total,
+          ...usageDetails,
+            completionModel: CHAT_MODEL, // Primary model involved
+            pineconeQueries: 1, // Number of queries made
+         });
+      } catch (usageError) {
+          // Decide how to handle usage recording failure - log, maybe retry?
+          // If it's due to insufficient credits, the controller should handle that.
+          console.error(`Failed to record chat usage for user ${userId}: ${usageError.message}`);
+           // If recording failure means credits weren't deducted, maybe throw to signal issue?
+           if (usageError.message.includes("Insufficient Credits")) { // Check specific error
+                throw new Error("INSUFFICIENT_CREDITS"); // Propagate credit error
+           }
+           // Otherwise, log and continue, as the answer was generated
       }
 
-      // Prepare sources if requested
-      // const sources = includeSources
-      //   ? relevantMatches.map((match) => ({
-      //       url: match.metadata.url,
-      //       score: match.score,
-      //     }))
-      //   : [];
-      const sources =null;
+      // 10. Prepare Sources (if needed)
+      // const sources = /* includeSources ? */ relevantMatches.map((match) => ({
+      //   id: match.id, // Pinecone vector ID
+      //   score: match.score,
+      //   title: match.metadata?.title || 'Source',
+      //   url: match.metadata?.url, // Include URL if available in metadata
+      //   // Potentially include a snippet of the text:
+      //   // textSnippet: (match.metadata?.text || '').substring(0, 100) + '...'
+      // })) /* : [] */;
 
       return {
         success: true,
-        answer,
-        sources,
-        costs,
+        answer: finalAnswer,
+        // sources: sources, // Return relevant sources
+        // costs: costs,
+        usage: usageDetails, // Return token usage details
         conversationId,
       };
+
     } catch (error) {
-      console.error("Error in getAnswer:", error);
+      console.error(`Error in getAnswer for ConvID ${conversationId}, User ${userId}:`, error);
+      // Check for specific errors like insufficient credits propagated from usage recording
+       if (error.message === "INSUFFICIENT_CREDITS") {
+          return {
+              success: false,
+              error: "Insufficient credits to process the request.",
+              errorCode: "INSUFFICIENT_CREDITS", // Add specific code
+              // costs: costs, // Return costs calculated so far
+              usage: usageDetails,
+          };
+       }
+      // Generic error response
       return {
         success: false,
-        error: error.message,
+        error: `An error occurred: ${error.message}`,
+        // costs: costs, // Return costs calculated so far
+        usage: usageDetails,
       };
     }
   }
 }
 
-// Express route handler
-async function handleQuestionAnswer(userId, question, conversationId, options) {
+// Route Handler remains mostly the same, just calls the updated class
+async function handleQuestionAnswer(userId, question, conversationId, options = {}) {
   try {
     if (!userId || !question || !conversationId) {
-      throw new Error("userId and question and conversationId are required");
+      // Return a structured error instead of throwing raw Error
+      return { success: false, error: "userId, question, and conversationId are required." };
     }
 
-    const qa = new QuestionAnsweringSystem();
-    const result = await qa.getAnswer(
-      userId,
-      question,
-      conversationId,
-      (options = {})
-    );
-    return result;
+    const qa = new QuestionAnsweringSystem(); // Creates instance with new pricing service
+    const result = await qa.getAnswer(userId, question, conversationId, options);
+    return result; // Return the result object (contains success/error)
+
   } catch (error) {
-    console.error("Error in question handler:", error);
-    throw error;
+    // Catch unexpected errors during instantiation or setup
+    console.error("Critical error in question handler:", error);
+    return {
+        success: false,
+        error: "An unexpected server error occurred.",
+    };
   }
 }
 
 module.exports = {
-  QuestionAnsweringSystem,
+  QuestionAnsweringSystem, // Export class if needed elsewhere
   handleQuestionAnswer,
 };
