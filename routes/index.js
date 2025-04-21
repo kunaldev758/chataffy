@@ -22,6 +22,10 @@ const middleware = require('../middleware/authMiddleware');
 
 
 /* Without middleware */
+//please craete a test route to check if the server is running
+router.get('/test', (req, res) => {
+    res.json({ message: 'API is working!' });
+});
 router.post('/login', UserController.loginUser);
 router.post('/createUser', UserController.createUser);
 router.post('/verifyEmail', UserController.verifyEmail);
