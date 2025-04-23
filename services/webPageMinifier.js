@@ -30,17 +30,13 @@ const redisConfig = process.env.ENVIRONMENT =='local' ? {
   url: process.env.REDIS_URL,
   maxRetriesPerRequest: null,
 }:
-redis.createClient({
-  url: "redis://:root1234@localhost:6379"
-})
+{
+  host: '127.0.0.1', 
+  port: 6379,        // default Redis port
+  password: 'root1234', // only if you set one in redis.conf
+  maxRetriesPerRequest: null,
+}
 
-// const redisConfig = {
-//   url: process.env.REDIS_URL,
-//   maxRetriesPerRequest: null,
-// };
-// const redisConfig = redis.createClient({
-//   url: "redis://:root1234@localhost:6379"
-// });
 const minifyingQueue = new Queue("webPageMinifying", {
   connection: redisConfig,
 });

@@ -532,7 +532,7 @@ OpenaiTrainingListController.getWebPageList = async (
           trainingStatus: 1,
           lastEdit: {
             $dateToString: {
-              format: "%B %d, %Y",
+              format: "%Y-%m-%d",
               date: "$lastEdit",
               timezone: "UTC"
             }
