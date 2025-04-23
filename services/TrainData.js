@@ -1,5 +1,6 @@
 require("dotenv").config();
 const { Worker, Queue } = require("bullmq");
+const redis = require("redis");
 const Client = require("../models/Client");
 const VectorStoreManager = require("./PineconeService"); // Assuming this handles Pinecone interaction
 const { MarkdownTextSplitter } = require("langchain/text_splitter");
@@ -9,10 +10,19 @@ const UnifiedPricingService = require("./UnifiedPricingService"); // Import the 
 const ScrapeTracker = require("./ScrapeTracker");
 const appEvents = require("../events.js");
 
-const redisConfig = {
+
+const redisConfig = process.env.ENVIRONMENT =='local' ? {
   url: process.env.REDIS_URL,
   maxRetriesPerRequest: null,
-};
+}:
+redis.createClient({
+  url: "redis://:root1234@localhost:6379"
+})
+
+// const redisConfig = {
+//   url: process.env.REDIS_URL,
+//   maxRetriesPerRequest: null,
+// };
 
 const pineconeTrainQueue = new Queue("pineconeTraining", {
   connection: redisConfig,

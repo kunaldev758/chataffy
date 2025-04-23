@@ -1,6 +1,7 @@
 // services/webPageMinifier.js
 require("dotenv").config();
 const { Worker, Queue } = require("bullmq");
+const redis = require("redis");
 const cheerio = require("cheerio");
 const TrainingList = require("../models/OpenaiTrainingList");
 const { pineconeTrainQueue } = require("./TrainData");
@@ -24,10 +25,22 @@ const allowedTags = [
   "dd",
   "a",
 ];
-const redisConfig = {
+
+const redisConfig = process.env.ENVIRONMENT =='local' ? {
   url: process.env.REDIS_URL,
   maxRetriesPerRequest: null,
-};
+}:
+redis.createClient({
+  url: "redis://:root1234@localhost:6379"
+})
+
+// const redisConfig = {
+//   url: process.env.REDIS_URL,
+//   maxRetriesPerRequest: null,
+// };
+// const redisConfig = redis.createClient({
+//   url: "redis://:root1234@localhost:6379"
+// });
 const minifyingQueue = new Queue("webPageMinifying", {
   connection: redisConfig,
 });

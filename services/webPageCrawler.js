@@ -1,16 +1,25 @@
 // services/webPageCrawler.js
 require("dotenv").config();
 const axios = require("axios");
+const redis = require("redis");
 const { Worker, Queue } = require("bullmq");
 const TrainingList = require("../models/OpenaiTrainingList");
 const minifyingQueue = require("./webPageMinifier");
 const ScrapeTracker = require("./ScrapeTracker");
 const appEvents = require('../events.js');
 
-const redisConfig = {
+const redisConfig = process.env.ENVIRONMENT =='local' ? {
   url: process.env.REDIS_URL,
   maxRetriesPerRequest: null,
-};
+}:
+redis.createClient({
+  url: "redis://:root1234@localhost:6379"
+})
+
+// const redisConfig = {
+//   url: process.env.REDIS_URL,
+//   maxRetriesPerRequest: null,
+// };
 const webPageQueue = new Queue("webPageScraping", { connection: redisConfig });
 
 const worker = new Worker(
