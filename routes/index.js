@@ -18,6 +18,7 @@ const ChatMessageController = require('../controllers/ChatMessageController');
 const UserController = require('../controllers/UserController');
 const CreditsController = require('../controllers/CreditsController');
 const WidgetController = require('../controllers/WidgetController');
+const agentController = require('../controllers/AgentController');
 const middleware = require('../middleware/authMiddleware');
 
 
@@ -55,6 +56,27 @@ router.post('/setBasicInfo', WidgetController.setBasicInfo);
 router.post('/uploadLogo', upload.single('logo'),middleware, WidgetController.uploadLogo);
 router.get('/getThemeSettings/:userId',WidgetController.getThemeSettings);
 router.post('/updateThemeSettings',WidgetController.updateThemeSettings);
+
+
+router.post('/agents', agentController.createAgent);
+
+// Get all agents
+router.get('/agents', agentController.getAllAgents);
+
+// Get single agent
+router.get('/agents/:id', agentController.getAgent);
+
+// Update agent
+router.post('/agents/:id', agentController.updateAgent);
+
+// Delete agent
+router.post('/agents/delete/:id', agentController.deleteAgent);
+
+// Update agent status
+router.post('/agents/:id/status', agentController.updateAgentStatus);
+
+router.post('/agents/accept-invite/:token', agentController.acceptInvite);
+
 
 
 module.exports = router;
