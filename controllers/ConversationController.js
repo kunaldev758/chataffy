@@ -6,13 +6,14 @@ const ChatMessage = require("../models/ChatMessage");
 const ConversationController = {};
 
 //get all old conversation
-ConversationController.getAllOldConversations = async (visitor_id) => {
+ConversationController.getAllOldConversations = async (visitor_id, agentId) => {
   try {
     let chatMessagesNotesList = [];
     if (visitor_id) {
       let conversation = await Conversation.find({
         visitor: visitor_id,
         conversationOpenStatus: "close",
+        // agentId: agentId
       });
       for (let conv of conversation) {
         let chatMessagesNotes = await ChatMessage.find({
@@ -29,14 +30,16 @@ ConversationController.getAllOldConversations = async (visitor_id) => {
 };
 
 //get Open Conversation
-ConversationController.getOpenConversation = async (visitorId,userId) => {
+ConversationController.getOpenConversation = async (visitorId, userId, agentId) => {
   try {
     const result = await Conversation.findOne({
       visitor: visitorId,
       conversationOpenStatus: "open",
+      // agentId: agentId
     });
     if(!result){
-      const conversation = await ConversationController.createConversation(visitorId,userId);
+      // const conversation = await ConversationController.createConversation(visitorId, userId, agentId);
+      const conversation = await ConversationController.createConversation(visitorId, userId);
       return conversation;
     }
     return result;
@@ -45,11 +48,12 @@ ConversationController.getOpenConversation = async (visitorId,userId) => {
   }
 };
 
-ConversationController.createConversation = async (visitorId,userId) => {
+ConversationController.createConversation = async (visitorId, userId, agentId) => {
   try {
     const result = await Conversation.create({
       visitor: visitorId,
-      userId:userId,
+      userId: userId,
+      // agentId: agentId
     });
     return result;
   } catch (err) {

@@ -30,7 +30,7 @@ router.get('/test', (req, res) => {
 router.post('/login', UserController.loginUser);
 router.post('/createUser', UserController.createUser);
 router.post('/verifyEmail', UserController.verifyEmail);
-
+router.post('/agents/login', agentController.agentLogin);
 router.use(middleware);
 
 router.post('/logout', UserController.logoutUser);
@@ -56,6 +56,7 @@ router.post('/setBasicInfo', WidgetController.setBasicInfo);
 router.post('/uploadLogo', upload.single('logo'),middleware, WidgetController.uploadLogo);
 router.get('/getThemeSettings/:userId',WidgetController.getThemeSettings);
 router.post('/updateThemeSettings',WidgetController.updateThemeSettings);
+
 
 
 router.post('/agents', agentController.createAgent);

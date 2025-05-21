@@ -91,7 +91,8 @@ const initializeVisitorEvents = (io, socket) => {
     try {
       const conversation = await ConversationController.getOpenConversation(
         visitorId,
-        userId
+        userId,
+        // socket.agentId
       );
       const conversationId = conversation?._id || null;
 
@@ -156,8 +157,7 @@ const initializeVisitorEvents = (io, socket) => {
               "",
               "assistant",
               "error in generating Response",
-              userId,
-              // response_data.infoSources
+              userId
             );
           io.to(`conversation-${visitorId}`).emit(
             "conversation-append-message",

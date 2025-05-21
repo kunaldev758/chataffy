@@ -10,10 +10,23 @@ const Conversation = require("../models/Conversation");
 const Visitor = require("../models/Visitor");
 
 const initializeClientEvents = (io, socket) => {
-  const { userId } = socket;
+  const { agentId } = socket;
+  const {userId} = socket;
   let conversationRoom = ``;
-  const clientRoom = `user-${userId}`;
+  let clientRoom ='';
+  let agentRoom ='';
+
+  if(agentId){
+  agentRoom = `user-${agentId}`;
+    
+  }
+  if(!agentId && userId){
+  clientRoom = `user-${userId}`;
+    
+  }
+  socket.join(agentRoom);
   socket.join(clientRoom);
+
 
   socket.on("client-connect", async () => {
     socket.emit("client-connect-response", {
@@ -61,6 +74,7 @@ const initializeClientEvents = (io, socket) => {
     try {
       const conv = await Conversation.find({
         userId: userId,
+        // agentId: socket.agentId,
         conversationOpenStatus: "open",
       }).sort({ createdAt: -1 });
 
@@ -73,15 +87,12 @@ const initializeClientEvents = (io, socket) => {
         })
       );
 
-      // Emit the response back to the frontend
       socket.emit("get-open-conversations-list-response", {
         status: "success",
         conversations: updatedVisitors,
       });
     } catch (error) {
       console.error("Error fetching conversations list:", error);
-
-      // Emit an error response
       socket.emit("get-open-conversations-list-response", {
         status: "error",
         message: "Failed to fetch conversations list",
@@ -93,6 +104,7 @@ const initializeClientEvents = (io, socket) => {
     try {
       const conv = await Conversation.find({
         userId: userId,
+        // agentId: socket.agentId,
         conversationOpenStatus: "close",
       }).sort({ createdAt: -1 });
 
@@ -105,14 +117,12 @@ const initializeClientEvents = (io, socket) => {
         })
       );
 
-      // Emit the response back to the frontend
       socket.emit("get-close-conversations-list-response", {
         status: "success",
         conversations: updatedVisitors,
       });
     } catch (error) {
       console.error("Error fetching close conversations list:", error);
-      // Emit an error response
       socket.emit("get-close-conversations-list-response", {
         status: "error",
         message: "Failed to fetch close conversations list",
@@ -147,11 +157,11 @@ const initializeClientEvents = (io, socket) => {
     "client-send-message",
     async ({ message, visitorId }, callback) => {
       try {
-        const conversation =
-          await ConversationController.getOpenConversation(
-            visitorId,
-            userId
-          );
+        const conversation = await ConversationController.getOpenConversation(
+          visitorId,
+          userId,
+          // socket.agentId
+        );
         const conversationId = conversation?._id || null;
 
         const chatMessage = await ChatMessageController.createChatMessage(
@@ -162,10 +172,22 @@ const initializeClientEvents = (io, socket) => {
           userId
         );
 
-        io.to(`conversation-${visitorId}`).emit(
+        // io.to(`conversation-${visitorId}`).emit(
+        //   "conversation-append-message",
+        //   { chatMessage }
+        // );
+        if(socket.type =='client'){
+         io.to(agentRoom).emit(
           "conversation-append-message",
           { chatMessage }
         );
+      }
+        if(socket.type =='agent'){
+        io.to(clientRoom).emit(
+          "conversation-append-message",
+          { chatMessage }
+        );
+      }
         callback?.({ success: true, chatMessage });
       } catch (error) {
         console.error("client-send-message error:", error.message);
@@ -173,6 +195,45 @@ const initializeClientEvents = (io, socket) => {
       }
     }
   );
+
+  //   socket.on(
+  //   "agent-send-message",
+  //   async ({ message, visitorId }, callback) => {
+  //     try {
+  //       const conversation = await ConversationController.getOpenConversation(
+  //         visitorId,
+  //         userId,
+  //         // socket.agentId
+  //       );
+  //       const conversationId = conversation?._id || null;
+
+  //       const chatMessage = await ChatMessageController.createChatMessage(
+  //         conversationId,
+  //         visitorId,
+  //         "agent",
+  //         message,
+  //         userId
+  //       );
+
+  //       io.to(`conversation-${visitorId}`).emit(
+  //         "conversation-append-message",
+  //         { chatMessage }
+  //       );
+  //        io.to(agentRoom).emit(
+  //         "conversation-append-message",
+  //         { chatMessage }
+  //       );
+  //       io.to(clientRoom).emit(
+  //         "conversation-append-message",
+  //         { chatMessage }
+  //       );
+  //       callback?.({ success: true, chatMessage });
+  //     } catch (error) {
+  //       console.error("agent-send-message error:", error.message);
+  //       callback?.({ success: false, error: error.message });
+  //     }
+  //   }
+  // );
 
   socket.on(
     "client-send-add-note",
@@ -185,6 +246,27 @@ const initializeClientEvents = (io, socket) => {
           conversationId,
           userId
         );
+        // io.to(agentRoom).emit(
+        //   "note-append-message",
+        //   {}
+        // );
+        // io.to(clientRoom).emit(
+        //   "note-append-message",
+        //   {}
+        // );
+
+        // if(socket.type =='client'){
+         io.to(agentRoom).emit(
+          "note-append-message",
+          {note}
+        );
+      // }
+        // if(socket.type =='agent'){
+        io.to(clientRoom).emit(
+          "note-append-message",
+          {note}
+        );
+      // }
         callback?.({ success: true, note });
       } catch (error) {
         console.error("client-send-add-note error:", error.message);
@@ -192,6 +274,25 @@ const initializeClientEvents = (io, socket) => {
       }
     }
   );
+
+  // socket.on(
+  //   "agent-send-add-note",
+  //   async ({ message, visitorId, conversationId }, callback) => {
+  //     try {
+  //       const note = await ChatMessageController.addNoteToChat(
+  //         visitorId,
+  //         "agent",
+  //         message,
+  //         conversationId,
+  //         userId
+  //       );
+  //       callback?.({ success: true, note });
+  //     } catch (error) {
+  //       console.error("client-send-add-note error:", error.message);
+  //       callback?.({ success: false, error: error.message });
+  //     }
+  //   }
+  // );
 
   socket.on(
     "get-all-note-messages",
@@ -234,6 +335,14 @@ const initializeClientEvents = (io, socket) => {
           conversationId,
           userId,
         });
+        io.to(clientRoom).emit(
+          "tag-append-message",
+          {updatedTags}
+        );
+        io.to(agentRoom).emit(
+          "tag-append-message",
+          {updatedTags}
+        );
         callback({ success: true, tags: updatedTags });
       } catch (error) {
         callback({ success: false, error: error.message });
@@ -263,6 +372,14 @@ const initializeClientEvents = (io, socket) => {
         const updatedTags = await ConversationTagController.deleteTagById({
           id,
         });
+        io.to(clientRoom).emit(
+          "tag-append-message",
+          {updatedTags}
+        );
+        io.to(agentRoom).emit(
+          "tag-append-message",
+          {updatedTags}
+        );
         callback({ success: true, tags: updatedTags });
       } catch (error) {
         callback({ success: false, error: error.message });
@@ -286,6 +403,14 @@ const initializeClientEvents = (io, socket) => {
         );
 
         callback({ success: true });
+        io.to(clientRoom).emit(
+          "conversation-close-triggered",
+          {}
+        );
+        io.to(agentRoom).emit(
+          "conversation-close-triggered",
+          {}
+        );
         io.to(`conversation-${visitorId}`).emit(
           "visitor-conversation-close",
           { conversationStatus: "close" }
@@ -308,6 +433,14 @@ const initializeClientEvents = (io, socket) => {
         );
 
         callback({ success: true });
+        io.to(clientRoom).emit(
+          "conversation-close-triggered",
+          {}
+        );
+        io.to(agentRoom).emit(
+          "conversation-close-triggered",
+          {}
+        );
         io.to(`conversation-${visitorId}`).emit("visitor-blocked", {
           conversationStatus: "close",
         });
@@ -363,6 +496,7 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("disconnect", () => {
     socket.leave(clientRoom);
+    socket.leave(agentRoom);
     socket.leave(conversationRoom);
   });
 };

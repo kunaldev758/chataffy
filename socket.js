@@ -26,7 +26,7 @@ const initializeSocketController = (server) => {
   io.on("connection", (socket) => {
     console.log("A user connected:", socket.id, "Type:", socket.type);
 
-    if (socket.type === "client") {
+    if (socket.type === "client" ||socket.type === "agent") {
       initializeClientEvents(io, socket);
     } else if (socket.type === "visitor") {
       initializeVisitorEvents(io, socket);

@@ -2,11 +2,56 @@ const Agent = require("../models/Agent");
 const { sendAgentApprovalEmail } = require("../services/emailService");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
+// const bcrypt = require("bcrypt");
+
+
+exports.agentLogin = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const agent = await Agent.findOne({ email });
+
+    if (!agent) {
+      return res.status(400).json({ message: "Invalid email or password" });
+    }
+    if (agent.status !== "approved") {
+      return res.status(403).json({ message: "Your invitation is not yet accepted or approved." });
+    }
+
+    const isMatch = await bcrypt.compare(password, agent.password);
+    if (!isMatch) {
+      return res.status(400).json({ message: "Invalid email or password" });
+    }
+
+    // Create JWT
+    const token = jwt.sign(
+      { id: agent._id, email: agent.email, role: "agent" },
+      process.env.JWT_SECRET_KEY,
+      { expiresIn: "7d" }
+    );
+
+    res.json({
+      message: "Login successful",
+      token,
+      agent: {
+        id: agent._id,
+        name: agent.name,
+        email: agent.email,
+        status: agent.status,
+        isActive: agent.isActive,
+        userId: agent.userId,
+      },
+    });
+  } catch (error) {
+    console.error("Agent login error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
 
 // Create a new agent
 exports.createAgent = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password ,userId} = req.body;
 
     // Check if agent already exists
     const existingAgent = await Agent.findOne({ email });
@@ -29,6 +74,7 @@ exports.createAgent = async (req, res) => {
       password: hashedPassword,
       inviteToken,
       inviteTokenExpires,
+      userId:userId,
     });
 
     await agent.save();
@@ -46,6 +92,7 @@ exports.createAgent = async (req, res) => {
         isActive: agent.isActive,
         inviteToken,
         inviteTokenExpires,
+        userId:agent.userId,
       },
     });
   } catch (error) {
@@ -103,6 +150,7 @@ exports.updateAgent = async (req, res) => {
         email: agent.email,
         status: agent.status,
         isActive: agent.isActive,
+        userId:agent.userId,
       },
     });
   } catch (error) {
