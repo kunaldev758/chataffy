@@ -11,22 +11,19 @@ const Visitor = require("../models/Visitor");
 
 const initializeClientEvents = (io, socket) => {
   const { agentId } = socket;
-  const {userId} = socket;
+  const { userId } = socket;
   let conversationRoom = ``;
-  let clientRoom ='';
-  let agentRoom ='';
+  let clientRoom = "";
+  let agentRoom = "";
 
-  if(agentId){
-  agentRoom = `user-${agentId}`;
-    
+  if (agentId) {
+    agentRoom = `user-${agentId}`;
   }
-  if(!agentId && userId){
-  clientRoom = `user-${userId}`;
-    
+  if (!agentId && userId) {
+    clientRoom = `user-${userId}`;
   }
   socket.join(agentRoom);
   socket.join(clientRoom);
-
 
   socket.on("client-connect", async () => {
     socket.emit("client-connect-response", {
@@ -42,8 +39,9 @@ const initializeClientEvents = (io, socket) => {
     });
   });
   socket.on("get-training-list-count", async (data) => {
-    const webPagesCount =
-      await OpenaiTrainingListController.getWebPageUrlCount(userId);
+    const webPagesCount = await OpenaiTrainingListController.getWebPageUrlCount(
+      userId
+    );
     const docSnippets = await OpenaiTrainingListController.getSnippetCount(
       userId
     );
@@ -132,12 +130,21 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("set-conversation-id", async ({ conversationId }, callback) => {
     try {
-      socket.leave(conversationRoom);
+       // Leave previous conversation room if exists
+      if (conversationRoom) {
+        socket.leave(conversationRoom);
+      }
       conversationRoom = `conversation-${conversationId}`;
-      socket.join(conversationRoom);
+      await socket.join(conversationRoom);
+        // Send success callback
+      if (typeof callback === 'function') {
+        callback({ success: true });
+      }
     } catch (error) {
       console.error("set-conversation-id error:", error.message);
-      callback?.({ success: false, error: error.message });
+      if (typeof callback === 'function') {
+        callback({ success: false, error: error.message });
+      }
     }
   });
 
@@ -153,87 +160,34 @@ const initializeClientEvents = (io, socket) => {
     }
   });
 
-  socket.on(
-    "client-send-message",
-    async ({ message, visitorId }, callback) => {
-      try {
-        const conversation = await ConversationController.getOpenConversation(
-          visitorId,
-          userId,
-          // socket.agentId
-        );
-        const conversationId = conversation?._id || null;
+  socket.on("client-send-message", async ({ message, visitorId }, callback) => {
+    try {
+      const conversation = await ConversationController.getOpenConversation(
+        visitorId,
+        userId
+        // socket.agentId
+      );
+      const conversationId = conversation?._id || null;
 
-        const chatMessage = await ChatMessageController.createChatMessage(
-          conversationId,
-          visitorId,
-          "agent",
-          message,
-          userId
-        );
+      const chatMessage = await ChatMessageController.createChatMessage(
+        conversationId,
+        visitorId,
+        "agent",
+        message,
+        userId
+      );
 
-        // io.to(`conversation-${visitorId}`).emit(
-        //   "conversation-append-message",
-        //   { chatMessage }
-        // );
-        if(socket.type =='client'){
-         io.to(agentRoom).emit(
-          "conversation-append-message",
-          { chatMessage }
-        );
-      }
-        if(socket.type =='agent'){
-        io.to(clientRoom).emit(
-          "conversation-append-message",
-          { chatMessage }
-        );
-      }
-        callback?.({ success: true, chatMessage });
-      } catch (error) {
-        console.error("client-send-message error:", error.message);
-        callback?.({ success: false, error: error.message });
-      }
+      io.to([
+        `conversation-${conversationId}`,
+        `conversation-${visitorId}`,
+      ]).emit("conversation-append-message", { chatMessage });
+
+      callback?.({ success: true, chatMessage });
+    } catch (error) {
+      console.error("client-send-message error:", error.message);
+      callback?.({ success: false, error: error.message });
     }
-  );
-
-  //   socket.on(
-  //   "agent-send-message",
-  //   async ({ message, visitorId }, callback) => {
-  //     try {
-  //       const conversation = await ConversationController.getOpenConversation(
-  //         visitorId,
-  //         userId,
-  //         // socket.agentId
-  //       );
-  //       const conversationId = conversation?._id || null;
-
-  //       const chatMessage = await ChatMessageController.createChatMessage(
-  //         conversationId,
-  //         visitorId,
-  //         "agent",
-  //         message,
-  //         userId
-  //       );
-
-  //       io.to(`conversation-${visitorId}`).emit(
-  //         "conversation-append-message",
-  //         { chatMessage }
-  //       );
-  //        io.to(agentRoom).emit(
-  //         "conversation-append-message",
-  //         { chatMessage }
-  //       );
-  //       io.to(clientRoom).emit(
-  //         "conversation-append-message",
-  //         { chatMessage }
-  //       );
-  //       callback?.({ success: true, chatMessage });
-  //     } catch (error) {
-  //       console.error("agent-send-message error:", error.message);
-  //       callback?.({ success: false, error: error.message });
-  //     }
-  //   }
-  // );
+  });
 
   socket.on(
     "client-send-add-note",
@@ -246,27 +200,11 @@ const initializeClientEvents = (io, socket) => {
           conversationId,
           userId
         );
-        // io.to(agentRoom).emit(
-        //   "note-append-message",
-        //   {}
-        // );
-        // io.to(clientRoom).emit(
-        //   "note-append-message",
-        //   {}
-        // );
 
-        // if(socket.type =='client'){
-         io.to(agentRoom).emit(
-          "note-append-message",
-          {note}
-        );
-      // }
-        // if(socket.type =='agent'){
-        io.to(clientRoom).emit(
-          "note-append-message",
-          {note}
-        );
-      // }
+        io.to(`conversation-${conversationId}`).emit("note-append-message", {
+          note,
+        });
+
         callback?.({ success: true, note });
       } catch (error) {
         console.error("client-send-add-note error:", error.message);
@@ -275,39 +213,17 @@ const initializeClientEvents = (io, socket) => {
     }
   );
 
-  // socket.on(
-  //   "agent-send-add-note",
-  //   async ({ message, visitorId, conversationId }, callback) => {
-  //     try {
-  //       const note = await ChatMessageController.addNoteToChat(
-  //         visitorId,
-  //         "agent",
-  //         message,
-  //         conversationId,
-  //         userId
-  //       );
-  //       callback?.({ success: true, note });
-  //     } catch (error) {
-  //       console.error("client-send-add-note error:", error.message);
-  //       callback?.({ success: false, error: error.message });
-  //     }
-  //   }
-  // );
-
-  socket.on(
-    "get-all-note-messages",
-    async ({ conversationId }, callback) => {
-      try {
-        const notes = await ChatMessageController.getAllChatNotesMessages(
-          conversationId
-        );
-        callback?.({ success: true, notes: notes });
-      } catch (error) {
-        console.error("get-all-note-messages error:", error.message);
-        callback?.({ success: false, error: error.message });
-      }
+  socket.on("get-all-note-messages", async ({ conversationId }, callback) => {
+    try {
+      const notes = await ChatMessageController.getAllChatNotesMessages(
+        conversationId
+      );
+      callback?.({ success: true, notes: notes });
+    } catch (error) {
+      console.error("get-all-note-messages error:", error.message);
+      callback?.({ success: false, error: error.message });
     }
-  );
+  });
 
   socket.on(
     "get-visitor-old-conversations",
@@ -317,10 +233,7 @@ const initializeClientEvents = (io, socket) => {
           await ConversationController.getAllOldConversations(visitorId);
         callback?.({ success: true, conversations: conversations });
       } catch (error) {
-        console.error(
-          "get-visitor-old-conversations error:",
-          error.message
-        );
+        console.error("get-visitor-old-conversations error:", error.message);
         callback?.({ success: false, error: error.message });
       }
     }
@@ -335,14 +248,6 @@ const initializeClientEvents = (io, socket) => {
           conversationId,
           userId,
         });
-        io.to(clientRoom).emit(
-          "tag-append-message",
-          {updatedTags}
-        );
-        io.to(agentRoom).emit(
-          "tag-append-message",
-          {updatedTags}
-        );
         callback({ success: true, tags: updatedTags });
       } catch (error) {
         callback({ success: false, error: error.message });
@@ -350,20 +255,24 @@ const initializeClientEvents = (io, socket) => {
     }
   );
 
-  socket.on(
-    "get-conversation-tags",
-    async ({ conversationId }, callback) => {
-      try {
-        const tags =
-          await ConversationTagController.getAllTagsOfConversation({
-            conversationId,
-          });
+  socket.on("get-conversation-tags", async ({ conversationId }, callback) => {
+    try {
+      const tags = await ConversationTagController.getAllTagsOfConversation({
+        conversationId,
+      });
+      io.to(`conversation-${conversationId}`).emit("get-tags-response", { tags });
+       // Also send response via callback if provided
+      if (typeof callback === 'function') {
         callback({ success: true, tags });
-      } catch (error) {
+      }
+    } catch (error) {
+       console.error("get-conversation-tags error:", error.message);
+      if (typeof callback === 'function') {
         callback({ success: false, error: error.message });
       }
     }
-  );
+  });
+
 
   socket.on(
     "remove-conversation-tag",
@@ -372,14 +281,6 @@ const initializeClientEvents = (io, socket) => {
         const updatedTags = await ConversationTagController.deleteTagById({
           id,
         });
-        io.to(clientRoom).emit(
-          "tag-append-message",
-          {updatedTags}
-        );
-        io.to(agentRoom).emit(
-          "tag-append-message",
-          {updatedTags}
-        );
         callback({ success: true, tags: updatedTags });
       } catch (error) {
         callback({ success: false, error: error.message });
@@ -395,28 +296,54 @@ const initializeClientEvents = (io, socket) => {
           _id: conversationId,
           conversationOpenStatus: "open",
         });
-        let visitorId = conversation?.visitor;
+
+         if (!conversation) {
+        if (typeof callback === 'function') {
+          callback({ success: false, error: "Conversation not found or already closed" });
+        }
+        return;
+      }
+      
+      let visitorId = conversation?.visitor;
 
         await ConversationController.UpdateConversationStatusOpenClose(
           conversationId,
           status
         );
 
+           // Notify all relevant rooms about the conversation closure
+      io.to(`conversation-${conversationId}`).emit("conversation-close-triggered", { 
+        conversationStatus: "close" 
+      });
+      
+      io.to(clientRoom).emit("conversation-close-triggered", { 
+        conversationStatus: "close" 
+      });
+      
+      io.to(agentRoom).emit("conversation-close-triggered", { 
+        conversationStatus: "close" 
+      });
+      
+      io.to(`conversation-${visitorId}`).emit("visitor-conversation-close", {
+        conversationStatus: "close",
+      });
+
+      if (typeof callback === 'function') {
         callback({ success: true });
-        io.to(clientRoom).emit(
-          "conversation-close-triggered",
-          {}
-        );
-        io.to(agentRoom).emit(
-          "conversation-close-triggered",
-          {}
-        );
-        io.to(`conversation-${visitorId}`).emit(
-          "visitor-conversation-close",
-          { conversationStatus: "close" }
-        );
+      }
+
+        // callback({ success: true });
+        // io.to(clientRoom).emit("conversation-close-triggered", {});
+        // io.to(agentRoom).emit("conversation-close-triggered", {});
+        // io.to(`conversation-${visitorId}`).emit("visitor-conversation-close", {
+        //   conversationStatus: "close",
+        // });
       } catch (error) {
+        // callback({ success: false, error: error.message });
+         console.error("close-conversation error:", error.message);
+      if (typeof callback === 'function') {
         callback({ success: false, error: error.message });
+      }
       }
     }
   );
@@ -432,20 +359,39 @@ const initializeClientEvents = (io, socket) => {
           "close"
         );
 
+           // Notify all relevant rooms about the visitor block
+      io.to(`conversation-${conversationId}`).emit("visitor-blocked", {
+        conversationStatus: "close",
+      });
+      
+      io.to(clientRoom).emit("conversation-close-triggered", {
+        conversationStatus: "close"
+      });
+      
+      io.to(agentRoom).emit("conversation-close-triggered", {
+        conversationStatus: "close"
+      });
+      
+      io.to(`conversation-${visitorId}`).emit("visitor-blocked", {
+        conversationStatus: "close",
+      });
+
+      if (typeof callback === 'function') {
         callback({ success: true });
-        io.to(clientRoom).emit(
-          "conversation-close-triggered",
-          {}
-        );
-        io.to(agentRoom).emit(
-          "conversation-close-triggered",
-          {}
-        );
-        io.to(`conversation-${visitorId}`).emit("visitor-blocked", {
-          conversationStatus: "close",
-        });
+      }
+
+        // callback({ success: true });
+        // io.to(clientRoom).emit("conversation-close-triggered", {});
+        // io.to(agentRoom).emit("conversation-close-triggered", {});
+        // io.to(`conversation-${visitorId}`).emit("visitor-blocked", {
+        //   conversationStatus: "close",
+        // });
       } catch (error) {
+        // callback({ success: false, error: error.message });
+          console.error("block-visitor error:", error.message);
+      if (typeof callback === 'function') {
         callback({ success: false, error: error.message });
+      }
       }
     }
   );
@@ -453,9 +399,10 @@ const initializeClientEvents = (io, socket) => {
   socket.on("close-ai-response", async ({ conversationId }, callback) => {
     try {
       await ConversationController.disableAiChat({ conversationId });
-      callback({ success: true });
+      io.to(`conversation-${conversationId}`).emit('ai-response-update');
+      // callback({ success: true });
     } catch (error) {
-      callback({ success: false, error: error.message });
+      // callback({ success: false, error: error.message });
     }
   });
 
@@ -495,12 +442,13 @@ const initializeClientEvents = (io, socket) => {
   ////////////////dash end///////////
 
   socket.on("disconnect", () => {
-    socket.leave(clientRoom);
-    socket.leave(agentRoom);
-    socket.leave(conversationRoom);
+      if (clientRoom) socket.leave(clientRoom);
+    if (agentRoom) socket.leave(agentRoom);
+    if (conversationRoom) socket.leave(conversationRoom);
+    console.log("User disconnected from client socket");
   });
 };
 
 module.exports = {
-  initializeClientEvents
+  initializeClientEvents,
 };

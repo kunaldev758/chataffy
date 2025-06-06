@@ -9,7 +9,23 @@ const Visitor = require("../models/Visitor");
 const Conversation = require("../models/Conversation");
 
 const initializeVisitorEvents = (io, socket) => {
-  const { userId, visitorId } = socket;
+  // const { userId, visitorId } = socket;
+   const { agentId } = socket;
+  const { userId } = socket;
+  const {visitorId} = socket;
+  let conversationRoom = ``;
+  let clientRoom = "";
+  let agentRoom = "";
+
+  if (agentId) {
+    agentRoom = `user-${agentId}`;
+  }
+  if (!agentId && userId) {
+    clientRoom = `user-${userId}`;
+  }
+  // socket.join(agentRoom);
+  // socket.join(clientRoom);
+
   const VisitorRoom = `conversation-${visitorId}`;
   socket.join(VisitorRoom);
 
@@ -56,7 +72,7 @@ const initializeVisitorEvents = (io, socket) => {
           visitorId
         );
 
-        io.to(`user-${userId}`).emit("visitor-connect-list-update", {});
+        io.to([`user-${userId}`,agentRoom]).emit("visitor-connect-list-update", {});
       }
 
       // Emit visitor-connect-response with visitor data
@@ -105,13 +121,13 @@ const initializeVisitorEvents = (io, socket) => {
         userId
       );
 
-      io.to(`conversation-${conversationId}`).emit(
+      io.to([`conversation-${conversationId}`,VisitorRoom]).emit(
         "conversation-append-message",
         {
           chatMessage,
         }
       );
-      io.to(`user-${userId}`).emit("new-message-count", {});
+      io.to([`user-${userId}`,agentRoom]).emit("new-message-count", {});
 
       await Conversation.updateOne(
         { _id: conversationId },

@@ -26,7 +26,7 @@ const sendAgentApprovalEmail = async (agent,acceptUrl) => {
         <li>Email: ${agent.email}</li>
         <li>Password: (the one you set during registration)</li>
       </ul>
-      <a href="${acceptUrl}" style="...button styles...">Accept Invitation</a>
+      <a href="${acceptUrl}" target="_blank" style="...button styles...">Accept Invitation</a>
       <p>This link will expire in 24 hours.</p>
       <p>Best regards,<br>Your Team</p>
     `,

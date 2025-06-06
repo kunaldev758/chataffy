@@ -79,8 +79,8 @@ exports.createAgent = async (req, res) => {
 
     await agent.save();
 
-    const acceptUrl = `http://localhost:9000/api/agents/accept-invite/${inviteToken}`;
-    await sendAgentApprovalEmail({ ...agent.toObject(), acceptUrl });
+    const acceptUrl = `http://localhost:9001/agent-accept-invite/?token=${inviteToken}`;
+    await sendAgentApprovalEmail({ ...agent.toObject()}, acceptUrl );
 
     res.status(201).json({
       message: "Agent created successfully",
@@ -104,7 +104,8 @@ exports.createAgent = async (req, res) => {
 // Get all agents
 exports.getAllAgents = async (req, res) => {
   try {
-    const agents = await Agent.find({}, "-password");
+    const userId = req.body.userId;
+    const agents = await Agent.find({userId:userId}, "-password");
     res.json(agents);
   } catch (error) {
     console.error("Error fetching agents:", error);
