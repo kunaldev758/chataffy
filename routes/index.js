@@ -41,7 +41,19 @@ const upload = multer({
 });
 
 // General upload for other files
-const generalUpload = multer({ storage });
+const generalUpload = multer({ 
+  storage,
+  preservePath: true
+}).single('file');
+
+// Add middleware to preserve req.body
+const preserveBody = (req, res, next) => {
+  const bodyData = { ...req.body };
+  req.on('end', () => {
+    req.body = { ...bodyData, ...req.body };
+  });
+  next();
+};
 
 // Import controllers
 const OpenaiTrainingListController = require('../controllers/OpenaiTrainingListController');
@@ -84,13 +96,13 @@ router.get('/superadmin/conversations', verifySuperAdminToken, superAdminControl
 
 
 /* Protected routes (authentication required) */
-// router.use(middleware);
+router.use(middleware);
 
 // User management
 router.post('/logout', UserController.logoutUser);
 
 // OpenAI Training routes
-router.post('/openaiCreateSnippet', generalUpload.single('file'), OpenaiTrainingListController.createSnippet);
+router.post('/openaiCreateSnippet', middleware, preserveBody, generalUpload, OpenaiTrainingListController.createSnippet);
 router.post('/openaiScrape', OpenaiTrainingListController.scrape);
 router.post('/openaiCreateFaq', OpenaiTrainingListController.createFaq);
 router.post('/openaiToggleActiveStatus', OpenaiTrainingListController.toggleActiveStatus);
@@ -110,7 +122,7 @@ router.post('/getBasicInfo', WidgetController.getBasicInfo);
 router.post('/setBasicInfo', WidgetController.setBasicInfo);
 
 // Logo upload with enhanced validation
-router.post('/uploadLogo', upload.single('logo'), WidgetController.uploadLogo);
+router.post('/uploadLogo/:userId', upload.single('logo'), WidgetController.uploadLogo);
 
 // Theme settings routes
 router.get('/getThemeSettings/:userId', WidgetController.getThemeSettings);

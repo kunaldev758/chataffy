@@ -7,6 +7,7 @@ const QueryController = require("../controllers/QueryController");
 const Widget = require("../models/Widget");
 const Visitor = require("../models/Visitor");
 const Conversation = require("../models/Conversation");
+const ChatMessage = require("../models/ChatMessage");
 
 const initializeVisitorEvents = (io, socket) => {
   // const { userId, visitorId } = socket;
@@ -70,9 +71,7 @@ const initializeVisitorEvents = (io, socket) => {
 
         chatMessages = await ChatMessageController.getAllChatMessages(
           visitorId
-        );
-
-        io.to([`user-${userId}`,agentRoom]).emit("visitor-connect-list-update", {});
+        );     
       }
 
       // Emit visitor-connect-response with visitor data
@@ -111,7 +110,11 @@ const initializeVisitorEvents = (io, socket) => {
         // socket.agentId
       );
       const conversationId = conversation?._id || null;
-
+      const messages = await ChatMessage.find({conversation_id:conversationId})
+      if(messages.length<=1){
+        await Conversation.findByIdAndUpdate(conversationId, {is_started: true});
+        io.to([`user-${userId}`,agentRoom]).emit("visitor-connect-list-update", {});
+      }
       const encodedMessage = encode(message);
       let chatMessage = await ChatMessageController.createChatMessage(
         conversationId,

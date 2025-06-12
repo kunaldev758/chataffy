@@ -217,7 +217,7 @@ WidgetController.getThemeSettings = async (req, res) => {
 WidgetController.updateThemeSettings = async (req, res) => {
   try {
     const { userId } = req.body;
-    const themeSettings = req.body?.themeSettings;
+    const themeSettings = req.body?.themeSettings.themeSettings;
     
     if (!userId) {
       return res.status(400).json({ 
@@ -325,7 +325,7 @@ WidgetController.updateThemeSettings = async (req, res) => {
 
 WidgetController.uploadLogo = async (req, res) => {
   try {
-    const { userId } = req.body;
+    const userId  = req.params.userId;
     
     if (!userId) {
       return res.status(400).json({ 

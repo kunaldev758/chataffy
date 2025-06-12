@@ -188,9 +188,25 @@ VisitorController.updateVisitorById = async ({
           value: value,
         })
       );
+
+      // Find if there's a name field in visitorDetails
+      const nameField = transformedVisitorDetails.find(detail => detail.field.trim().toLocaleLowerCase() === 'name');
+      
+      // Prepare update object
+      const updateData = {
+        location,
+        ip,
+        visitorDetails: transformedVisitorDetails
+      };
+
+      // Add name to update if it exists
+      if (nameField) {
+        updateData.name = nameField.value;
+      }
+
       const visitor = await Visitor.findByIdAndUpdate(
         id,
-        { location, ip, visitorDetails: transformedVisitorDetails },
+        updateData,
         { new: true }
       );
       if (!visitor) {

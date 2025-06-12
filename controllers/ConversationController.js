@@ -138,6 +138,7 @@ ConversationController.searchByTagOrName = async (query, userId) => {
       const visitor = visitorDoc.toObject();
       const conversation = await Conversation.findOne({
         visitor: visitor._id,
+        is_started:true,
       }).lean(); // use lean() for a plain JS object
   
       if (conversation) {
@@ -157,7 +158,7 @@ ConversationController.searchByTagOrName = async (query, userId) => {
    const tagConversations = await Promise.all(
     tags.map(async (tag) => {
       // const visitor = visitorDoc.toObject();
-      const conversation = await Conversation.findOne({ _id: tag.conversation }).lean();
+      const conversation = await Conversation.findOne({ _id: tag.conversation, is_started:true, }).lean();
   
       if (conversation) {
         const visitor = await Visitor.findOne({ _id: conversation.visitor }).lean();

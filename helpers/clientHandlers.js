@@ -201,7 +201,7 @@ const initializeClientEvents = (io, socket) => {
           userId
         );
 
-        io.to(`conversation-${conversationId}`).emit("note-append-message", {
+        await io.to(`conversation-${conversationId}`).emit("note-append-message", {
           note,
         });
 

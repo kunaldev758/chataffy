@@ -130,16 +130,33 @@ exports.getAgent = async (req, res) => {
 // Update agent
 exports.updateAgent = async (req, res) => {
   try {
-    const { name, email } = req.body;
+    const { name, email, currentPassword, newPassword } = req.body;
     const agent = await Agent.findById(req.params.id);
 
     if (!agent) {
       return res.status(404).json({ message: "Agent not found" });
     }
 
-    // Update fields
+    // If password change is requested
+    if (newPassword) {
+      if (!currentPassword) {
+        return res.status(400).json({ message: "Current password is required" });
+      }
+      
+      // Verify current password (adjust based on your auth setup)
+      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, agent.password);
+      if (!isCurrentPasswordValid) {
+        return res.status(400).json({ message: "Current password is incorrect" });
+      }
+      
+      // Hash and update new password
+      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+      agent.password = hashedNewPassword;
+    }
+
+    // Update other fields
     agent.name = name || agent.name;
-    agent.email = email || agent.email;
+    // agent.email = email || agent.email;
 
     await agent.save();
 
@@ -151,7 +168,7 @@ exports.updateAgent = async (req, res) => {
         email: agent.email,
         status: agent.status,
         isActive: agent.isActive,
-        userId:agent.userId,
+        userId: agent.userId,
       },
     });
   } catch (error) {
