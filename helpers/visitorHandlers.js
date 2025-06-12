@@ -7,9 +7,26 @@ const QueryController = require("../controllers/QueryController");
 const Widget = require("../models/Widget");
 const Visitor = require("../models/Visitor");
 const Conversation = require("../models/Conversation");
+const ChatMessage = require("../models/ChatMessage");
 
 const initializeVisitorEvents = (io, socket) => {
-  const { userId, visitorId } = socket;
+  // const { userId, visitorId } = socket;
+   const { agentId } = socket;
+  const { userId } = socket;
+  const {visitorId} = socket;
+  let conversationRoom = ``;
+  let clientRoom = "";
+  let agentRoom = "";
+
+  if (agentId) {
+    agentRoom = `user-${agentId}`;
+  }
+  if (!agentId && userId) {
+    clientRoom = `user-${userId}`;
+  }
+  // socket.join(agentRoom);
+  // socket.join(clientRoom);
+
   const VisitorRoom = `conversation-${visitorId}`;
   socket.join(VisitorRoom);
 
@@ -54,9 +71,7 @@ const initializeVisitorEvents = (io, socket) => {
 
         chatMessages = await ChatMessageController.getAllChatMessages(
           visitorId
-        );
-
-        io.to(`user-${userId}`).emit("visitor-connect-list-update", {});
+        );     
       }
 
       // Emit visitor-connect-response with visitor data
@@ -91,10 +106,15 @@ const initializeVisitorEvents = (io, socket) => {
     try {
       const conversation = await ConversationController.getOpenConversation(
         visitorId,
-        userId
+        userId,
+        // socket.agentId
       );
       const conversationId = conversation?._id || null;
-
+      const messages = await ChatMessage.find({conversation_id:conversationId})
+      if(messages.length<=1){
+        await Conversation.findByIdAndUpdate(conversationId, {is_started: true});
+        io.to([`user-${userId}`,agentRoom]).emit("visitor-connect-list-update", {});
+      }
       const encodedMessage = encode(message);
       let chatMessage = await ChatMessageController.createChatMessage(
         conversationId,
@@ -104,13 +124,13 @@ const initializeVisitorEvents = (io, socket) => {
         userId
       );
 
-      io.to(`conversation-${conversationId}`).emit(
+      io.to([`conversation-${conversationId}`,VisitorRoom]).emit(
         "conversation-append-message",
         {
           chatMessage,
         }
       );
-      io.to(`user-${userId}`).emit("new-message-count", {});
+      io.to([`user-${userId}`,agentRoom]).emit("new-message-count", {});
 
       await Conversation.updateOne(
         { _id: conversationId },
@@ -156,8 +176,7 @@ const initializeVisitorEvents = (io, socket) => {
               "",
               "assistant",
               "error in generating Response",
-              userId,
-              // response_data.infoSources
+              userId
             );
           io.to(`conversation-${visitorId}`).emit(
             "conversation-append-message",

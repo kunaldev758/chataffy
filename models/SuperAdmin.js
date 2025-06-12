@@ -1,11 +1,6 @@
 const mongoose = require('mongoose');
 
-const agentSchema = new mongoose.Schema({
-  userId: {
-    type: mongoose.Schema.Types.ObjectId,
-    required: true,
-    ref: "User",
-  },
+const superAdminSchema = new mongoose.Schema({
   name: {
     type: String,
     required: true,
@@ -22,18 +17,15 @@ const agentSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  status: {
+  role: {
     type: String,
-    enum: ['pending', 'approved'],
-    default: 'pending'
+    default: 'superadmin'
   },
-  inviteToken: String,
-  inviteTokenExpires: Date,
   isActive: {
     type: Boolean,
-    default: false
+    default: true
   },
-  lastActive: {
+  lastLogin: {
     type: Date,
     default: null
   },
@@ -48,9 +40,9 @@ const agentSchema = new mongoose.Schema({
 });
 
 // Update the updatedAt timestamp before saving
-agentSchema.pre('save', function(next) {
+superAdminSchema.pre('save', function(next) {
   this.updatedAt = Date.now();
   next();
 });
 
-module.exports = mongoose.model('Agent', agentSchema); 
+module.exports = mongoose.model('SuperAdmin', superAdminSchema);

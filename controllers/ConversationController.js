@@ -6,37 +6,48 @@ const ChatMessage = require("../models/ChatMessage");
 const ConversationController = {};
 
 //get all old conversation
-ConversationController.getAllOldConversations = async (visitor_id) => {
+ConversationController.getAllOldConversations = async (visitor_id, agentId) => {
   try {
-    let chatMessagesNotesList = [];
-    if (visitor_id) {
-      let conversation = await Conversation.find({
-        visitor: visitor_id,
-        conversationOpenStatus: "close",
-      });
-      for (let conv of conversation) {
-        let chatMessagesNotes = await ChatMessage.find({
-          conversation_id: conv._id,
-        })
+    if (!visitor_id) return [];
+
+    // Fetch closed conversations for the visitor
+    let conversations = await Conversation.find({
+      visitor: visitor_id,
+      conversationOpenStatus: "close",
+      // agentId: agentId
+    });
+
+    // For each conversation, get the last message and add it to the `message` field
+    const updatedConversations = await Promise.all(
+      conversations.map(async (conv) => {
+        const lastMessage = await ChatMessage.findOne({ conversation_id: conv._id })
           .sort({ createdAt: -1 });
-        chatMessagesNotesList.push(...chatMessagesNotes);
-      }
-    }
-    return chatMessagesNotesList;
+
+        return {
+          ...conv.toObject(),
+          message: lastMessage?.message || null, // Add message field
+        };
+      })
+    );
+
+    return updatedConversations;
   } catch (error) {
-   return error;
+    return error;
   }
 };
 
+
 //get Open Conversation
-ConversationController.getOpenConversation = async (visitorId,userId) => {
+ConversationController.getOpenConversation = async (visitorId, userId, agentId) => {
   try {
     const result = await Conversation.findOne({
       visitor: visitorId,
       conversationOpenStatus: "open",
+      // agentId: agentId
     });
     if(!result){
-      const conversation = await ConversationController.createConversation(visitorId,userId);
+      // const conversation = await ConversationController.createConversation(visitorId, userId, agentId);
+      const conversation = await ConversationController.createConversation(visitorId, userId);
       return conversation;
     }
     return result;
@@ -45,11 +56,12 @@ ConversationController.getOpenConversation = async (visitorId,userId) => {
   }
 };
 
-ConversationController.createConversation = async (visitorId,userId) => {
+ConversationController.createConversation = async (visitorId, userId, agentId) => {
   try {
     const result = await Conversation.create({
       visitor: visitorId,
-      userId:userId,
+      userId: userId,
+      // agentId: agentId
     });
     return result;
   } catch (err) {
@@ -126,6 +138,7 @@ ConversationController.searchByTagOrName = async (query, userId) => {
       const visitor = visitorDoc.toObject();
       const conversation = await Conversation.findOne({
         visitor: visitor._id,
+        is_started:true,
       }).lean(); // use lean() for a plain JS object
   
       if (conversation) {
@@ -145,7 +158,7 @@ ConversationController.searchByTagOrName = async (query, userId) => {
    const tagConversations = await Promise.all(
     tags.map(async (tag) => {
       // const visitor = visitorDoc.toObject();
-      const conversation = await Conversation.findOne({ _id: tag.conversation }).lean();
+      const conversation = await Conversation.findOne({ _id: tag.conversation, is_started:true, }).lean();
   
       if (conversation) {
         const visitor = await Visitor.findOne({ _id: conversation.visitor }).lean();
@@ -168,6 +181,55 @@ const uniqueVisitors = Array.from(
 );
 
     return uniqueVisitors;
+  } catch (error) {
+    throw error;
+  }
+};
+
+// Add to ConversationController
+ConversationController.getConversationStats = async (timeframe = 'today') => {
+  try {
+    const now = new Date();
+    let startDate;
+    
+    switch(timeframe) {
+      case 'today':
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        break;
+      case 'week':
+        startDate = new Date(now.setDate(now.getDate() - 7));
+        break;
+      case 'month':
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        break;
+      default:
+        startDate = new Date(0); // All time
+    }
+
+    const stats = await Conversation.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: startDate }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          aiChats: { 
+            $sum: { $cond: [{ $eq: ["$aiChat", true] }, 1, 0] }
+          },
+          humanChats: { 
+            $sum: { $cond: [{ $eq: ["$aiChat", false] }, 1, 0] }
+          },
+          openChats: { 
+            $sum: { $cond: [{ $eq: ["$conversationOpenStatus", "open"] }, 1, 0] }
+          }
+        }
+      }
+    ]);
+
+    return stats[0] || { total: 0, aiChats: 0, humanChats: 0, openChats: 0 };
   } catch (error) {
     throw error;
   }

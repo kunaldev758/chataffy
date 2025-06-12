@@ -12,6 +12,11 @@ const conversationSchema = new mongoose.Schema(
       required: true,
       ref: "User",
     },
+    agentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: false,
+      ref: "Agent",
+    },
     conversationOpenStatus: {
       type: String,
       enum: ["open", "close"],
@@ -25,6 +30,7 @@ const conversationSchema = new mongoose.Schema(
     },
     aiChat: { type: Boolean, default: true },
     feedback: { type: Boolean },
+    is_started:{type: Boolean, default: false },
     updatedAt: {
       type: Date,
       default: Date.now,

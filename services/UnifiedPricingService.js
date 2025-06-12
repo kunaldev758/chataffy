@@ -16,6 +16,10 @@ const OPENAI_PRICING = {
       input: 0.0005 / 1000, // Price per token
       output: 0.0015 / 1000, // Price per token
     },
+    'gpt-4o-mini': {
+      input: 0.00015 / 1000,
+      output: 0.0006 / 1000
+    },
     'gpt-4': {
       input: 0.03 / 1000,
       output: 0.06 / 1000

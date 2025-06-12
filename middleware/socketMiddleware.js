@@ -4,6 +4,7 @@ const User = require("../models/User");
 const Widget = require("../models/Widget");
 const Visitor = require("../models/Visitor");
 const VisitorController = require("../controllers/VisitorController");
+const Agent = require('../models/Agent');
 
 const verifyToken = (token) => {
   return new Promise((resolve, reject) => {
@@ -28,13 +29,22 @@ const myMiddleware = async (socket, next) => {
       if (!decoded) throw new Error("Invalid token.");
 
       const user = await User.findById(decoded._id);
+      const agent = await Agent.findById(decoded.id)
+      console.log(agent,"the agent")
+      if(agent){
+        socket.userId = agent.userId;
+      socket.type = "agent";
+      socket.agentId = agent.id;
+      }
+      else{
       if (!user || user.auth_token !== token)
         throw new Error("User not found or token mismatch.");
 
       socket.userId = user._id;
       socket.type = "client";
-
-
+      socket.agentId = decoded.id;
+      // socket.role = 'user';
+      }
     } else if (visitorId && widgetId && widgetAuthToken) {
       // Visitor Authentication
       const widget = await Widget.findOne({
@@ -45,6 +55,8 @@ const myMiddleware = async (socket, next) => {
 
       socket.userId = widget.userId;
       socket.type = "visitor";
+      // socket.agentId = socket.userId;
+      // socket.role = 'user';
 
       if (visitorId && visitorId != "undefined") {
         const visitor = await Visitor.findOne({ visitorId: visitorId });
