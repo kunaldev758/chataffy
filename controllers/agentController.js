@@ -30,6 +30,14 @@ exports.agentLogin = async (req, res) => {
       { expiresIn: "7d" }
     );
 
+    if (agent?.isActive) {
+      agent.lastActive = new Date();
+      await Agent.updateOne(
+        { _id: agent._id },
+        { $set: { lastActive: agent.lastActive } }
+      );
+    }
+
     res.json({
       message: "Login successful",
       token,
@@ -80,7 +88,7 @@ exports.createAgent = async (req, res) => {
     await agent.save();
 
     const acceptUrl = `http://localhost:9001/agent-accept-invite/?token=${inviteToken}`;
-    await sendAgentApprovalEmail({ ...agent.toObject()}, acceptUrl );
+    await sendAgentApprovalEmail({ ...agent.toObject()}, acceptUrl, password );
 
     res.status(201).json({
       message: "Agent created successfully",

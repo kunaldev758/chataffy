@@ -12,7 +12,7 @@ const transporter = nodemailer.createTransport({
 });
 
 
-const sendAgentApprovalEmail = async (agent,acceptUrl) => {
+const sendAgentApprovalEmail = async (agent,acceptUrl,password) => {
   // const acceptUrl = `${process.env.CLIENT_URL}/agents/accept-invite/${agent.inviteToken}`;
   const mailOptions = {
     from: process.env.SMTP_FROM,
@@ -24,7 +24,7 @@ const sendAgentApprovalEmail = async (agent,acceptUrl) => {
       <p>Your login credentials:</p>
       <ul>
         <li>Email: ${agent.email}</li>
-        <li>Password: (the one you set during registration)</li>
+        <li>Password: ${password}</li>
       </ul>
       <a href="${acceptUrl}" target="_blank" style="...button styles...">Accept Invitation</a>
       <p>This link will expire in 24 hours.</p>
