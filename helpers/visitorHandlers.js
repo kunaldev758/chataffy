@@ -8,6 +8,7 @@ const Widget = require("../models/Widget");
 const Visitor = require("../models/Visitor");
 const Conversation = require("../models/Conversation");
 const ChatMessage = require("../models/ChatMessage");
+const BlockedVisitorIp = require("../models/blockedVisitorIp");
 
 const initializeVisitorEvents = (io, socket) => {
   // const { userId, visitorId } = socket;
@@ -32,8 +33,8 @@ const initializeVisitorEvents = (io, socket) => {
 
   socket.on("visitor-ip", async ({ ip }, callback) => {
     try {
-      const visitorDetail = await Visitor.findOne({ ip: ip });
-      if (visitorDetail.is_blocked == true) {
+      const ipFound = await BlockedVisitorIp.findOne({ip:ip,userId:userId});
+      if(ipFound){
         io.to(`conversation-${visitorId}`).emit("visitor-is-blocked", {});
       }
     } catch (error) {

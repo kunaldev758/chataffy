@@ -1,4 +1,6 @@
+require("dotenv").config();
 const Agent = require("../models/Agent");
+const Client = require("../models/Client");
 const { sendAgentApprovalEmail } = require("../services/emailService");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
@@ -63,10 +65,11 @@ exports.createAgent = async (req, res) => {
 
     // Check if agent already exists
     const existingAgent = await Agent.findOne({ email });
-    if (existingAgent) {
+    const existingClinet =  await Client.findOne({email});
+    if (existingAgent || existingClinet) {
       return res
         .status(400)
-        .json({ message: "Agent with this email already exists" });
+        .json({ message: "User with this email already exists" });
     }
 
     // Hash password
@@ -87,7 +90,7 @@ exports.createAgent = async (req, res) => {
 
     await agent.save();
 
-    const acceptUrl = `http://localhost:9001/agent-accept-invite/?token=${inviteToken}`;
+    const acceptUrl = `${process.env.CLIENT_URL}agent-accept-invite/?token=${inviteToken}`;
     await sendAgentApprovalEmail({ ...agent.toObject()}, acceptUrl, password );
 
     res.status(201).json({

@@ -2,6 +2,7 @@ const express = require("express");
 const http = require("http");
 const dotenv = require("dotenv");
 const mongoose = require("mongoose");
+const rateLimit = require('express-rate-limit');
 const path = require("path");
 const apiRoutes = require("./routes/");
 
@@ -18,6 +19,16 @@ initializeSocketController(server);
 mongoose.connect(process.env.MONGODB_URI);
 
 app.use(cors());
+
+// Apply rate limit to all requests
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 300, // limit each IP to 100 requests per windowMs
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
+
+app.use(limiter); // apply to all requests
 
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));

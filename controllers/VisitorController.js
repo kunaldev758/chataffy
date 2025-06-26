@@ -1,4 +1,5 @@
 const Visitor = require("../models/Visitor");
+const BlockedVisitorIp = require("../models/blockedVisitorIp");
 
 const things = [
   "Shirt",
@@ -190,13 +191,15 @@ VisitorController.updateVisitorById = async ({
       );
 
       // Find if there's a name field in visitorDetails
-      const nameField = transformedVisitorDetails.find(detail => detail.field.trim().toLocaleLowerCase() === 'name');
-      
+      const nameField = transformedVisitorDetails.find(
+        (detail) => detail.field.trim().toLocaleLowerCase() === "name"
+      );
+
       // Prepare update object
       const updateData = {
         location,
         ip,
-        visitorDetails: transformedVisitorDetails
+        visitorDetails: transformedVisitorDetails,
       };
 
       // Add name to update if it exists
@@ -204,11 +207,9 @@ VisitorController.updateVisitorById = async ({
         updateData.name = nameField.value;
       }
 
-      const visitor = await Visitor.findByIdAndUpdate(
-        id,
-        updateData,
-        { new: true }
-      );
+      const visitor = await Visitor.findByIdAndUpdate(id, updateData, {
+        new: true,
+      });
       if (!visitor) {
         return res.status(404).json({ error: "Visitor not found" });
       }
@@ -248,10 +249,21 @@ VisitorController.updateVisitorById = async ({
 VisitorController.blockVisitor = async (visitorId) => {
   let id = visitorId.visitorId;
   try {
-    await Visitor.findByIdAndUpdate({_id:id}, { is_blocked: true });
+    await Visitor.findByIdAndUpdate({ _id: id }, { is_blocked: true });
+    let visitor = await Visitor.findOne({ _id: id });
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours from now
+
+    const blocked = new BlockedVisitorIp({
+      ip:visitor?.ip,
+      userId:visitor?.userId,
+      expiresAt,
+    });
+
+    await blocked.save();
     return true;
   } catch (error) {
-    return error
+    return error;
   }
 };
 
