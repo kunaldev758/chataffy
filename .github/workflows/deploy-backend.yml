@@ -34,7 +34,7 @@ jobs:
           username: ubuntu
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /home/ubuntu/chataffy/chataffy
+            cd /var/www/html/chataffy/chataffy
             git pull origin main
             cd ..
             docker-compose stop backend
