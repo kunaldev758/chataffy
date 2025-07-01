@@ -81,7 +81,6 @@ class QuestionAnsweringSystem {
     
     Example behaviors:
     - Greeting: If the user says "Hi", respond with something like "<p>Hello! 👋 How can I assist you today regarding ${organisation}?</p>"
-    - For questions: "<p>Based on the information I have, here's what I found...</p>"
     
     Maintain a friendly, professional tone throughout.`;
 
