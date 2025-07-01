@@ -83,7 +83,7 @@ UserController.verifyEmail = async (req, res) => {
       return res.status(400).json({ status_code: 201, status: false, message: 'Already verify, Please login' });
     }
     user.email_verified = true;
-    user.verification_token = '';
+    // user.verification_token = '';
     await user.save();
     return res.status(200).json({ status_code: 200, status: true, message: 'Email verified successfully' });
   } catch (error) {
