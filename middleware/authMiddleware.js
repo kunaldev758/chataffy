@@ -11,7 +11,9 @@ module.exports = async (req, res, next) => {
   try {
     jwt.verify(token, process.env.JWT_SECRET_KEY, async (err, decoded) => {
     if (err || !decoded._id) {
-      if(decoded.id){}
+      if(decoded?.id){
+        cosole.log("Here is bug")
+      }
       else{
       return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
       }

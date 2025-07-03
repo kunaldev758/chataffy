@@ -94,51 +94,54 @@ router.get('/superadmin/clients', verifySuperAdminToken, superAdminController.ge
 router.get('/superadmin/agents', verifySuperAdminToken, superAdminController.getAllAgentsForSuperAdmin);
 router.get('/superadmin/conversations', verifySuperAdminToken, superAdminController.getAllConversations);
 
+// In your superAdminRoutes.js
+router.get('/superadmin/clients/:clientId', verifySuperAdminToken, superAdminController.getClientDetails);
+router.get('/clients/:userId/content-size', verifySuperAdminToken, superAdminController.getClientContentSize);
 
 /* Protected routes (authentication required) */
-router.use(middleware);
+// router.use(middleware);
 
 // User management
-router.post('/logout', UserController.logoutUser);
+router.post('/logout',middleware, UserController.logoutUser);
 
 // OpenAI Training routes
 router.post('/openaiCreateSnippet', middleware, preserveBody, generalUpload, OpenaiTrainingListController.createSnippet);
-router.post('/openaiScrape', OpenaiTrainingListController.scrape);
-router.post('/openaiCreateFaq', OpenaiTrainingListController.createFaq);
-router.post('/openaiToggleActiveStatus', OpenaiTrainingListController.toggleActiveStatus);
-router.post('/getOpenaiTrainingListDetail', OpenaiTrainingListController.getTrainingListDetail);
-router.post('/getTrainingStatus', OpenaiTrainingListController.getTrainingStatus);
+router.post('/openaiScrape',middleware, OpenaiTrainingListController.scrape);
+router.post('/openaiCreateFaq',middleware, OpenaiTrainingListController.createFaq);
+router.post('/openaiToggleActiveStatus',middleware, OpenaiTrainingListController.toggleActiveStatus);
+router.post('/getOpenaiTrainingListDetail',middleware, OpenaiTrainingListController.getTrainingListDetail);
+router.post('/getTrainingStatus',middleware, OpenaiTrainingListController.getTrainingStatus);
 
 // Credits management
-router.post('/getUserCredits', CreditsController.getUserCredits);
+router.post('/getUserCredits',middleware, CreditsController.getUserCredits);
 
 // Chat message routes
-router.post('/getConversationMessages', ChatMessageController.getAllChatMessagesAPI);
-router.post('/getOldConversationMessages', ChatMessageController.getAllOldChatMessages);
+router.post('/getConversationMessages',middleware, ChatMessageController.getAllChatMessagesAPI);
+router.post('/getOldConversationMessages',middleware, ChatMessageController.getAllOldChatMessages);
 
 // Enhanced Widget routes
-router.post('/getWidgetToken', WidgetController.getWidgetToken);
-router.post('/getBasicInfo', WidgetController.getBasicInfo);
-router.post('/setBasicInfo', WidgetController.setBasicInfo);
+router.post('/getWidgetToken',middleware, WidgetController.getWidgetToken);
+router.post('/getBasicInfo',middleware, WidgetController.getBasicInfo);
+router.post('/setBasicInfo',middleware, WidgetController.setBasicInfo);
 
 // Logo upload with enhanced validation
-router.post('/uploadLogo/:userId', upload.single('logo'), WidgetController.uploadLogo);
+router.post('/uploadLogo/:userId',middleware, upload.single('logo'), WidgetController.uploadLogo);
 
 // Theme settings routes
-router.get('/getThemeSettings/:userId', WidgetController.getThemeSettings);
-router.post('/getThemeSettings', WidgetController.getThemeSettings); // Alternative POST method
-router.post('/updateThemeSettings', WidgetController.updateThemeSettings);
+router.get('/getThemeSettings/:userId',middleware, WidgetController.getThemeSettings);
+router.post('/getThemeSettings',middleware, WidgetController.getThemeSettings); // Alternative POST method
+router.post('/updateThemeSettings',middleware, WidgetController.updateThemeSettings);
 
 // New enhanced widget routes
-router.post('/updateWidgetPosition', WidgetController.updateWidgetPosition);
+router.post('/updateWidgetPosition',middleware, WidgetController.updateWidgetPosition);
 
 // Agent management routes
-router.post('/agents', agentController.createAgent);
-router.get('/agents', agentController.getAllAgents);
-router.get('/agents/:id', agentController.getAgent);
-router.post('/agents/:id', agentController.updateAgent);
-router.post('/agents/delete/:id', agentController.deleteAgent);
-router.post('/agents/:id/status', agentController.updateAgentStatus);
+router.post('/agents',middleware, agentController.createAgent);
+router.get('/agents',middleware, agentController.getAllAgents);
+router.get('/agents/:id',middleware, agentController.getAgent);
+router.post('/agents/:id',middleware, agentController.updateAgent);
+router.post('/agents/delete/:id',middleware, agentController.deleteAgent);
+router.post('/agents/:id/status',middleware, agentController.updateAgentStatus);
 
 
 // Error handling middleware for multer errors
