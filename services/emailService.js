@@ -41,6 +41,61 @@ const sendAgentApprovalEmail = async (agent,acceptUrl,password) => {
   }
 };
 
+const sendPlanUpgradeEmail = async (user, planName, amount, billingCycle) => {
+  const mailOptions = {
+    from: process.env.SMTP_FROM,
+    to: user.email,
+    subject: "Plan Upgrade Confirmation",
+    html: `
+      <p>Thank you for upgrading your plan!</p>
+      <p><strong>Details of your subscription:</strong></p>
+      <ul>
+        <li>Plan: ${planName}</li>
+        <li>Billing Cycle: ${billingCycle}</li>
+        <li>Amount Paid: $${amount}</li>
+      </ul>
+      <p>Your account has been successfully updated with the new plan.</p>
+      <p>If you have any questions, feel free to contact our support.</p>
+      <br />
+      <p>Best regards,<br/>The Chataffy Team</p>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    return true;
+  } catch (error) {
+    console.error("Error sending plan upgrade email:", error);
+    return false;
+  }
+};
+
+const sendPlanDowngradeEmail = async (user, newPlanName) => {
+  const mailOptions = {
+    from: process.env.SMTP_FROM,
+    to: user.email,
+    subject: "Plan Downgrade Notification",
+    html: `
+      <h2>Your Subscription Has Been Downgraded</h2>
+      <p>Dear ${user.name || user.email},</p>
+      <p>Your subscription has been downgraded to the <strong>${newPlanName}</strong> plan due to plan expiry or non-payment.</p>
+      <p>If you believe this is a mistake or wish to upgrade again, please contact our support or visit your account dashboard.</p>
+      <br />
+      <p>Best regards,<br/>The Chataffy Team</p>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    return true;
+  } catch (error) {
+    console.error("Error sending plan downgrade email:", error);
+    return false;
+  }
+};
+
 module.exports = {
   sendAgentApprovalEmail,
+  sendPlanUpgradeEmail,
+  sendPlanDowngradeEmail,
 };

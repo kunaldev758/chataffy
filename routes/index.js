@@ -56,13 +56,14 @@ const preserveBody = (req, res, next) => {
 };
 
 // Import controllers
-const OpenaiTrainingListController = require('../controllers/OpenaiTrainingListController');
 const ChatMessageController = require('../controllers/ChatMessageController');
 const UserController = require('../controllers/UserController');
-const CreditsController = require('../controllers/CreditsController');
 const WidgetController = require('../controllers/WidgetController');
 const agentController = require('../controllers/agentController');
 const superAdminController = require('../controllers/superAdminController');
+const scrapingController = require('../controllers/ScrapingController');
+const PlanAdminController = require('../controllers/PlanAdminController');
+const PlanController = require('../controllers/PlanController');
 const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
 
@@ -91,29 +92,43 @@ router.post('/create', superAdminController.createSuperAdmin); // For initial se
 // Protected routes
 router.get('/superadmin/dashboard', verifySuperAdminToken, superAdminController.getDashboardData);
 router.get('/superadmin/clients', verifySuperAdminToken, superAdminController.getAllClients);
-router.get('/superadmin/agents', verifySuperAdminToken, superAdminController.getAllAgentsForSuperAdmin);
-router.get('/superadmin/conversations', verifySuperAdminToken, superAdminController.getAllConversations);
+router.get('/superadmin/agent/:clientId', verifySuperAdminToken, superAdminController.getAgent);
+router.get('/superadmin/cancel/sunscription/:clientId', verifySuperAdminToken, superAdminController.cancelClientSubscription);
+router.get('superadmin/delete/:userId',verifySuperAdminToken, UserController.deleteUser);
 
-// In your superAdminRoutes.js
-router.get('/superadmin/clients/:clientId', verifySuperAdminToken, superAdminController.getClientDetails);
-router.get('/clients/:userId/content-size', verifySuperAdminToken, superAdminController.getClientContentSize);
 
-/* Protected routes (authentication required) */
-// router.use(middleware);
+router.get('/superadmin/plan',verifySuperAdminToken, PlanAdminController.getAllPlans);
+router.get('/superadmin/plan/stats',verifySuperAdminToken, PlanAdminController.getPlanStats.bind(PlanAdminController));
+router.get('/superadmin/plan/:planId',verifySuperAdminToken, PlanAdminController.getPlan);
+router.post('/superadmin/plan',verifySuperAdminToken, PlanAdminController.createPlan);
+router.put('/superadmin/plan/:planId',verifySuperAdminToken, PlanAdminController.updatePlan);
+router.delete('/superadmin/plan/:planId',verifySuperAdminToken, PlanAdminController.deletePlan);
+router.post('/superadmin/plan/:planId/set-default',verifySuperAdminToken, PlanAdminController.setDefaultPlan);
+router.post('/superadmin/migrate-users',verifySuperAdminToken, PlanAdminController.migrateUsers);
+
+
+router.get('/available', PlanController.getAvailablePlans);
+
 
 // User management
 router.post('/logout',middleware, UserController.logoutUser);
 
-// OpenAI Training routes
-router.post('/openaiCreateSnippet', middleware, preserveBody, generalUpload, OpenaiTrainingListController.createSnippet);
-router.post('/openaiScrape',middleware, OpenaiTrainingListController.scrape);
-router.post('/openaiCreateFaq',middleware, OpenaiTrainingListController.createFaq);
-router.post('/openaiToggleActiveStatus',middleware, OpenaiTrainingListController.toggleActiveStatus);
-router.post('/getOpenaiTrainingListDetail',middleware, OpenaiTrainingListController.getTrainingListDetail);
-router.post('/getTrainingStatus',middleware, OpenaiTrainingListController.getTrainingStatus);
+//Get Client
+router.post('/client',middleware,UserController.getClient);
 
-// Credits management
-router.post('/getUserCredits',middleware, CreditsController.getUserCredits);
+// Scraping management
+router.post('/openaiScrape',middleware, scrapingController.startSitemapScraping);
+router.post('/continueAfterUpgrade',middleware, scrapingController.ContinueScrappingAfterUpgrade);
+router.post('/upgradePlan',middleware,scrapingController.upgradePlan); //->check this if in use or not
+// // Create snippet/document
+router.post('/openaiCreateSnippet',middleware, preserveBody , generalUpload, scrapingController.createSnippet);
+// // Create FAQ
+router.post('/openaiCreateFaq',middleware, scrapingController.createFaq);
+// // Get training list with filtering
+router.get('/getOpenaiTrainingListDetail/:userId',middleware, scrapingController.getScrapingHistory);
+router.get('/getDataField/:id',middleware,scrapingController.getFiledData)
+
+
 
 // Chat message routes
 router.post('/getConversationMessages',middleware, ChatMessageController.getAllChatMessagesAPI);

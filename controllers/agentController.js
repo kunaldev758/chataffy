@@ -5,7 +5,7 @@ const { sendAgentApprovalEmail } = require("../services/emailService");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
-// const bcrypt = require("bcrypt");
+const {checkPlanLimits} = require('../services/PlanService');
 
 
 exports.agentLogin = async (req, res) => {
@@ -58,20 +58,41 @@ exports.agentLogin = async (req, res) => {
   }
 };
 
+async function generateRandomPassword(length = 10) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let password = '';
+  for (let i = 0; i < length; i++) {
+    password += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return password;
+}
+
 // Create a new agent
 exports.createAgent = async (req, res) => {
   try {
-    const { name, email, password ,userId} = req.body;
+    const { name, email, userId } = req.body;
+
+    const checkLimit = await checkPlanLimits(userId, 'add_agent');
+
+    if (!checkLimit.canAddAgents) {
+      await Client.updateOne({ userId }, { $set: { "upgradePlanStatus.agentLimitExceeded": true } });
+      return res.status(403).json({
+        message: "Agent limit reached. Please upgrade your plan to add more agents.",
+        upgradeSuggested: true
+      });
+    }
 
     // Check if agent already exists
     const existingAgent = await Agent.findOne({ email });
-    const existingClinet =  await Client.findOne({email});
+    const existingClinet = await Client.findOne({ email });
     if (existingAgent || existingClinet) {
       return res
         .status(400)
         .json({ message: "User with this email already exists" });
     }
 
+    // Generate a random password for the agent
+    const password = await generateRandomPassword();
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 

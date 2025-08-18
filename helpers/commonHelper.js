@@ -1,19 +1,4 @@
 const fs = require("fs");
-const jwt = require('jsonwebtoken');
-const TrainingList = require('../models/OpenaiTrainingList');
-
-
-async function getWebPageCount(userId) {
-  try {
-    const usersId = clientId;
-    const  userData = await TrainingList.find({usersId, type:0});
-    return { total: userData.credits.total, used: userData.credits.used };
-  } catch (error) {
-    commonHelper.logErrorToFile(error);
-    //res.status(500).json({ status: false, message: "Something went wrong please try again!" });
-  }
-}
-
 // Function to store error logs in a file
 function logErrorToFile(error) {
   const logFilePath = "error.log";
@@ -26,4 +11,4 @@ function logErrorToFile(error) {
   });
 }
 
-module.exports = { logErrorToFile, getWebPageCount};
+module.exports = { logErrorToFile};

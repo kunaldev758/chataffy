@@ -5,6 +5,9 @@ const mongoose = require("mongoose");
 const rateLimit = require('express-rate-limit');
 const path = require("path");
 const apiRoutes = require("./routes/");
+const paymentsRouter = require('./routes/payments');
+const cron = require('node-cron');
+const { downgradeExpiredPlans } = require('./services/planCronService');
 
 const { initializeSocketController } = require("./socket");
 
@@ -22,8 +25,8 @@ app.use(cors());
 
 // Apply rate limit to all requests
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 300, // limit each IP to 100 requests per windowMs
+  windowMs: 1 * 60 * 1000, // 15 minutes
+  max: 50, // limit each IP to 100 requests per windowMs
   standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
   legacyHeaders: false, // Disable the `X-RateLimit-*` headers
 });
@@ -33,6 +36,13 @@ app.use(limiter); // apply to all requests
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use("/api", apiRoutes);
+app.use('/api/paypal', paymentsRouter);
+
+// Schedule the plan expiry check to run every day at midnight
+cron.schedule('0 0 * * *', () => {
+  console.log('Running plan expiry check...');
+  downgradeExpiredPlans();
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {

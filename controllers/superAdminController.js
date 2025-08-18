@@ -3,7 +3,8 @@ const Client = require("../models/Client");
 const Agent = require("../models/Agent");
 const Conversation = require("../models/Conversation");
 const ChatMessage = require("../models/ChatMessage");
-const TrainingList = require("../models/OpenaiTrainingList");
+const PlanService = require("../services/PlanService")
+const UsageTrackingService= require("../services/UsageTrackingService")
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 
@@ -100,7 +101,7 @@ module.exports.getDashboardData = async (req, res) => {
     // Get current date ranges
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const startOfWeek = new Date(now.setDate(now.getDate() - now.getDay()));
+    const startOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
     // 1. Total Clients
@@ -135,14 +136,6 @@ module.exports.getDashboardData = async (req, res) => {
     const aiChatPercentage = totalConversations > 0 ? ((aiChats / totalConversations) * 100).toFixed(2) : 0;
     const humanChatPercentage = totalConversations > 0 ? ((humanChats / totalConversations) * 100).toFixed(2) : 0;
 
-    // 6. AI Fallback Rate (conversations that started with AI but switched to human)
-    const aiToHumanSwitched = await Conversation.countDocuments({
-      aiChat: false, // Currently disabled (switched to human)
-      agentId: { $exists: true } // Has an agent assigned
-    });
-
-    const aiFallbackRate = aiChats > 0 ? ((aiToHumanSwitched / aiChats) * 100).toFixed(2) : 0;
-
     // 7. Additional metrics
     const approvedAgents = await Agent.countDocuments({ status: "approved" });
     const activeAgents = await Agent.countDocuments({ isActive: true });
@@ -172,6 +165,34 @@ module.exports.getDashboardData = async (req, res) => {
       });
     }
 
+    // 10. OpenAI Usage (all users)
+    const openAIUsageAgg = await UsageTrackingService.getOpenAIUsage(undefined);
+    const openAIUsage = openAIUsageAgg ? openAIUsageAgg : {
+      totalTokens: 0,
+      totalCost: 0,
+      totalRequests:0
+    };
+
+    // 11. Qdrant Usage (all collections)
+    const qdrantUsageAgg = await UsageTrackingService.getQdrantUsage(undefined);
+    const qdrantUsage = qdrantUsageAgg ? qdrantUsageAgg : {
+      totalVectorsAdded: 0,
+      totalVectorsDeleted: 0,
+      totalEstimatedCostRequests:0,
+      totalEstimatedCostStorage:0,
+    };
+
+    // 12. Total Revenue (sum of all clients' amount)
+    const revenueAgg = await Client.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: "$totalAmountPaid" }
+        }
+      }
+    ]);
+    const totalRevenue = revenueAgg && revenueAgg.length > 0 ? revenueAgg[0].totalRevenue : 0;
+
     const dashboardData = {
       overview: {
         totalClients,
@@ -194,11 +215,6 @@ module.exports.getDashboardData = async (req, res) => {
           percentage: parseFloat(humanChatPercentage)
         }
       },
-      aiInsights: {
-        fallbackRate: parseFloat(aiFallbackRate),
-        totalAiChats: aiChats,
-        switchedToHuman: aiToHumanSwitched
-      },
       agents: {
         total: totalAgents,
         approved: approvedAgents,
@@ -212,7 +228,17 @@ module.exports.getDashboardData = async (req, res) => {
       },
       chartData: {
         last7Days
-      }
+      },
+      openAIUsage: {
+        totalTokens: openAIUsage.totalTokens || 0,
+        totalCost: openAIUsage.totalCost || 0
+      },
+      qdrantUsage: {
+        totalVectorsAdded: qdrantUsage.totalVectorsAdded || 0,
+        totalVectorsDeleted: qdrantUsage.totalVectorsDeleted || 0,
+        totalStorageMB: qdrantUsage.totalStorageMB || 0
+      },
+      totalRevenue
     };
 
     res.status(200).json({
@@ -229,85 +255,39 @@ module.exports.getDashboardData = async (req, res) => {
 // Get all clients with details and metrics (aggregation version)
 module.exports.getAllClients = async (req, res) => {
   try {
-    const clients = await Client.aggregate([
-      // Join User
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'userId',
-          foreignField: '_id',
-          as: 'userDetails',
-        },
-      },
-      { $unwind: { path: '$userDetails', preserveNullAndEmptyArrays: true } },
-      // Count agents for each client
-      {
-        $lookup: {
-          from: 'agents',
-          let: { userId: '$userId' },
-          pipeline: [
-            { $match: { $expr: { $eq: ['$userId', '$$userId'] } } },
-            { $count: 'count' },
-          ],
-          as: 'agentCountArr',
-        },
-      },
-      // Count total conversations for each client
-      {
-        $lookup: {
-          from: 'conversations',
-          let: { userId: '$userId' },
-          pipeline: [
-            { $match: { $expr: { $eq: ['$userId', '$$userId'] } } },
-            { $count: 'count' },
-          ],
-          as: 'totalConversationsArr',
-        },
-      },
-      // Count active (open) conversations for each client
-      {
-        $lookup: {
-          from: 'conversations',
-          let: { userId: '$userId' },
-          pipeline: [
-            { $match: { $expr: { $and: [ { $eq: ['$userId', '$$userId'] }, { $eq: ['$conversationOpenStatus', 'open'] } ] } } },
-            { $count: 'count' },
-          ],
-          as: 'activeConversationsArr',
-        },
-      },
-      // Format output
-      {
-        $project: {
-          _id: 1,
-          credits: 1,
-          sitemapScrappingStatus: 1,
-          webPageScrappingStatus: 1,
-          webPageMappingCount: 1,
-          webPageAdded: 1,
-          faqAdded: 1,
-          docSnippetAdded: 1,
-          pineconeIndexName: 1,
-          createdAt: 1,
-          updatedAt: 1,
-          details: {
-            email: '$userDetails.email',
-            name: '$userDetails.email', // Use email as name
-            _id: '$userDetails._id',
-          },
-          metrics: {
-            agentCount: { $ifNull: [ { $arrayElemAt: ['$agentCountArr.count', 0] }, 0 ] },
-            totalConversations: { $ifNull: [ { $arrayElemAt: ['$totalConversationsArr.count', 0] }, 0 ] },
-            activeConversations: { $ifNull: [ { $arrayElemAt: ['$activeConversationsArr.count', 0] }, 0 ] },
-          },
-        },
-      },
-      { $sort: { createdAt: -1 } },
-    ]);
+    const clients = await Client.find({ isDeleted: false }).lean(); // Use lean() to get plain JavaScript objects
+
+    const updatedClients = await Promise.all(clients.map(async (client) => {
+      const planDetails = await PlanService.getUserPlan(client.userId);
+
+      if (!planDetails) {
+        return client; // Return client as is if no plan details
+      }
+
+      // Fetch total agents
+      const totalAgents = await Agent.find({ userId: client.userId }).countDocuments();
+
+      // Fetch total conversations
+      const totalConversations = await Conversation.find({ userId: client.userId }).countDocuments();
+
+      const currentDataUsed = client.currentDataSize;
+
+      // Add usageDetails to client
+      client.usageDetails = {
+        maxAgents: planDetails.limits.maxAgentsPerAccount,
+        totalAgents,
+        maxStorage: planDetails.limits.maxStorage,
+        currentDataUsed,
+        maxQueries: planDetails.limits.maxQueries,
+        totalConversations
+      };
+
+      return client;
+    }));
 
     res.status(200).json({
       success: true,
-      data: clients,
+      data: updatedClients,
     });
   } catch (error) {
     console.error('Error fetching clients:', error);
@@ -315,237 +295,53 @@ module.exports.getAllClients = async (req, res) => {
   }
 };
 
-// Get all agents across all clients
-module.exports.getAllAgentsForSuperAdmin = async (req, res) => {
-  try {
-    const agents = await Agent.find()
-      .populate('userId', 'name email')
-      .select('-password')
-      .sort({ createdAt: -1 });
-
-    res.status(200).json({
-      success: true,
-      data: agents
-    });
-  } catch (error) {
-    console.error("Error fetching agents:", error);
-    res.status(500).json({ message: "Error fetching agents" });
-  }
-};
-
-// Get all conversations with details
-module.exports.getAllConversations = async (req, res) => {
-  try {
-    const { page = 1, limit = 50, status } = req.query;
-    
-    let filter = {};
-    if (status && status !== 'all') {
-      filter.conversationOpenStatus = status;
-    }
-
-    const conversations = await Conversation.find(filter)
-      .populate('userId', 'name email')
-      .populate('agentId', 'name email')
-      .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
-
-    const total = await Conversation.countDocuments(filter);
-
-    res.status(200).json({
-      success: true,
-      data: {
-        conversations,
-        totalPages: Math.ceil(total / limit),
-        currentPage: page,
-        total
-      }
-    });
-  } catch (error) {
-    console.error("Error fetching conversations:", error);
-    res.status(500).json({ message: "Error fetching conversations" });
-  }
-};
-
-
-// Get detailed client information
-exports.getClientDetails = async (req, res) => {
-  try {
+module.exports.getAgent = async (req,res) => {
+  try{
     const { clientId } = req.params;
-    
-    // Get client basic info
-    const client = await Client.findById(clientId)
-      .populate('userId', 'name email createdAt');
-    
-    if (!client) {
-      return res.status(404).json({ message: "Client not found" });
-    }
-
-    // Get agents for this client
+    const client = await Client.findById(clientId);
+            if (!client) {
+              return res.status(404).json({ message: "Client not found" });
+            }
     const agents = await Agent.find({ userId: client.userId })
       .select('-password')
       .sort({ createdAt: -1 });
 
-    // Get conversation metrics
-    const conversationStats = await Conversation.aggregate([
-      { $match: { userId: client.userId?._id } },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: 1 },
-          open: {
-            $sum: { $cond: [{ $eq: ["$conversationOpenStatus", "open"] }, 1, 0] }
-          },
-          closed: {
-            $sum: { $cond: [{ $eq: ["$conversationOpenStatus", "close"] }, 1, 0] }
-          },
-          aiChats: {
-            $sum: { $cond: [{ $eq: ["$aiChat", true] }, 1, 0] }
-          },
-          humanChats: {
-            $sum: { $cond: [{ $eq: ["$aiChat", false] }, 1, 0] }
-          }
+      res.status(200).json({
+        success: true,
+        data: {
+          agents
         }
-      }
-    ]);
-
-    // Get active conversations with details
-    const activeConversations = await Conversation.find({
-      userId: client.userId?._id,
-      conversationOpenStatus: "open"
-    }).populate('agentId', 'name email').sort({ updatedAt: -1 }).limit(10);
-
-    // Get message statistics
-    const messageStats = await ChatMessage.aggregate([
-      { $match: { userId: client.userId?._id } },
-      {
-        $group: {
-          _id: "$sender_type",
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-
-    // Get training content size
-    const contentSize = await TrainingList.aggregate([
-      { $match: { userId: client.userId?._id } },
-      {
-        $group: {
-          _id: null,
-          totalSizeInBytes: { $sum: { $bsonSize: "$$ROOT" } }
-        }
-      }
-    ]);
-
-    // Get training content details
-    const trainingContent = await TrainingList.find({
-      userId: client.userId._id,
-      isActive: { $in: [1, 2] }
-    }).select('title type lastEdit trainingStatus webPage.url file.fileName snippet.title faq.question costDetails')
-     .sort({ lastEdit: -1 });
-
-    // Get training content statistics
-    const trainingStats = await TrainingList.aggregate([
-      { $match: { userId: client.userId._id, isActive: { $in: [1, 2] } } },
-      {
-        $group: {
-          _id: "$type",
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-
-    // Format message statistics
-    const messageStatistics = {
-      total: 0,
-      bot: 0,
-      agent: 0,
-      visitor: 0,
-      assistant: 0,
-      user: 0
-    };
-
-    messageStats.forEach(stat => {
-      messageStatistics[stat._id] = stat.count;
-      messageStatistics.total += stat.count;
-    });
-
-    // Format training statistics
-    const trainingStatistics = {
-      total: trainingContent.length,
-      webPage: 0,
-      file: 0,
-      snippet: 0,
-      faq: 0
-    };
-
-    trainingStats.forEach(stat => {
-      switch(stat._id) {
-        case 0: trainingStatistics.webPage = stat.count; break;
-        case 1: trainingStatistics.file = stat.count; break;
-        case 2: trainingStatistics.snippet = stat.count; break;
-        case 3: trainingStatistics.faq = stat.count; break;
-      }
-    });
-
-    const response = {
-      client: client.toObject(),
-      agents: agents,
-      conversations: {
-        stats: conversationStats[0] || {
-          total: 0, open: 0, closed: 0, aiChats: 0, humanChats: 0
-        },
-        active: activeConversations
-      },
-      messages: messageStatistics,
-      content: {
-        size: contentSize[0]?.totalSizeInBytes || 0,
-        items: trainingContent,
-        stats: trainingStatistics
-      }
-    };
-
-    res.json({
-      success: true,
-      data: response
-    });
-
-  } catch (error) {
-    console.error("Error fetching client details:", error);
-    res.status(500).json({ message: "Error fetching client details" });
+      });
+  }catch(err){
+    console.error("Error fetching agent:", error);
+    res.status(500).json({ message: "Error fetching agent" });
   }
-};
+}
 
-// Get client content size
-exports.getClientContentSize = async (req, res) => {
+
+module.exports.cancelClientSubscription = async (req, res) => {
   try {
-    const { userId } = req.params;
-    
-    const result = await TrainingList.aggregate([
-      { $match: { userId: new mongoose.Types.ObjectId(userId) } },
-      {
-        $group: {
-          _id: null,
-          totalSizeInBytes: { $sum: { $bsonSize: "$ROOT" } }
-        }
-      }
-    ]);
+    const { clientId } = req.params;
+    const client = await Client.findById(clientId);
 
-    const sizeInBytes = result[0]?.totalSizeInBytes || 0;
-    const sizeInMB = (sizeInBytes / (1024 * 1024)).toFixed(2);
-    const sizeInKB = (sizeInBytes / 1024).toFixed(2);
+    if (!client) {
+      return res.status(404).json({ message: "Client not found" });
+    }
 
-    res.json({
+    // Set the client's plan to the default plan
+    client.plan = "free";
+    client.planStatus = "inactive";
+    client.paymentStatus = "unpaid";
+    client.planExpiry = null;
+
+    await client.save();
+
+    res.status(200).json({
       success: true,
-      data: {
-        bytes: sizeInBytes,
-        kb: parseFloat(sizeInKB),
-        mb: parseFloat(sizeInMB)
-      }
+      message: "Client subscription cancelled and set to default plan"
     });
-
   } catch (error) {
-    console.error("Error calculating content size:", error);
-    res.status(500).json({ message: "Error calculating content size" });
+    console.error("Error cancelling client subscription:", error);
+    res.status(500).json({ message: "Error cancelling client subscription" });
   }
 };

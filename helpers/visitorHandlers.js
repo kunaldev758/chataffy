@@ -6,15 +6,16 @@ const ConversationController = require("../controllers/ConversationController");
 const QueryController = require("../controllers/QueryController");
 const Widget = require("../models/Widget");
 const Visitor = require("../models/Visitor");
+const Client = require("../models/Client");
 const Conversation = require("../models/Conversation");
 const ChatMessage = require("../models/ChatMessage");
 const BlockedVisitorIp = require("../models/blockedVisitorIp");
+const { checkPlanLimits } = require("../services/PlanService");
 
 const initializeVisitorEvents = (io, socket) => {
-  // const { userId, visitorId } = socket;
-   const { agentId } = socket;
+  const { agentId } = socket;
   const { userId } = socket;
-  const {visitorId} = socket;
+  const { visitorId } = socket;
   let conversationRoom = ``;
   let clientRoom = "";
   let agentRoom = "";
@@ -25,16 +26,17 @@ const initializeVisitorEvents = (io, socket) => {
   if (!agentId && userId) {
     clientRoom = `user-${userId}`;
   }
-  // socket.join(agentRoom);
-  // socket.join(clientRoom);
 
   const VisitorRoom = `conversation-${visitorId}`;
   socket.join(VisitorRoom);
 
   socket.on("visitor-ip", async ({ ip }, callback) => {
     try {
-      const ipFound = await BlockedVisitorIp.findOne({ip:ip,userId:userId});
-      if(ipFound){
+      const ipFound = await BlockedVisitorIp.findOne({
+        ip: ip,
+        userId: userId,
+      });
+      if (ipFound) {
         io.to(`conversation-${visitorId}`).emit("visitor-is-blocked", {});
       }
     } catch (error) {
@@ -46,20 +48,23 @@ const initializeVisitorEvents = (io, socket) => {
   socket.on("visitor-connect", async ({ widgetToken }) => {
     try {
       // Fetch theme settings for the widget
+      const LimitAvailable = await checkPlanLimits(userId, "query");
+      if (!LimitAvailable.canMakeQueries) {
+        await Client.updateOne({ userId },{ $set: { "upgradePlanStatus.chatLimitExceeded": true }  });
+        socket.emit("visitor-connect-response-upgrade");
+        return;
+      }
       const themeSettings = await Widget.findOne({ widgetToken });
 
       // Fetch the visitor's conversation history
       let chatMessages = [];
-      chatMessages = await ChatMessageController.getAllChatMessages(
-        visitorId
-      );
+      chatMessages = await ChatMessageController.getAllChatMessages(visitorId);
 
       if (chatMessages.length <= 0) {
-        const conversation =
-          await ConversationController.getOpenConversation(
-            visitorId,
-            userId
-          );
+        const conversation = await ConversationController.getOpenConversation(
+          visitorId,
+          userId
+        );
         const conversationId = conversation?._id || null;
 
         await ChatMessageController.createChatMessage(
@@ -72,7 +77,7 @@ const initializeVisitorEvents = (io, socket) => {
 
         chatMessages = await ChatMessageController.getAllChatMessages(
           visitorId
-        );     
+        );
       }
 
       // Emit visitor-connect-response with visitor data
@@ -107,14 +112,21 @@ const initializeVisitorEvents = (io, socket) => {
     try {
       const conversation = await ConversationController.getOpenConversation(
         visitorId,
-        userId,
+        userId
         // socket.agentId
       );
       const conversationId = conversation?._id || null;
-      const messages = await ChatMessage.find({conversation_id:conversationId})
-      if(messages.length<=1){
-        await Conversation.findByIdAndUpdate(conversationId, {is_started: true});
-        io.to([`user-${userId}`,agentRoom]).emit("visitor-connect-list-update", {});
+      const messages = await ChatMessage.find({
+        conversation_id: conversationId,
+      });
+      if (messages.length <= 1) {
+        await Conversation.findByIdAndUpdate(conversationId, {
+          is_started: true,
+        });
+        io.to([`user-${userId}`, agentRoom]).emit(
+          "visitor-connect-list-update",
+          {}
+        );
       }
       const encodedMessage = encode(message);
       let chatMessage = await ChatMessageController.createChatMessage(
@@ -125,13 +137,13 @@ const initializeVisitorEvents = (io, socket) => {
         userId
       );
 
-      io.to([`conversation-${conversationId}`,VisitorRoom]).emit(
+      io.to([`conversation-${conversationId}`, VisitorRoom]).emit(
         "conversation-append-message",
         {
           chatMessage,
         }
       );
-      io.to([`user-${userId}`,agentRoom]).emit("new-message-count", {});
+      io.to([`user-${userId}`, agentRoom]).emit("new-message-count", {});
 
       await Conversation.updateOne(
         { _id: conversationId },
@@ -147,10 +159,9 @@ const initializeVisitorEvents = (io, socket) => {
         io.to(`conversation-${visitorId}`).emit("intermediate-response", {
           message: "...replying",
         });
-        io.to(`conversation-${conversationId}`).emit(
-          "intermediate-response",
-          { message: "...replying" }
-        );
+        io.to(`conversation-${conversationId}`).emit("intermediate-response", {
+          message: "...replying",
+        });
 
         if (response_data.success == true) {
           const chatMessageResponse =
@@ -164,11 +175,17 @@ const initializeVisitorEvents = (io, socket) => {
             );
           io.to(`conversation-${visitorId}`).emit(
             "conversation-append-message",
-            { chatMessage: chatMessageResponse, sources:response_data?.sources }
+            {
+              chatMessage: chatMessageResponse,
+              sources: response_data?.sources,
+            }
           );
           io.to(`conversation-${conversationId}`).emit(
             "conversation-append-message",
-            { chatMessage: chatMessageResponse, sources:response_data?.sources }
+            {
+              chatMessage: chatMessageResponse,
+              sources: response_data?.sources,
+            }
           );
         } else {
           const chatMessageResponse =
@@ -238,5 +255,5 @@ const initializeVisitorEvents = (io, socket) => {
 };
 
 module.exports = {
-  initializeVisitorEvents
+  initializeVisitorEvents,
 };

@@ -43,7 +43,9 @@ UserController.createUser = async (req, res) => {
     await user.save();
     // Generate client specific details
     const client = new Client({userId});
-    client.pineconeIndexName = `pinecone-${userId}`;
+    client.qdrantIndexName = `${userId}`;
+    client.qdrantIndexNamePaid = crypto.randomBytes(16).toString('hex');
+    client.email = email;
     await client.save();
     // Generate widget token and insert in widget table
     const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
@@ -95,7 +97,7 @@ UserController.loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await User.findOne({ email });
-    if (!user || !(await user.comparePassword(password))) {
+    if (!user || user.isDeleted || !(await user.comparePassword(password))) {
       return res.status(401).json({ status_code: 201, status: false, message: 'Invalid email or password' });
     }
     if (!user.email_verified) {
@@ -116,6 +118,29 @@ UserController.loginUser = async (req, res) => {
     res.status(500).json({ status_code: 500, status: false, message: 'Login failed' });
   }
 };
+// Delete user (soft delete)
+UserController.deleteUser = async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    if (!userId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+    }
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+    }
+    const client = await Client.findOne({userId});
+    user.isDeleted = true;
+    client.isDeleted = true;
+    await client.save();
+    await user.save();
+    res.json({ status_code: 200, status: true, message: 'User deleted successfully' });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    res.status(500).json({ status_code: 500, status: false, message: 'User deletion failed' });
+  }
+};
+
 // Login user
 UserController.logoutUser = async (req, res) => {
   try {
@@ -135,4 +160,22 @@ UserController.logoutUser = async (req, res) => {
     res.status(500).json({ status_code: 500, status: false, message: 'Logout failed' });
   }
 };
+
+UserController.getClient = async (req,res) => {
+  try {
+    const userId = req.params.userId || req.body.userId;
+    if (!userId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+    }
+
+    const client = await Client.findOne({ userId: userId });
+    if (!client) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'Client not found' });
+    }
+
+    res.json({ status_code: 200, status: true, client });
+  } catch (error) {
+    res.status(500).json({ status_code: 500, status: false, message: 'Failed to retrieve client' });
+  }
+}
 module.exports = UserController;

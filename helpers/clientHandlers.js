@@ -1,6 +1,5 @@
 // handlers/clientHandlers.js
-const CreditsController = require("../controllers/CreditsController");
-const OpenaiTrainingListController = require("../controllers/OpenaiTrainingListController");
+const ScrappingController = require("../controllers/ScrapingController");
 const ChatMessageController = require("../controllers/ChatMessageController");
 const VisitorController = require("../controllers/VisitorController");
 const ConversationController = require("../controllers/ConversationController");
@@ -8,6 +7,8 @@ const ConversationTagController = require("../controllers/ConversationTagControl
 const DashboardController = require("../controllers/DashboardController");
 const Conversation = require("../models/Conversation");
 const Visitor = require("../models/Visitor");
+const Client = require("../models/Client");
+const PlanService = require("../services/PlanService");
 
 const initializeClientEvents = (io, socket) => {
   const { agentId } = socket;
@@ -27,46 +28,44 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("client-connect", async () => {
     socket.emit("client-connect-response", {
-      response: "Received data from message",
+      response: "Client Connect Successful",
     });
   });
 
-  socket.on("get-credit-count", async (data) => {
-    const credits = await CreditsController.getUserCredits(userId);
-    socket.emit("get-credit-count-response", {
-      response: "Received data from message",
-      data: credits,
-    });
-  });
-  socket.on("get-training-list-count", async (data) => {
-    const webPagesCount = await OpenaiTrainingListController.getWebPageUrlCount(
-      userId
-    );
-    const docSnippets = await OpenaiTrainingListController.getSnippetCount(
-      userId
-    );
-    // {crawledDocs: 0, totalDocs: 0};
-    const faqs = await OpenaiTrainingListController.getFaqCount(userId);
-    // {crawledFaqs: 0,totalFaqs: 0};
+  socket.on("get-training-list-count", async () => {
+    const data = await Client.findOne({userId});
+
     socket.emit("get-training-list-count-response", {
       response: "Received data from message",
-      data: { ...webPagesCount, ...docSnippets, ...faqs },
+      data,
     });
   });
+
   socket.on("get-training-list", async (data) => {
     const { skip, limit, sourcetype, actionType } = data;
-    const webPages = await OpenaiTrainingListController.getWebPageList(
+    let status = actionType;
+    let type = sourcetype
+    const webPages = await ScrappingController.getScrapingHistoryBySocket(
       userId,
       skip,
       limit,
-      sourcetype,
-      actionType
+      type,
+      status,
     );
     socket.emit("get-training-list-response", {
       response: "Received data from message",
       data: webPages,
     });
   });
+
+  socket.on("continue-scrapping-button",async ()=>{
+    const clientData = await Client.findOne({userId});
+    if(clientData?.pagesAdded?.success+clientData?.pagesAdded?.failed<clientData?.pagesAdded?.total && clientData?.upgradePlanStatus?.storageLimitExceeded != true && clientData?.dataTrainingStatus ==0){
+      socket.emit("show-continue-scrapping-button", {
+        response: "show button",
+      });
+    }
+  })
 
   socket.on("get-open-conversations-list", async (data) => {
     try {
@@ -189,9 +188,7 @@ const initializeClientEvents = (io, socket) => {
     }
   });
 
-  socket.on(
-    "client-send-add-note",
-    async ({ message, visitorId, conversationId }, callback) => {
+  socket.on("client-send-add-note",async ({ message, visitorId, conversationId }, callback) => {
       try {
         const note = await ChatMessageController.addNoteToChat(
           visitorId,
@@ -427,7 +424,9 @@ const initializeClientEvents = (io, socket) => {
         dateRange,
         socket.userId
       );
-      callback({ success: true, data });
+      const analytics = await DashboardController.getUsageAnalytics(socket.userId);
+      const plan = await PlanService.getUserPlan(socket.userId);
+      callback({ success: true, data, analytics, plan });
     } catch (error) {
       console.error("Error fetching dashboard data:", error);
       callback({ success: false, error: "Failed to fetch data" });

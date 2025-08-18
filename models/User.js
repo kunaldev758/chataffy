@@ -26,6 +26,10 @@ const userSchema = new Schema(
     auth_token: {
       type: String,
     },
+    isDeleted: {
+      type: Boolean,
+      default: false,
+    },
     role: {
       type: String,
       enum: ["admin", "client", "agent"],

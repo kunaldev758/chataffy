@@ -12,7 +12,7 @@ module.exports = async (req, res, next) => {
     jwt.verify(token, process.env.JWT_SECRET_KEY, async (err, decoded) => {
     if (err || !decoded._id) {
       if(decoded?.id){
-        cosole.log("Here is bug")
+        console.log("Here is bug")
       }
       else{
       return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
@@ -20,6 +20,9 @@ module.exports = async (req, res, next) => {
     }
     const userId = decoded._id;
     const user = await User.findById(userId);
+    if(user?.isDeleted){
+      return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
+    }
     const agentId = decoded.id;
     const agent = await Agent.findById(agentId);
     console.log("testing here", user);

@@ -1,8 +1,9 @@
-const commonHelper = require("../helpers/commonHelper.js");
+// const commonHelper = require("../helpers/commonHelper.js");
 const Client = require("../models/Client");
 const Conversation = require("../models/Conversation.js");
 const ChatMessage = require("../models/ChatMessage.js");
 const Visitor = require("../models/Visitor.js")
+const Agent = require("../models/Agent.js");
 
 const DashboardController = {};
 DashboardController.getDashboardData = async (dateRange, userId) => {
@@ -54,20 +55,67 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
     const location = await Visitor.find({userId:userId}, { location: 1, _id: 0 })
    const locationData = transformData(location)
 
+   //total Agents
+    const totalAgents = await Agent.find({ userId: userId }).countDocuments();
+
+    let totalChatsInPlan = 0;
+
+      try {
+        const client = await Client.findOne({userId});
+      
+        if (!client) throw new Error("Client not found");
+      
+        // For free plan → start cycle from account creation date
+        const baseDate = (client.plan === "free") 
+          ? new Date(client.createdAt) 
+          : new Date(client.planPurchaseDate);
+      
+        const now = new Date();
+      
+        // Calculate start of the current monthly cycle
+        let monthsSinceBase = 
+          (now.getFullYear() * 12 + now.getMonth()) -
+          (baseDate.getFullYear() * 12 + baseDate.getMonth());
+      
+        let cycleStart = new Date(baseDate);
+        cycleStart.setMonth(baseDate.getMonth() + monthsSinceBase);
+      
+        let cycleEnd = new Date(cycleStart);
+        cycleEnd.setMonth(cycleStart.getMonth() + 1);
+      
+        // Count chats in the current cycle
+        totalChatsInPlan = await Conversation.countDocuments({
+          userId,
+          createdAt: { $gte: cycleStart, $lt: cycleEnd }
+        });
+      
+      } catch (e) {
+        console.error(e);
+        totalChatsInPlan = 0;
+      }
+
     return {
       totalChat: conversationCount,
       aiAssists: AiconversationCount,
       totalMessage: totalMessages,
       csat: csat,
-      fallbackMessage:0,
-      art:4.2,
-      locationData:locationData
+      totalAgents:totalAgents,
+      locationData:locationData,
+      totalChatsInPlan:totalChatsInPlan,
     };
   } catch (error) {
     return error;
   }
 };
 
+DashboardController.getUsageAnalytics = async (userId) => {
+  try {
+    const data = await Client.findOne({userId});
+    return data;
+  } catch (error) {
+    return error;
+  }
+};
 
 function transformData(data) {
   const countryMap = new Map();

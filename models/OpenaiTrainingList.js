@@ -1,59 +1,69 @@
 const mongoose = require("mongoose");
 const trainingListSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, required: true, ref: 'User' },
-  title: { type: String },
-  type: { type: Number }, // 0-WebPage, 1-File, 2-Snippet, 3-Faq
-  lastEdit: { type: Date, default: Date.now },
-  trainingStatus: { type: Number, default: 1 }, // 1-Listed, 2-Crawled, 3-Minified, 4-Mapped
-  isActive: { type: Number, default: 1}, // 0-InActive, 1-Active, 2-Delete
-
-  webPage: {
-    url: { type: String },
-    title: { type: String },
-    metaDescription: { type: String },
-    content: { type: String },
-    crawlingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
-    crawlingDuration: {
-      start: Date,
-      end: Date,
+    userId: {
+      type: String,
+      required: true,
+      index: true
     },
-    minifyingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
-    minifyingDuration: {
-      start: Date,
-      end: Date,
+    type: {
+      type: Number,
+      required: true,
+      // 0: WebPage, 1: File, 2: Snippet, 3: FAQ
     },
-    mappingStatus: { type: Number, default: 0 }, // 0-NotStarted, 1-Progress, 2-Success, 3-Failed
-    sourceCode: { type: String },
-  },
-
-  file: { 
-    fileName: String, 
-    originalFileName: String,
-    path: String,
-    content: String,
-  },
-
-  snippet: {
-    title: { type: String },
-    content: { type: String },
-  },
+    
+    // WebPage specific fields
+    webPage: {
+      url: String,
+      sourceCode: String,
+    },
   
-  faq: {
-    question: { type: String },
-    answer: { type: String },
-  },
+    // File specific fields
+    fileContent: String,
+    fileName: String,
+    originalFileName: String,
+  
+    // Snippet and FAQ fields
+    title: String,
+    content: String,
+  
+    // Common fields
+    trainingStatus: {
+      type: Number,
+      default: 1,
+      // 0:Processing 1: Trained, 2: Failed, 10: Plan Upgrade Required
+    },
+  
+    error: {
+      type: String,
+      default: null
+    },
+    
+    dataSize: {
+      type: Number,
+      default: 0 // Size in bytes
+    },
+    chunkCount: {
+      type: Number,
+      default: 0
+    },
+  
+  
+    lastEdit: {
+      type: Date,
+      default: Date.now,
+    },
+  
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
+ 
+  // { timestamps: true }
+});
 
-  costDetails: {
-    totalCost: { type: Number, default: 0 },
-    embedding: { type: Number, default: 0 },
-    storage: { type: Number, default: 0 },
-    tokens: { type: Number, default: 0 },
-  }
+trainingListSchema.index({ userId: 1, trainingStatus: 1 });
+trainingListSchema.index({ userId: 1, type: 1 });
+trainingListSchema.index({ createdAt: 1 });
 
-
-},
-{ timestamps: true });
-trainingListSchema.index({ userId: 1, mappingLocation: "2dsphere" });
-// trainingListSchema.index({ embedding: '2dsphere' });
 const TrainingList = mongoose.model("TrainingList", trainingListSchema);
 module.exports = TrainingList;
