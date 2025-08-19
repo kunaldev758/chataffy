@@ -19,58 +19,233 @@ class ScrapingController {
     this.getScrapingHistory = this.getScrapingHistory.bind(this);
   }
 
+
+  // Method 1: Simple Bulk Insert (Recommended for most cases)
+async bulkInsertUrls(userId, urls) {
+  try {
+    console.log(`🚀 Bulk inserting ${urls.length} URLs...`);
+    const startTime = Date.now();
+
+    const urlDocuments = urls.map(url => ({
+      userId: userId,
+      url: url,
+      trainStatus: 0,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    }));
+
+    // MongoDB bulk insert
+    const result = await Url.insertMany(urlDocuments, {
+      ordered: false, // Continue on duplicates/errors
+      rawResult: true // Get detailed results
+    });
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`✅ Inserted ${result.insertedCount} URLs in ${duration}s`);
+    return result;
+
+  } catch (error) {
+    // Handle duplicate key errors gracefully
+    if (error.code === 11000) {
+      console.log(`⚠️ Some URLs already exist. Inserted: ${error.result?.nInserted || 0}`);
+      return error.result;
+    }
+    throw error;
+  }
+}
+
+// Method 2: Chunked Insert (For very large datasets > 10k URLs)
+// async chunkedBulkInsert(userId, urls, chunkSize = 1000) {
+//   try {
+//     console.log(`🔄 Chunked insert: ${urls.length} URLs in ${chunkSize} chunks`);
+//     const startTime = Date.now();
+    
+//     let totalInserted = 0;
+//     const totalChunks = Math.ceil(urls.length / chunkSize);
+
+//     for (let i = 0; i < urls.length; i += chunkSize) {
+//       const chunk = urls.slice(i, i + chunkSize);
+//       const chunkNumber = Math.floor(i / chunkSize) + 1;
+      
+//       console.log(`📦 Chunk ${chunkNumber}/${totalChunks} (${chunk.length} URLs)`);
+      
+//       const urlDocuments = chunk.map(url => ({
+//         userId: userId,
+//         url: url,
+//         trainStatus: 0,
+//         createdAt: new Date(),
+//         updatedAt: new Date()
+//       }));
+
+//       try {
+//         const result = await Url.insertMany(urlDocuments, { 
+//           ordered: false,
+//           rawResult: true 
+//         });
+//         totalInserted += result.insertedCount;
+        
+//       } catch (chunkError) {
+//         if (chunkError.code === 11000) {
+//           totalInserted += chunkError.result?.nInserted || 0;
+//         }
+//         console.log(`⚠️ Chunk ${chunkNumber} partial success`);
+//       }
+//     }
+
+//     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+//     console.log(`🎯 Completed: ${totalInserted}/${urls.length} in ${duration}s`);
+//     return totalInserted;
+
+//   } catch (error) {
+//     console.error('❌ Chunked insert failed:', error.message);
+//     throw error;
+//   }
+// }
+
+// // Method 3: Upsert Approach (Update existing, insert new)
+// async upsertUrls(userId, urls) {
+//   try {
+//     console.log(`🔄 Upserting ${urls.length} URLs...`);
+//     const startTime = Date.now();
+
+//     const operations = urls.map(url => ({
+//       updateOne: {
+//         filter: { userId: userId, url: url },
+//         update: { 
+//           $set: { updatedAt: new Date() },
+//           $setOnInsert: { 
+//             userId: userId, 
+//             url: url, 
+//             trainStatus: 0, 
+//             createdAt: new Date() 
+//           }
+//         },
+//         upsert: true
+//       }
+//     }));
+
+//     const result = await Url.bulkWrite(operations, { ordered: false });
+    
+//     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+//     console.log(`✅ Upserted: ${result.upsertedCount} new, ${result.modifiedCount} updated in ${duration}s`);
+//     return result;
+
+//   } catch (error) {
+//     console.error('❌ Upsert failed:', error.message);
+//     throw error;
+//   }
+// }
+
   async extractUrlsFromSitemap(sitemapUrl) {
     try {
+      console.log(`Fetching sitemap: ${sitemapUrl}`);
+      
       const response = await axios.get(sitemapUrl, {
         timeout: 30000,
         headers: {
           "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
         },
+        // Add validateStatus to handle 404s gracefully
+        validateStatus: function (status) {
+          return status < 500; // Accept any status code less than 500
+        }
       });
-
+  
+      // Handle non-200 status codes
+      if (response.status === 404) {
+        console.warn(`Sitemap not found (404): ${sitemapUrl}`);
+        return []; // Return empty array instead of throwing error
+      }
+      
+      if (response.status !== 200) {
+        console.warn(`Unexpected status ${response.status} for sitemap: ${sitemapUrl}`);
+        return [];
+      }
+  
+      // Check if response has valid XML content
+      if (!response.data || typeof response.data !== 'string') {
+        console.warn(`Invalid XML content from sitemap: ${sitemapUrl}`);
+        return [];
+      }
+  
       const parser = new xml2js.Parser();
       const result = await parser.parseStringPromise(response.data);
-
       let urls = [];
-
+  
       // Handle regular sitemap
       if (result.urlset && result.urlset.url) {
         urls = result.urlset.url.map((urlObj) => urlObj.loc[0]);
+        console.log(`Found ${urls.length} URLs in regular sitemap: ${sitemapUrl}`);
+        if (urls.length >= 1000) {
+          urls = urls.slice(0, 1000); // Take only first 5000 URLs
+          console.log(`URL limit reached. Returning first 5000 URLs from sitemap: ${sitemapUrl}`);
+          return urls;
+        }
       }
-
       // Handle sitemap index
       else if (result.sitemapindex && result.sitemapindex.sitemap) {
         const sitemapUrls = result.sitemapindex.sitemap.map(
           (sitemapObj) => sitemapObj.loc[0]
         );
-
-        // Recursively fetch URLs from each sitemap
+        
+        console.log(`Found ${sitemapUrls.length} nested sitemaps in index: ${sitemapUrl}`);
+  
+        // Recursively fetch URLs from each sitemap with better error handling
         for (const nestedSitemapUrl of sitemapUrls) {
+          if (urls.length >= 1000) {
+            console.log(`URL limit of 5000 reached. Stopping sitemap processing.`);
+            break;
+          }
           try {
-            const nestedUrls = await this.extractUrlsFromSitemap(
-              nestedSitemapUrl
-            );
+            const nestedUrls = await this.extractUrlsFromSitemap(nestedSitemapUrl);
             urls.push(...nestedUrls);
+            console.log(`Successfully extracted ${nestedUrls.length} URLs from nested sitemap: ${nestedSitemapUrl}`);
+            if (urls.length >= 1000) {
+              urls = urls.slice(0, 1000); // Trim to exactly 5000 URLs
+              console.log(`URL limit of 5000 reached after processing nested sitemap. Stopping and returning 5000 URLs.`);
+              return urls;
+            }
           } catch (error) {
-            console.error(
-              `Error fetching nested sitemap ${nestedSitemapUrl}:`,
-              error
-            );
+            console.warn(`Failed to fetch nested sitemap ${nestedSitemapUrl}:`, error.message);
+            // Continue with other sitemaps instead of failing completely
+            continue;
           }
         }
+      } else {
+        console.warn(`No valid sitemap structure found in: ${sitemapUrl}`);
+        return [];
       }
-
+  
       // Filter and clean URLs
+      const originalCount = urls.length;
       urls = urls
         .filter((url) => url && typeof url === "string")
         .filter((url) => url.startsWith("http"))
         .map((url) => url.trim())
         .filter((url, index, self) => self.indexOf(url) === index); // Remove duplicates
+  
+      console.log(`Cleaned URLs: ${originalCount} -> ${urls.length} (removed ${originalCount - urls.length} invalid/duplicate URLs)`);
 
+      if (urls.length > 1000) {
+        urls = urls.slice(0, 1000);
+        console.log(`Final URL count exceeded 5000 after cleaning. Trimmed to exactly 5000 URLs.`);
+      }
+      
       return urls;
+  
     } catch (error) {
-      console.error(`Error extracting URLs from sitemap ${sitemapUrl}:`, error);
-      throw new Error(`Failed to parse sitemap: ${error.message}`);
+      // Log the error but don't throw - return empty array to continue processing
+      console.error(`Error extracting URLs from sitemap ${sitemapUrl}:`, error.message);
+      
+      // Only throw if it's a critical error that should stop everything
+      // For most cases, return empty array to continue processing other sitemaps
+      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+        console.warn(`Network error for sitemap ${sitemapUrl}, continuing with other sitemaps...`);
+        return [];
+      }
+      
+      // For parsing errors or other non-critical errors, return empty array
+      return [];
     }
   }
 
@@ -173,9 +348,10 @@ class ScrapingController {
       }
 
       // Add the fetched URLs to the Url model
-      for (const url of urls) {
-        await Url.create({ userId: userId, url: url, trainStatus: 0 });
-      }
+      // for (const url of urls) {
+        // await Url.create({ userId: userId, url: url, trainStatus: 0 });
+        await this.bulkInsertUrls(userId, urls);
+      // }
 
       await Client.updateOne(
         { userId },
