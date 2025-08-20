@@ -361,6 +361,15 @@ new Worker(
             { userId },
             { $inc: { "pagesAdded.failed": 1 } }
           );
+          await Url.updateOne(
+            { url },
+            {
+              $set: {
+                trainStatus: 2,
+                error: "Failed to train",
+              },
+            }
+          );
         }
       }
 
@@ -437,6 +446,27 @@ new Worker(
             chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
             lastEdit: Date.now(),
           });
+          if(status == 2){
+          await Url.updateOne(
+            { url:doc.originalUrl },
+            {
+              $set: {
+                trainStatus: status,
+                error: "Failed to process/minify web page content",
+              },
+            }
+          );
+        }else{
+          await Url.updateOne(
+            { url:doc.originalUrl },
+            {
+              $set: {
+                trainStatus: status,
+                // error: "Failed to process/minify web page content",
+              },
+            }
+          );
+        }
 
           await Client.updateOne(
             { userId },
