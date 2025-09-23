@@ -94,7 +94,7 @@ router.get('/superadmin/dashboard', verifySuperAdminToken, superAdminController.
 router.get('/superadmin/clients', verifySuperAdminToken, superAdminController.getAllClients);
 router.get('/superadmin/agent/:clientId', verifySuperAdminToken, superAdminController.getAgent);
 router.get('/superadmin/cancel/sunscription/:clientId', verifySuperAdminToken, superAdminController.cancelClientSubscription);
-router.get('superadmin/delete/:userId',verifySuperAdminToken, UserController.deleteUser);
+router.get('/superadmin/delete/:userId',verifySuperAdminToken, UserController.deleteUser);
 
 
 router.get('/superadmin/plan',verifySuperAdminToken, PlanAdminController.getAllPlans);

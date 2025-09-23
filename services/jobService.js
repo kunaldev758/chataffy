@@ -292,12 +292,8 @@ new Worker(
 
           const contentSize = Buffer.byteLength(content, "utf8");
 
-          // if (currentDataSize) {
-          //   currentDataSize += contentSize;
-          // } else {
             let clientDoc = await Client.findOne({ userId });
             currentDataSize = clientDoc?.currentDataSize || 0;
-          // }
 
           if (currentDataSize + contentSize > plan.limits.maxStorage) {
             await Client.updateOne(
@@ -311,15 +307,6 @@ new Worker(
             });
             break;
           } else {
-            // await TrainingModel.create({
-            //   userId,
-            //   type: 0, // WebPage
-            //   content: content,
-            //   dataSize: contentSize,
-            //   trainingStatus: 0,
-            //   "webPage.url": url,
-            // });
-
             await Client.updateOne(
               { userId },
               { $inc: { currentDataSize: contentSize } }
@@ -337,16 +324,6 @@ new Worker(
               },
               originalUrl: url,
             });
-            // let document = {
-            //   type: 0, // WebPage
-            //   content: content,
-            //   metadata: {
-            //     url: webPageURL,
-            //     title: title,
-            //     metaDescription: metaDescription,
-            //     type: "webpage",
-            //   },
-            // };
           }
         } catch (error) {
           await TrainingModel.findByIdAndUpdate(
@@ -379,33 +356,7 @@ new Worker(
         userId,
         qdrantIndexName
       );
-      // if (result.success) {
-      //   await TrainingModel.findOneAndUpdate(
-      //     { userId: userId, "webPage.url": url },
-      //     {
-      //       trainingStatus: 1, // Completed
-      //       chunkCount: result?.result?.chunkCount,
-      //       lastEdit: Date.now(),
-      //     }
-      //   );
-      //   await Client.updateOne(
-      //     { userId },
-      //     { $inc: { "pagesAdded.success": 1 } }
-      //   );
-      // } else {
-      //   await TrainingModel.findByIdAndUpdate(
-      //     { userId: userId, "webPage.url": url },
-      //     {
-      //       trainingStatus: 2, // Error
-      //       lastEdit: Date.now(),
-      //       error: result?.result?.error,
-      //     }
-      //   );
-      //   await Client.updateOne(
-      //     { userId },
-      //     { $inc: { "pagesAdded.failed": 1 } }
-      //   );
-      // }
+   
       // Handle training failure
       if (!result.success) {
         // Mark all documents as failed if training failed
@@ -414,24 +365,6 @@ new Worker(
           client: await Client.findOne({ userId }),
           message: error?.message,
         });
-        // for (const doc of scrapedDocs) {
-        //   await TrainingModel.create({
-        //     userId,
-        //     type: 0,
-        //     content: doc.content,
-        //     dataSize: doc.dataSize,
-        //     trainingStatus: 2, // Failed
-        //     "webPage.url": doc.originalUrl,
-        //     chunkCount: 0,
-        //     lastEdit: Date.now(),
-        //     error: result.error
-        //   });
-
-        //   await Client.updateOne(
-        //     { userId },
-        //     { $inc: { "pagesAdded.failed": 1 } }
-        //   );
-        // }
       } else {
         // 3️⃣ Update training status in DB
         for (const doc of scrapedDocs) {

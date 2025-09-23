@@ -200,6 +200,7 @@ class PlanService {
         // Count chats in the current cycle
         totalChats = await Conversation.countDocuments({
           userId,
+          is_started: true,
           createdAt: { $gte: cycleStart, $lt: cycleEnd }
         });
       

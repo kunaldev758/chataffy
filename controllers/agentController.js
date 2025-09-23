@@ -162,7 +162,7 @@ exports.getAgent = async (req, res) => {
 // Update agent
 exports.updateAgent = async (req, res) => {
   try {
-    const { name, email, currentPassword, newPassword } = req.body;
+    const { name, currentPassword, newPassword } = req.body;
     const agent = await Agent.findById(req.params.id);
 
     if (!agent) {

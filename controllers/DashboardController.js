@@ -15,7 +15,8 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
         $gte: new Date(startDate),
         $lte: new Date(endDate),
       },
-      userId:userId
+      userId:userId,
+      is_started: true,
     }).countDocuments();
 
     const AiconversationCount = await Conversation.find({
@@ -25,6 +26,7 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
       },
       aiChat: true,
       userId:userId,
+      is_started: true,
     }).countDocuments();
 
     const totalMessages = await ChatMessage.find({
@@ -41,7 +43,8 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
         $gte: new Date(startDate),
         $lte: new Date(endDate),
       },
-      userId:userId
+      userId:userId,
+      is_started: true,
     }).countDocuments();
 
     let csat = 0;
@@ -86,6 +89,7 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
         // Count chats in the current cycle
         totalChatsInPlan = await Conversation.countDocuments({
           userId,
+          is_started: true,
           createdAt: { $gte: cycleStart, $lt: cycleEnd }
         });
       

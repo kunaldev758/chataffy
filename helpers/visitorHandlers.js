@@ -48,12 +48,12 @@ const initializeVisitorEvents = (io, socket) => {
   socket.on("visitor-connect", async ({ widgetToken }) => {
     try {
       // Fetch theme settings for the widget
-      const LimitAvailable = await checkPlanLimits(userId, "query");
-      if (!LimitAvailable.canMakeQueries) {
-        await Client.updateOne({ userId },{ $set: { "upgradePlanStatus.chatLimitExceeded": true }  });
-        socket.emit("visitor-connect-response-upgrade");
-        return;
-      }
+      // const LimitAvailable = await checkPlanLimits(userId, "query");
+      // if (!LimitAvailable.canMakeQueries) {
+      //   await Client.updateOne({ userId },{ $set: { "upgradePlanStatus.chatLimitExceeded": true }  });
+      //   socket.emit("visitor-connect-response-upgrade");
+      //   return;
+      // }
       const themeSettings = await Widget.findOne({ widgetToken });
 
       // Fetch the visitor's conversation history
@@ -120,6 +120,12 @@ const initializeVisitorEvents = (io, socket) => {
         conversation_id: conversationId,
       });
       if (messages.length <= 1) {
+        const LimitAvailable = await checkPlanLimits(userId, "query");
+        if (!LimitAvailable.canMakeQueries) {
+          await Client.updateOne({ userId },{ $set: { "upgradePlanStatus.chatLimitExceeded": true }  });
+          socket.emit("visitor-connect-response-upgrade");
+          return;
+        }
         await Conversation.findByIdAndUpdate(conversationId, {
           is_started: true,
         });

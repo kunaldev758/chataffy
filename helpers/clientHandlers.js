@@ -393,6 +393,17 @@ const initializeClientEvents = (io, socket) => {
     }
   );
 
+  socket.on("agent-deleted",async ({}, callback) => {
+    try {
+      // await AgentController.deleteAgent(agentId);
+      io.to(agentRoom).emit("agent-deleted-success");
+      // callback({ success: true });
+    } catch (error) {
+      // callback({ success: false, error: error.message });
+      console.error("agent-deleted error:", error.message);
+    }
+  });
+
   socket.on("close-ai-response", async ({ conversationId }, callback) => {
     try {
       await ConversationController.disableAiChat({ conversationId });

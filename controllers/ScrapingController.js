@@ -176,8 +176,8 @@ async bulkInsertUrls(userId, urls) {
       if (result.urlset && result.urlset.url) {
         urls = result.urlset.url.map((urlObj) => urlObj.loc[0]);
         console.log(`Found ${urls.length} URLs in regular sitemap: ${sitemapUrl}`);
-        if (urls.length >= 1000) {
-          urls = urls.slice(0, 1000); // Take only first 5000 URLs
+        if (urls.length >= 10000) {
+          urls = urls.slice(0, 10000); // Take only first 5000 URLs
           console.log(`URL limit reached. Returning first 5000 URLs from sitemap: ${sitemapUrl}`);
           return urls;
         }
@@ -192,7 +192,7 @@ async bulkInsertUrls(userId, urls) {
   
         // Recursively fetch URLs from each sitemap with better error handling
         for (const nestedSitemapUrl of sitemapUrls) {
-          if (urls.length >= 1000) {
+          if (urls.length >= 10000) {
             console.log(`URL limit of 5000 reached. Stopping sitemap processing.`);
             break;
           }
@@ -200,8 +200,8 @@ async bulkInsertUrls(userId, urls) {
             const nestedUrls = await this.extractUrlsFromSitemap(nestedSitemapUrl);
             urls.push(...nestedUrls);
             console.log(`Successfully extracted ${nestedUrls.length} URLs from nested sitemap: ${nestedSitemapUrl}`);
-            if (urls.length >= 1000) {
-              urls = urls.slice(0, 1000); // Trim to exactly 5000 URLs
+            if (urls.length >= 10000) {
+              urls = urls.slice(0, 10000); // Trim to exactly 5000 URLs
               console.log(`URL limit of 5000 reached after processing nested sitemap. Stopping and returning 5000 URLs.`);
               return urls;
             }
@@ -226,8 +226,8 @@ async bulkInsertUrls(userId, urls) {
   
       console.log(`Cleaned URLs: ${originalCount} -> ${urls.length} (removed ${originalCount - urls.length} invalid/duplicate URLs)`);
 
-      if (urls.length > 1000) {
-        urls = urls.slice(0, 1000);
+      if (urls.length > 10000) {
+        urls = urls.slice(0, 10000);
         console.log(`Final URL count exceeded 5000 after cleaning. Trimmed to exactly 5000 URLs.`);
       }
       
