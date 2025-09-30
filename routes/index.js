@@ -64,6 +64,7 @@ const superAdminController = require('../controllers/superAdminController');
 const scrapingController = require('../controllers/ScrapingController');
 const PlanAdminController = require('../controllers/PlanAdminController');
 const PlanController = require('../controllers/PlanController');
+const ConversationController = require('../controllers/ConversationController');
 const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
 
@@ -158,6 +159,7 @@ router.post('/agents/:id',middleware, agentController.updateAgent);
 router.post('/agents/delete/:id',middleware, agentController.deleteAgent);
 router.post('/agents/:id/status',middleware, agentController.updateAgentStatus);
 
+router.post('/sendEmailForOfflineChat', ConversationController.sendEmailForOfflineChatController);
 
 // Error handling middleware for multer errors
 router.use((error, req, res, next) => {

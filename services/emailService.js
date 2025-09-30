@@ -1,4 +1,5 @@
 const nodemailer = require("nodemailer");
+const User = require("../models/User")
 
 // Create a transporter using SMTP
 const transporter = nodemailer.createTransport({
@@ -94,8 +95,42 @@ const sendPlanDowngradeEmail = async (user, newPlanName) => {
   }
 };
 
+const sendEmailForOfflineChat = async (email,location,ip,reason, message,userId) => {
+  try {
+    const user = await User.findById(userId);
+  const mailOptions = {
+    from: process.env.SMTP_FROM,
+    to: user.email,
+    subject: "Offline Chat",
+    html: `
+      <h2>New Offline Chat Received</h2>
+      <p>You have received a new offline chat message. Here are the visitor details:</p>
+      <ul>
+        <li><strong>email:</strong> ${email}</li>
+        <li><strong>location:</strong> ${location}</li>
+        <li><strong>ip:</strong> ${ip}</li>
+        <li><strong>reason:</strong> ${reason}</li>
+      </ul>
+      <p><strong>Message:</strong></p>
+      <blockquote style="background:#f9f9f9;padding:10px;border-left:3px solid #ccc;">
+        ${message}
+      </blockquote>
+      <br/>
+      <p>Best regards,<br/>The Chataffy Team</p>
+    `,
+  };
+  await transporter.sendMail(mailOptions);
+  return true;
+  } catch (error) {
+    console.error("Error sending offline chat email:", error);
+    return false;
+  }
+};
+
+
 module.exports = {
   sendAgentApprovalEmail,
   sendPlanUpgradeEmail,
   sendPlanDowngradeEmail,
+  sendEmailForOfflineChat,
 };

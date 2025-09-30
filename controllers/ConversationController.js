@@ -2,7 +2,7 @@ const ConversationTag = require("../models/ConversationTag");
 const Conversation = require("../models/Conversation");
 const Visitor = require("../models/Visitor");
 const ChatMessage = require("../models/ChatMessage");
-
+const emailService = require("../services/emailService");
 const ConversationController = {};
 
 //get all old conversation
@@ -234,5 +234,18 @@ ConversationController.getConversationStats = async (timeframe = 'today') => {
     throw error;
   }
 };
+
+ConversationController.sendEmailForOfflineChatController = async (req, res) => {
+  try {
+    const visitorDetails = req.body.visitorDetails;
+    const message = req.body.message;
+    const userId = req.body.userId;
+    await emailService.sendEmailForOfflineChat(visitorDetails.email,visitorDetails.location,visitorDetails.ip,visitorDetails.reason, message,userId);
+    res.json({ success: true, message: "Email sent successfully" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to send email" });
+    throw error;
+  }
+}
 
 module.exports = ConversationController;
