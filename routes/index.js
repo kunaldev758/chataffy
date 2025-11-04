@@ -67,6 +67,7 @@ const PlanController = require('../controllers/PlanController');
 const ConversationController = require('../controllers/ConversationController');
 const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
+const BigCommerceController = require('../controllers/BigCommerceController');
 
 /* Public routes (no authentication required) */
 router.get('/test', (req, res) => {
@@ -160,6 +161,11 @@ router.post('/agents/delete/:id',middleware, agentController.deleteAgent);
 router.post('/agents/:id/status',middleware, agentController.updateAgentStatus);
 
 router.post('/sendEmailForOfflineChat', ConversationController.sendEmailForOfflineChatController);
+
+// BigCommerce OAuth and Integration Endpoints
+router.get('/bigcommerce/auth', BigCommerceController.startOAuth);
+router.get('/bigcommerce/auth/callback', BigCommerceController.oauthCallback);
+router.post('/bigcommerce/webhook', BigCommerceController.handleWebhook);
 
 // Error handling middleware for multer errors
 router.use((error, req, res, next) => {
