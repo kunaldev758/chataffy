@@ -45,7 +45,7 @@
     "redis": "^4.7.0",
     "robots-parser": "^3.0.1",
     "socket.io": "^4.7.3",
-    "turndown": "^7.2.0",
+    "turndown": "^7.2.2",
     "underscore": "^1.13.6",
     "uuid": "^11.1.0",
     "xlsx": "^0.18.5",

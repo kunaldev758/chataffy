@@ -1,5 +1,6 @@
 const commonHelper = require("../helpers/commonHelper.js");
 const Widget = require('../models/Widget');
+const User = require('../models/User');
 const ObjectId = require('mongoose').Types.ObjectId;
 const path = require('path');
 const fs = require('fs');
@@ -138,6 +139,14 @@ WidgetController.getBasicInfo = async (req, res) => {
     }
     
     const widget = await Widget.findOne({ userId });
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ 
+        status_code: 404, 
+        message: "User not found" 
+      });
+    }
     
     if (widget) {
       res.status(200).json({ 
@@ -146,7 +155,7 @@ WidgetController.getBasicInfo = async (req, res) => {
           website: widget.website,
           organisation: widget.organisation,
           fallbackMessage: widget.fallbackMessage,
-          email: widget.email,
+          email: widget.email ? widget.email : user.email,
           phone: widget.phone,
         }
       });

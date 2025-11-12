@@ -20,6 +20,14 @@ const userSchema = new Schema(
       type: Boolean,
       default: false,
     },
+    provider: {
+      type: String,
+      enum: ['local', 'google'],
+      default: 'local',
+    },
+    googleId: {
+      type: String,
+    },
     verification_token: {
       type: String,
     },
@@ -72,6 +80,7 @@ userSchema.methods.generateAuthToken = function () {
 
 // Compare the user's password with a given password
 userSchema.methods.comparePassword = async function (password) {
+  if (!this.password) return false;
   return await bcrypt.compare(password, this.password);
 };
 const User = mongoose.model("User", userSchema);

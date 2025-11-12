@@ -2,7 +2,7 @@ const OpenAIUsage = require('../models/OpenAIUsageSchema');
 const QdrantUsage = require('../models/qdrantUsageSchema');
 
 
-async function logOpenAIUsage({ userId, tokens, requests, cost=0, model = 'gpt-4o' }) {
+async function logOpenAIUsage({ userId, tokens, requests, cost=0, model = 'gpt-4.1' }) {
   if (!userId) throw new Error('Missing userId for OpenAI usage log.');
   return OpenAIUsage.create({
     userId,

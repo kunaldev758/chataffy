@@ -8,6 +8,7 @@ const { readFileContent } = require("../utils/fileReader.js");
 const appEvents = require("../events.js");
 const axios = require("axios");
 const xml2js = require("xml2js");
+const cheerio = require("cheerio");
 const { urlProcessingQueue } = require("../services/jobService.js");
 
 class ScrapingController {
@@ -138,6 +139,138 @@ async bulkInsertUrls(userId, urls) {
 
   async extractUrlsFromSitemap(sitemapUrl) {
     try {
+      // If a website URL (not a sitemap) is provided, try to discover sitemaps or fallback to homepage links
+      let urls = [];
+      let isWebsiteUrl = false;
+      let origin = null;
+      try {
+        const parsed = new URL(sitemapUrl);
+        origin = parsed.origin;
+        isWebsiteUrl = !parsed.pathname.toLowerCase().endsWith(".xml");
+      } catch (_) {
+        // Not a valid URL; continue to existing logic which will handle and return []
+      }
+
+      if (isWebsiteUrl && origin) {
+        console.log(`Website URL provided. Attempting discovery for: ${sitemapUrl}`);
+
+        // 1) robots.txt -> look for Sitemap: entries
+        try {
+          const robotsResponse = await axios.get(`${origin}/robots.txt`, {
+            timeout: 15000,
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
+            validateStatus: (status) => status < 500,
+          });
+          if (robotsResponse.status === 200 && typeof robotsResponse.data === "string") {
+            const lines = robotsResponse.data.split(/\r?\n/);
+            const sitemapLines = lines.filter((l) => /^\s*sitemap\s*:/i.test(l));
+            const discoveredSitemaps = sitemapLines
+              .map((l) => l.split(":")[1])
+              .filter(Boolean)
+              .map((v) => v.trim())
+              .filter((v) => v.startsWith("http"));
+
+            for (const smUrl of discoveredSitemaps) {
+              try {
+                const found = await this.extractUrlsFromSitemap(smUrl);
+                urls.push(...found);
+                if (urls.length >= 10000) break;
+              } catch (e) {
+                console.warn(`Failed to extract from robots sitemap ${smUrl}: ${e.message}`);
+              }
+            }
+
+            if (urls.length > 0) {
+              // Clean & limit consistent with existing behavior
+              const originalCount = urls.length;
+              urls = urls
+                .filter((url) => url && typeof url === "string")
+                .filter((url) => url.startsWith("http"))
+                .map((url) => url.trim())
+                .filter((url, index, self) => self.indexOf(url) === index);
+              console.log(`(robots.txt) Cleaned URLs: ${originalCount} -> ${urls.length}`);
+              if (urls.length > 10000) urls = urls.slice(0, 10000);
+              return urls;
+            }
+          }
+        } catch (e) {
+          console.warn(`robots.txt check failed for ${origin}: ${e.message}`);
+        }
+
+        // 2) Try common sitemap locations
+        const commonSitemapPaths = [
+          "/sitemap.xml",
+          "/sitemap_index.xml",
+          "/sitemap-index.xml",
+          "/sitemap1.xml",
+          "/sitemap/sitemap.xml",
+          "/sitemap/news.xml",
+        ];
+        for (const path of commonSitemapPaths) {
+          if (urls.length >= 10000) break;
+          const candidate = `${origin}${path}`;
+          try {
+            const found = await this.extractUrlsFromSitemap(candidate);
+            urls.push(...found);
+          } catch (e) {
+            // ignore and try next
+          }
+        }
+        if (urls.length > 0) {
+          const originalCount = urls.length;
+          urls = urls
+            .filter((url) => url && typeof url === "string")
+            .filter((url) => url.startsWith("http"))
+            .map((url) => url.trim())
+            .filter((url, index, self) => self.indexOf(url) === index);
+          console.log(`(common paths) Cleaned URLs: ${originalCount} -> ${urls.length}`);
+          if (urls.length > 10000) urls = urls.slice(0, 10000);
+          return urls;
+        }
+
+        // 3) Fallback: extract links from homepage HTML (same-origin, limited)
+        try {
+          const htmlResponse = await axios.get(sitemapUrl, {
+            timeout: 20000,
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
+            validateStatus: (status) => status < 500,
+          });
+          if (htmlResponse.status === 200 && typeof htmlResponse.data === "string") {
+            const $ = cheerio.load(htmlResponse.data);
+            const sameOrigin = new Set();
+            $("a[href]").each((_, el) => {
+              const href = ($(el).attr("href") || "").trim();
+              if (!href) return;
+              try {
+                const absolute = new URL(href, origin).toString();
+                if (absolute.startsWith(origin)) {
+                  sameOrigin.add(absolute);
+                }
+              } catch (_) {}
+            });
+            urls = Array.from(sameOrigin).slice(0, 500); // conservative cap for homepage crawl
+
+            if (urls.length > 0) {
+              const originalCount = urls.length;
+              urls = urls
+                .filter((url) => url && typeof url === "string")
+                .filter((url) => url.startsWith("http"))
+                .map((url) => url.trim())
+                .filter((url, index, self) => self.indexOf(url) === index);
+              console.log(`(homepage) Cleaned URLs: ${originalCount} -> ${urls.length}`);
+              if (urls.length > 10000) urls = urls.slice(0, 10000);
+              return urls;
+            }
+          }
+        } catch (e) {
+          console.warn(`Homepage fallback failed for ${sitemapUrl}: ${e.message}`);
+        }
+
+        // If all discovery strategies failed, return empty
+        console.warn(`No sitemap or links discovered for website URL: ${sitemapUrl}`);
+        return [];
+      }
+
       console.log(`Fetching sitemap: ${sitemapUrl}`);
       
       const response = await axios.get(sitemapUrl, {
@@ -170,7 +303,7 @@ async bulkInsertUrls(userId, urls) {
   
       const parser = new xml2js.Parser();
       const result = await parser.parseStringPromise(response.data);
-      let urls = [];
+      urls = [];
   
       // Handle regular sitemap
       if (result.urlset && result.urlset.url) {

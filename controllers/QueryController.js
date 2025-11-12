@@ -6,13 +6,13 @@ const ChatMessageController = require("../controllers/ChatMessageController");
 const Client = require("../models/Client");
 const Widget = require("../models/Widget");
 
-const {logOpenAIUsage} = require("../services/UsageTrackingService");
+const { logOpenAIUsage } = require("../services/UsageTrackingService");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 // Define models used in this service
-const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-ada-002";
-const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o";
+const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
+const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4.1";
 
 // --- Initialize Clients ---
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -57,30 +57,85 @@ class QuestionAnsweringSystem {
       .join("\n");
   }
 
-  async generateAnswer(question, context, chatHistory, organisation) {
-    const systemPrompt = `You are a helpful chat agent for ${organisation}.
+  async generateAnswer(
+    question,
+    context,
+    chatHistory,
+    organisation,
+    fallbackMessage,
+    email
+  ) {
+    // const systemPrompt = `You are a helpful chat agent for ${organisation}.
 
-    Behavior Guidelines:
-    - Always be professional, friendly, and helpful.
-    - Respond to greetings (e.g., "Hi", "Hello") with a warm, welcoming message before offering help.
-    - Answer questions using the provided context related to ${organisation}.
-    - If the context does not include the answer, politely say that you couldn't find the information in the knowledge base. Do not guess or fabricate answers.
-    - If a question is unrelated to ${organisation} or the provided context, gently inform the user that you can only answer questions about ${organisation}.
-    - If information is missing, suggest visiting the official website or contacting support for further assistance.
-   
-    
-    Response Format:
-    - Use clear and concise language.
-    - Format all responses using HTML for better readability (e.g., use <p>, <ul>, <strong>).
-    - Whenever possible, present your answer in concise bullet points for clarity.
-    - Prioritize brief, direct responses over lengthy explanations.
-    - Avoid unnecessary elaboration; focus on delivering clear, actionable information.
-    Example behaviors:
-    - Greeting: If the user says "Hi", respond with something like "<p>Hello! 👋 How can I assist you today regarding ${organisation}?</p>"
-    
-    Maintain a friendly, professional tone throughout.`;
+    // Behavior Guidelines:
+    // - Always be professional, friendly, and helpful.
+    // - Respond to greetings (e.g., "Hi", "Hello") with a warm, welcoming message before offering help.
+    // - Answer questions using the provided context related to ${organisation}.
+    // - If the context does not include the answer, politely say that you couldn't find the information in the knowledge base. Do not guess or fabricate answers.
+    // - If a question is unrelated to ${organisation} or the provided context, gently inform the user that you can only answer questions about ${organisation}.
+    // - If information is missing, suggest visiting the official website or contacting support for further assistance.
 
-    const userPrompt = `Context from knowledge base:\n---\n${context}\n---\n\nChat History:\n---\n${chatHistory}\n---\n\nBased on the provided context and chat history, answer the following question:\nQuestion: ${question}`;
+    // Response Format:
+    // - Use clear and concise language.
+    // - Format all responses using HTML for better readability (e.g., use <p>, <ul>, <strong>).
+    // - Whenever possible, present your answer in concise bullet points for clarity.
+    // - Prioritize brief, direct responses over lengthy explanations.
+    // - Avoid unnecessary elaboration; focus on delivering clear, actionable information.
+    // Example behaviors:
+    // - Greeting: If the user says "Hi", respond with something like "<p>Hello! 👋 How can I assist you today regarding ${organisation}?</p>"
+
+    // Maintain a friendly, professional tone throughout.`;
+    // - If information seems incomplete, say that ${fallbackMessage}.
+    // - If the content is lengthy, summarize briefly and then suggest contacting on email ${email}.
+
+    // - Ensure links are clickable and styled differently from normal text.
+    // - Answer only questions related to ${organisation}, using the provided context.
+    const systemPrompt = `You are a professional, friendly, and helpful chat agent for ${organisation}. 
+
+Behavior Guidelines:
+- Maintain a warm, approachable, and professional tone.
+- Respond naturally — **do not greet in every reply**. Only greet once at the very start of a new chat or if the user greets first and no greeting has been exchanged yet.
+
+- If the answer is not found in the context,say that ${fallbackMessage} .
+- If a question is unrelated to ${organisation}, respond that you can only answer queries related to ${organisation}.
+
+
+Response Format:
+- Use clean, readable **HTML**.
+- Keep responses concise and clear.
+- Prefer **bullet points (<ul><li>…</li></ul>)** for multiple facts or items.
+- Highlight important terms with **<strong>…</strong>**.
+- Format links so they are visually distinct, e.g.:
+  <a href="https://example.com" target="_blank" style="color:#007bff; text-decoration:underline;">Visit here</a>
+- Avoid unnecessary repetition or greetings in consecutive messages.
+
+Example behaviors:
+- First greeting in a new chat: "<p>Hello! 👋 How can I assist you today regarding ${organisation}?</p>"
+- Follow-up answers: "<p>Here’s the information you asked for:</p><ul>…</ul>"
+
+General Notes:
+- Always try to provide a complete response — don’t cut off mid-sentence. 
+- Never fabricate links — only use those provided in context.
+`;
+
+    // const userPrompt = `Context from knowledge base:\n---\n${context}\n---\n\nChat History:\n---\n${chatHistory}\n---\n\nBased on the provided context and chat history, answer the following question:\nQuestion: ${question}`;
+
+    const userPrompt = `Context from knowledge base:
+---
+${context}
+---
+
+Chat History:
+---
+${chatHistory}
+---
+
+Based on the provided context and chat history, answer the following user question in HTML format:
+Question: ${question}
+
+Important:
+- If the answer is long, summarize key points first, then mention where to find full details.
+- Provide a natural, complete response without abrupt cutoffs.`;
 
     try {
       const response = await openai.chat.completions.create({
@@ -89,8 +144,8 @@ class QuestionAnsweringSystem {
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
-        temperature: 0.5,
-        max_tokens: 200,
+        temperature: 0.6,
+        max_tokens: 1000,
       });
 
       const answer =
@@ -192,7 +247,7 @@ class QuestionAnsweringSystem {
   }
 
   async getAnswer(userId, question, conversationId, options = {}) {
-    const { topK = 5, scoreThreshold = 0.7 } = options;
+    const { topK = 5, scoreThreshold = 0.4 } = options;
 
     try {
       // 1. Get Chat History
@@ -244,9 +299,9 @@ class QuestionAnsweringSystem {
 
       if (relevantMatches.length === 0) {
         // Default answer when no relevant context found
-        finalAnswer = `I couldn't find specific information about "${question}" in the knowledge base. You might find helpful information on the ${
-          widgetData.organisation || "company"
-        } website: ${widgetData.website || "(Website not provided)"}`;
+        finalAnswer =
+          widgetData.fallbackMessage ||
+          `I couldn't find specific information about your question in the knowledge base. You might contact support on ${widgetData.email || "support@example.com"}`;
       } else {
         // 6. Get Context and Generate Answer via LLM
         const context = this.getRelevantContext(relevantMatches);
@@ -256,10 +311,13 @@ class QuestionAnsweringSystem {
             question,
             context,
             chatHistory,
-            widgetData.organisation || "the company"
+            widgetData.organisation || "the company",
+            widgetData.fallbackMessage ||
+              "I couldn't find specific information about your question in the knowledge base. You might contact support",
+            widgetData.email || "support@example.com"
           );
         finalAnswer = generatedAnswer;
-        logOpenAIUsage({userId, tokens:llmUsage.total_tokens, requests:1})
+        logOpenAIUsage({ userId, tokens: llmUsage.total_tokens, requests: 1 });
       }
 
       // 10. Prepare Sources
