@@ -163,6 +163,17 @@ const widgetSchema = new Schema(
       type: Number,
       default: 1, // 1=active, 0=inactive
     },
+    // AI query settings
+    scoreThreshold: {
+      type: Number,
+      default: 0.4, // Similarity score threshold for Qdrant search (0.0-1.0)
+      min: 0.0,
+      max: 1.0,
+      // Recommended ranges:
+      // 0.2-0.3: Very permissive, may include irrelevant results
+      // 0.4-0.5: Balanced (default)
+      // 0.6-0.7: Strict, may miss some relevant results
+    },
   },
   { timestamps: true }
 );

@@ -5,8 +5,10 @@ const QdrantVectorStoreManager = require("./QdrantService");
 
 class BatchTrainingService {
   constructor() {
-    this.CHUNK_SIZE = 300; // tokens
-    this.CHUNK_OVERLAP = 50; // tokens
+    // Increased chunk size for better semantic context
+    // 500 tokens = ~2000 chars provides better context for embeddings
+    this.CHUNK_SIZE = 500; // tokens (increased from 300)
+    this.CHUNK_OVERLAP = 100; // tokens (increased from 50 for better continuity)
     this.CHARS_PER_TOKEN = 4; // Rough estimate
   }
 
@@ -72,7 +74,7 @@ class BatchTrainingService {
           ...chunk,
           metadata: {
             ...doc.metadata,
-            user_id: userId,
+            user_id: userId?.toString(), // Ensure user_id is always a string for Qdrant filtering
             chunk_index: index,
             total_chunks: chunks.length,
             created_at: new Date().toISOString(),

@@ -76,15 +76,23 @@ class QdrantVectorStoreManager {
       console.log(`Generated ${embeddings.length} embeddings, creating points...`);
 
 
-      const points = documents.map((doc, i) => ({
-        id: uuidv4(),
-        vector: embeddings[i],
-        payload: {
-          ...doc.metadata,
-          text: doc.pageContent,
-          created_at: new Date().toISOString(),
-        },
-      }));
+      const points = documents.map((doc, i) => {
+        // Ensure user_id is a string for proper filtering in Qdrant
+        const metadata = { ...doc.metadata };
+        if (metadata.user_id) {
+          metadata.user_id = metadata.user_id.toString();
+        }
+        
+        return {
+          id: uuidv4(),
+          vector: embeddings[i],
+          payload: {
+            ...metadata,
+            text: doc.pageContent,
+            created_at: new Date().toISOString(),
+          },
+        };
+      });
 
 
       // const points = documents.map((doc, i) => {
