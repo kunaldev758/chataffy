@@ -430,12 +430,8 @@ async bulkInsertUrls(userId, urls) {
         });
       }
       //here updte the mongodb that scrapping started
-      if (sitemapUrl) {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 1 } });
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
-        });
-      }
+      const scrapingStartTime = new Date();
+      
       // Fetch and parse sitemap
       let urls = [];
       if (sitemapUrl) {
@@ -475,7 +471,27 @@ async bulkInsertUrls(userId, urls) {
       if (urls.length == 0) {
         await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
         appEvents.emit("userEvent", userId, "training-event", {
-          message: "No urls found",
+          message: "Sitemap not found or no urls found in sitemap",
+          client: await Client.findOne({ userId }),
+        });
+        return res.json({
+          success: false,
+          error: "Sitemap not found or no urls found in sitemap",
+        });
+      }
+
+      // Set scraping status and start time before starting the queue
+      await Client.updateOne({ 
+        userId 
+      }, { 
+        $set: { 
+          dataTrainingStatus: 1,
+          scrapingStartTime: scrapingStartTime
+        } 
+      });
+      
+      if (sitemapUrl) {
+        appEvents.emit("userEvent", userId, "training-event", {
           client: await Client.findOne({ userId }),
         });
       }
@@ -496,7 +512,9 @@ async bulkInsertUrls(userId, urls) {
         userId,
         qdrantIndexName,
         plan,
-        sitemapUrl:true,
+        sitemapUrl: !!sitemapUrl,
+        startTime: scrapingStartTime.getTime(),
+        totalUrls: urls.length,
       });
 
 
@@ -555,7 +573,15 @@ async bulkInsertUrls(userId, urls) {
           message: "No URL found to scrape",
         });
       } else {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 1 } });
+        const scrapingStartTime = new Date();
+        await Client.updateOne({ 
+          userId 
+        }, { 
+          $set: { 
+            dataTrainingStatus: 1,
+            scrapingStartTime: scrapingStartTime
+          } 
+        });
         appEvents.emit("userEvent", userId, "training-event", {
           client: await Client.findOne({ userId }),
         });
@@ -565,7 +591,9 @@ async bulkInsertUrls(userId, urls) {
           userId,
           qdrantIndexName,
           plan,
-          sitemapUrl:false,
+          sitemapUrl: false,
+          startTime: scrapingStartTime.getTime(),
+          totalUrls: remainingUrls.length,
         });
       }
 
@@ -1011,9 +1039,9 @@ async bulkInsertUrls(userId, urls) {
     }
   }
 
-  // Updated createFaq with validation
+  // Updated createFaq with validation - now handles array of FAQs
   async createFaq(req, res) {
-    const { question, answer } = req.body;
+    const { faqs } = req.body;
     const userId = req.body.userId;
 
     try {
@@ -1022,6 +1050,15 @@ async bulkInsertUrls(userId, urls) {
         return res
           .status(404)
           .json({ status: false, message: "Client not found" });
+      }
+
+      // Validate that faqs is an array
+      if (!Array.isArray(faqs) || faqs.length === 0) {
+        return res.status(400).json({
+          status: false,
+          message: "FAQs array is required and must not be empty",
+          errorCode: "INVALID_INPUT",
+        });
       }
 
       const qdrantIndexName =
@@ -1036,96 +1073,151 @@ async bulkInsertUrls(userId, urls) {
         client: await Client.findOne({ userId }),
       });
 
-      // Validate FAQ content
-      const faqValidation = await ContentValidationService.validateFAQ(
-        question,
-        answer,
-        userId
-      );
+      const documentsToProcess = [];
+      const trainingEntries = [];
+      const validationErrors = [];
 
-      if (!faqValidation.isValid) {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
-          message: faqValidation.error,
+      // Process each FAQ in the array
+      for (let i = 0; i < faqs.length; i++) {
+        const faq = faqs[i];
+        const { question, answer } = faq;
+
+        // Skip empty FAQs
+        if (!question || !answer || !question.trim() || !answer.trim()) {
+          validationErrors.push({
+            index: i,
+            id: faq.id,
+            error: "Question and answer are required",
+            errorCode: "MISSING_FIELDS",
+          });
+          continue;
+        }
+
+        // Validate FAQ content
+        const faqValidation = await ContentValidationService.validateFAQ(
+          question,
+          answer,
+          userId
+        );
+
+        if (!faqValidation.isValid) {
+          validationErrors.push({
+            index: i,
+            id: faq.id,
+            error: faqValidation.error,
+            errorCode: faqValidation.errorCode,
+            field: faqValidation.field,
+          });
+          continue;
+        }
+
+        // Create training model entry
+        const trainingList = new TrainingModel({
+          userId,
+          title: question,
+          type: 3, // FAQ
+          content: faqValidation.cleanContent,
+          trainingStatus: 0, // Not Started
+          dataSize: faqValidation.contentSize,
+          metadata: {
+            chunkCount: 0,
+          },
         });
-        return res.status(400).json({
-          status: false,
-          // message: faqValidation.error,
-          errorCode: faqValidation.errorCode,
-          field: faqValidation.field,
-          // details: {
-          //   currentLength: faqValidation.currentLength,
-          //   requiredLength: faqValidation.requiredLength,
-          //   sizeInfo: faqValidation.sizeInfo,
-          // },
+
+        await trainingList.save();
+        trainingEntries.push({ model: trainingList, question });
+
+        // Add to documents for batch processing
+        documentsToProcess.push({
+          type: 3,
+          content: faqValidation.cleanContent,
+          metadata: {
+            title: question,
+            question: question,
+            answer: answer,
+            type: "faq",
+            user_id: userId,
+          },
         });
       }
 
-      const trainingList = new TrainingModel({
-        userId,
-        title: question,
-        type: 3, // FAQ
-        content: faqValidation.cleanContent,
-        trainingStatus: 0, // Not Started
-        dataSize: faqValidation.contentSize,
-        metadata: {
-          chunkCount: 0,
-        },
-      });
+      // If no valid FAQs after validation, return error
+      if (documentsToProcess.length === 0) {
+        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+        appEvents.emit("userEvent", userId, "training-event", {
+          client: await Client.findOne({ userId }),
+          message: "No valid FAQs to process",
+        });
+        return res.status(400).json({
+          status: false,
+          message: "No valid FAQs to process",
+          errorCode: "NO_VALID_FAQS",
+          validationErrors: validationErrors,
+        });
+      }
 
-      await trainingList.save();
-
-      const document = [{
-        type: 3,
-        content: faqValidation.cleanContent,
-        metadata: {
-          title: question,
-          question: question,
-          answer: answer,
-          type: "faq",
-          user_id: userId,
-          // plan: plan.name,
-          // wordCount: faqValidation.wordCount,
-          // estimatedTokens: faqValidation.estimatedTokens,
-        },
-      }];
-
+      // Process all valid FAQs in batch
       const batchService = new batchTrainingService();
-
-      // processDocumentAndTrain(document, userId, qdrantIndexName, false)
       let result = await batchService.processDocumentAndTrain(
-        document,
+        documentsToProcess,
         userId,
         qdrantIndexName,
         false
       );
+
       if (result.success) {
-        await TrainingModel.findOneAndUpdate(
-          { userId: userId, title: question },
-          {
-            trainingStatus: 1, // Completed
-            chunkCount: result.totalChunks,
-            lastEdit: Date.now(),
+        // Update all successfully processed FAQs
+        const totalChunks = result.totalChunks || 0;
+        const chunksPerFaq = Math.floor(totalChunks / trainingEntries.length);
+
+        for (let i = 0; i < trainingEntries.length; i++) {
+          const { model, question } = trainingEntries[i];
+          // Distribute chunks evenly, last entry gets remainder
+          const chunkCount = i === trainingEntries.length - 1 
+            ? totalChunks - (chunksPerFaq * (trainingEntries.length - 1))
+            : chunksPerFaq;
+
+          await TrainingModel.findOneAndUpdate(
+            { _id: model._id },
+            {
+              trainingStatus: 1, // Completed
+              chunkCount: chunkCount,
+              lastEdit: Date.now(),
+            }
+          );
+        }
+
+        await Client.updateOne(
+          { userId: userId },
+          { 
+            $inc: { faqsAdded: documentsToProcess.length },
+            $set: { dataTrainingStatus: 0 }
           }
         );
-        await Client.updateOne({ userId: userId }, { $inc: { faqsAdded: 1 } });
-
-        // Update client flags
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
 
         appEvents.emit("userEvent", userId, "training-event", {
           client: await Client.findOne({ userId }),
         });
+
+        res.status(201).json({
+          status_code: 200,
+          message: `${documentsToProcess.length} FAQ(s) validated and processed successfully`,
+          processed: documentsToProcess.length,
+          failed: validationErrors.length,
+          validationErrors: validationErrors.length > 0 ? validationErrors : undefined,
+        });
       } else {
-        await TrainingModel.findByIdAndUpdate(
-          { userId: userId, title: question },
-          {
-            trainingStatus: 2, // Error
-            lastEdit: Date.now(),
-            error: result?.error,
-          }
-        );
+        // Mark all as failed
+        for (const { model } of trainingEntries) {
+          await TrainingModel.findByIdAndUpdate(
+            model._id,
+            {
+              trainingStatus: 2, // Error
+              lastEdit: Date.now(),
+              error: result?.error,
+            }
+          );
+        }
 
         // Update client flags
         await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
@@ -1134,12 +1226,14 @@ async bulkInsertUrls(userId, urls) {
           client: await Client.findOne({ userId }),
           message: "failed to train data",
         });
-      }
 
-      res.status(201).json({
-        status_code: 200,
-        message: "FAQ validated and queued for processing successfully",
-      });
+        res.status(500).json({
+          status: false,
+          message: "Failed to process FAQs",
+          errorCode: "TRAINING_FAILED",
+          error: result?.error,
+        });
+      }
     } catch (error) {
       await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
 

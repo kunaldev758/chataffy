@@ -4,18 +4,18 @@ class ContentValidationService {
   
   // Minimum content lengths for each type
   static MIN_LENGTHS = {
-    snippet: 50,
-    file: 100,
-    faq: 30,
-    webpage: 200
+    snippet: 10,
+    file: 10,
+    faq: 1,
+    webpage: 10
   };
 
   // Maximum content lengths for each type
   static MAX_LENGTHS = {
-    snippet: 100000,  // 100KB
-    file: 10000000,   // 10MB
-    faq: 10000,       // 10KB
-    webpage: 5000000  // 5MB
+    snippet: 10000000,  // 100KB
+    file: 1000000000,   // 10MB
+    faq: 1000000,       // 10KB
+    webpage: 500000000  // 5MB
   };
 
   /**
@@ -39,7 +39,7 @@ class ContentValidationService {
       const trimmedContent = content.trim();
       
       // Check minimum length
-      const minLength = this.MIN_LENGTHS[type] || 50;
+      const minLength = this.MIN_LENGTHS[type] || 5;
       if (trimmedContent.length < minLength) {  
         return {
           isValid: false,
@@ -63,13 +63,13 @@ class ContentValidationService {
       // }
 
       // Check for meaningful content (not just whitespace or repeated characters)
-      if (!this.hasMeaningfulContent(trimmedContent)) {
-        return {
-          isValid: false,
-          error: "Content appears to be empty or contains only whitespace/repeated characters",
-          errorCode: "CONTENT_NOT_MEANINGFUL"
-        };
-      }
+      // if (!this.hasMeaningfulContent(trimmedContent)) {
+      //   return {
+      //     isValid: false,
+      //     error: "Content appears to be empty or contains only whitespace/repeated characters",
+      //     errorCode: "CONTENT_NOT_MEANINGFUL"
+      //   };
+      // }
 
       // Check plan limits
       const contentSize = Buffer.byteLength(trimmedContent, 'utf8');
@@ -85,14 +85,14 @@ class ContentValidationService {
       }
 
       // Check for potential spam content
-      const spamCheck = this.checkForSpam(trimmedContent);
-      if (!spamCheck.isValid) {
-        return {
-          isValid: false,
-          error: spamCheck.error,
-          errorCode: "SPAM_DETECTED"
-        };
-      }
+      // const spamCheck = this.checkForSpam(trimmedContent);
+      // if (!spamCheck.isValid) {
+      //   return {
+      //     isValid: false,
+      //     error: spamCheck.error,
+      //     errorCode: "SPAM_DETECTED"
+      //   };
+      // }
 
       return {
         isValid: true,
@@ -123,13 +123,13 @@ class ContentValidationService {
     
     // Check if content is just repeated characters
     const uniqueChars = new Set(normalized.toLowerCase().replace(/\s/g, ''));
-    if (uniqueChars.size < 5) {
+    if (uniqueChars.size < 2) {
       return false;
     }
 
     // Check for minimum word count
     const wordCount = this.getWordCount(normalized);
-    if (wordCount < 5) {
+    if (wordCount < 2) {
       return false;
     }
 

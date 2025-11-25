@@ -202,7 +202,7 @@ widgetSchema.pre('save', function(next) {
         type: 'text',
         placeholder: 'Enter your name',
         required: true,
-        validation: { minLength: 2, maxLength: 50 }
+        validation: { minLength: 1, maxLength: 100 }
       },
       { 
         id: 2, 
@@ -220,7 +220,7 @@ widgetSchema.pre('save', function(next) {
         type: 'tel',
         placeholder: 'Enter your phone number',
         required: false,
-        validation: { minLength: 10, maxLength: 15 }
+        validation: { minLength: 3, maxLength: 15 }
       },
     ];
   }

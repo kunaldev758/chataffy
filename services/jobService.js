@@ -182,7 +182,7 @@ const urlProcessingQueue = new Queue("urlProcessingQueue", {
 new Worker(
   "urlProcessingQueue",
   async (job) => {
-    const { urls, userId, qdrantIndexName, plan,sitemapUrl } = job.data;
+    const { urls, userId, qdrantIndexName, plan, sitemapUrl, startTime, totalUrls } = job.data;
     try {
       const batchService = new batchTrainingService();
 
@@ -198,6 +198,53 @@ new Worker(
       let scrapedDocs = [];
       let currentDataSize = 0;
       const footerCache = {};
+      
+      // Use startTime from job data or current time as fallback
+      const scrapingStartTime = startTime ? new Date(startTime) : new Date();
+      const totalUrlsCount = totalUrls || urls.length;
+      let lastProgressEmitTime = Date.now();
+      const PROGRESS_EMIT_INTERVAL = 2000; // Emit progress every 2 seconds
+
+      // Helper function to calculate and emit progress
+      const emitProgress = async (currentIndex, totalCount, isProcessing = true) => {
+        const now = Date.now();
+        const elapsedTime = Math.floor((now - scrapingStartTime.getTime()) / 1000); // seconds
+        const percentage = totalCount > 0 ? Math.round((currentIndex / totalCount) * 100) : 0;
+        
+        // Calculate estimated time remaining
+        let estimatedTimeRemaining = null;
+        if (currentIndex > 0 && elapsedTime > 0) {
+          const avgTimePerUrl = elapsedTime / currentIndex;
+          const remainingUrls = totalCount - currentIndex;
+          estimatedTimeRemaining = Math.round(remainingUrls * avgTimePerUrl);
+        }
+
+        // Format time as HH:MM:SS
+        const formatTime = (seconds) => {
+          const hrs = Math.floor(seconds / 3600);
+          const mins = Math.floor((seconds % 3600) / 60);
+          const secs = seconds % 60;
+          return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        };
+
+        // Emit progress update
+        appEvents.emit("userEvent", userId, "training-event", {
+          client: await Client.findOne({ userId }),
+          scrapingProgress: {
+            percentage,
+            processed: currentIndex,
+            total: totalCount,
+            elapsedTime: formatTime(elapsedTime),
+            elapsedSeconds: elapsedTime,
+            estimatedTimeRemaining: estimatedTimeRemaining ? formatTime(estimatedTimeRemaining) : null,
+            estimatedSecondsRemaining: estimatedTimeRemaining,
+            isProcessing,
+          },
+        });
+      };
+
+      // Emit initial progress
+      await emitProgress(0, totalUrlsCount, true);
 
       for (let i = 0; i < urls.length; i++) {
         const url = urls[i];
@@ -206,6 +253,13 @@ new Worker(
 
            // Extend lock by updating progress
           await job.updateProgress({ current: i + 1, total: urls.length });
+          
+          // Emit progress updates periodically (every 2 seconds or every URL)
+          const now = Date.now();
+          if (now - lastProgressEmitTime >= PROGRESS_EMIT_INTERVAL || i === 0 || i === urls.length - 1) {
+            await emitProgress(i + 1, totalUrlsCount, true);
+            lastProgressEmitTime = now;
+          }
 
           const response = await axios.get(url, {
             timeout: 30000, // 30 second timeout
@@ -243,10 +297,31 @@ new Worker(
               { userId },
               { $set: { "upgradePlanStatus.storageLimitExceeded": true } }
             );
+            
+            // Emit progress before stopping due to storage limit
+            const storageLimitElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
+            const formatTimeForLimit = (seconds) => {
+              const hrs = Math.floor(seconds / 3600);
+              const mins = Math.floor((seconds % 3600) / 60);
+              const secs = seconds % 60;
+              return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+            };
+            
             appEvents.emit("userEvent", userId, "training-event", {
               client: await Client.findOne({ userId }),
               message:
                 "Storage limit exceede scrapping Stopped Upgrage Plan to continue",
+              scrapingProgress: {
+                percentage: totalUrlsCount > 0 ? Math.round(((i + 1) / totalUrlsCount) * 100) : 0,
+                processed: i + 1,
+                total: totalUrlsCount,
+                elapsedTime: formatTimeForLimit(storageLimitElapsedTime),
+                elapsedSeconds: storageLimitElapsedTime,
+                estimatedTimeRemaining: null,
+                estimatedSecondsRemaining: null,
+                isProcessing: false,
+                stoppedReason: "storage_limit_exceeded",
+              },
             });
             break;
           } else {
@@ -291,6 +366,35 @@ new Worker(
             }
           );
         }
+      }
+
+      // Emit progress after all URLs are scraped (before training phase)
+      const scrapedElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
+      const formatTimeAfterScrape = (seconds) => {
+        const hrs = Math.floor(seconds / 3600);
+        const mins = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+        return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+      };
+      
+      await emitProgress(urls.length, totalUrlsCount, true);
+      
+      // Emit update indicating training phase is starting
+      if (scrapedDocs.length > 0) {
+        appEvents.emit("userEvent", userId, "training-event", {
+          client: await Client.findOne({ userId }),
+          scrapingProgress: {
+            percentage: 100,
+            processed: urls.length,
+            total: totalUrlsCount,
+            elapsedTime: formatTimeAfterScrape(scrapedElapsedTime),
+            elapsedSeconds: scrapedElapsedTime,
+            estimatedTimeRemaining: null,
+            estimatedSecondsRemaining: null,
+            isProcessing: true,
+            phase: "training", // Indicates we're in training phase now
+          },
+        });
       }
 
       //make this a queue
@@ -361,15 +465,59 @@ new Worker(
         }
       }
 
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0, scrapingStartTime: null } });
+      
+      // Emit final progress (100%)
+      const finalElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
+      const formatTime = (seconds) => {
+        const hrs = Math.floor(seconds / 3600);
+        const mins = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+        return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+      };
+      
       appEvents.emit("userEvent", userId, "training-event", {
         client: await Client.findOne({ userId }),
+        scrapingProgress: {
+          percentage: 100,
+          processed: totalUrlsCount,
+          total: totalUrlsCount,
+          elapsedTime: formatTime(finalElapsedTime),
+          elapsedSeconds: finalElapsedTime,
+          estimatedTimeRemaining: null,
+          estimatedSecondsRemaining: null,
+          isProcessing: false,
+        },
       });
     } catch (error) {
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0, scrapingStartTime: null } });
+      
+      // Calculate progress even on error
+      const errorElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
+      const formatTime = (seconds) => {
+        const hrs = Math.floor(seconds / 3600);
+        const mins = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+        return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+      };
+      
+      // Try to get current progress from URL count
+      const processedCount = await Url.countDocuments({ userId, trainStatus: { $in: [1, 2] } });
+      
       appEvents.emit("userEvent", userId, "training-event", {
         client: await Client.findOne({ userId }),
         message: error?.message,
+        scrapingProgress: {
+          percentage: totalUrlsCount > 0 ? Math.round((processedCount / totalUrlsCount) * 100) : 0,
+          processed: processedCount,
+          total: totalUrlsCount,
+          elapsedTime: formatTime(errorElapsedTime),
+          elapsedSeconds: errorElapsedTime,
+          estimatedTimeRemaining: null,
+          estimatedSecondsRemaining: null,
+          isProcessing: false,
+          error: true,
+        },
       });
       console.log(error);
     }

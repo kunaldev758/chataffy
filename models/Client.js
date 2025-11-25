@@ -12,6 +12,8 @@ const clientSchema = new mongoose.Schema(
 
     dataTrainingStatus: { type: Number, default: 0 }, // 0-NoCurrentScrapping, 1-RunningScrapping
 
+    scrapingStartTime: { type: Date, default: null }, // Timestamp when scraping started
+
     pagesAdded: {
       success: { type: Number, default: 0 },
       failed: { type: Number, default: 0 },
