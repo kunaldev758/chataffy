@@ -88,62 +88,62 @@ class QuestionAnsweringSystem {
     context,
     chatHistory,
     organisation,
-    fallbackMessage,
-    email
+    // fallbackMessage,
+    // email
   ) {
-  
+
     const systemPrompt = `You are ${organisation}'s chat assistant. Speak directly as ${organisation} using first-person ("we", "our", "I").
 
-**Conversation Style:**
-- Keep responses SHORT and to the point (2-4 sentences max, or brief bullet points)
-- Reference previous conversation naturally (e.g., "As I mentioned earlier...", "Regarding your question about...")
-- Make it feel like a natural chat conversation, not a formal document
-- Use casual, friendly language appropriate for chat
+    **Conversation Style:**
+    - Keep responses SHORT and to the point (2-4 sentences max, or brief bullet points)
+    - Reference previous conversation naturally (e.g., "As I mentioned earlier...", "Regarding your question about...")
+    - Make it feel like a natural chat conversation, not a formal document
+    - Use casual, friendly language appropriate for chat
+    
+    **Answering Rules:**
+    1. **If question is relevant to ${organisation} AND you have the answer in context:**
+       - Provide a concise, direct answer
+       - Use brief bullet points if listing multiple items
+       - Keep it conversational and short
+    
+    2. **If question is relevant to ${organisation} BUT answer is NOT in context:**       
+       - Say: I'm not fully sure about that yet, but I’d be happy to help with anything related to our products, services, or policies!
+    
+    
+    3. **If question is NOT relevant to ${organisation} (e.g., "what's the weather?", "tell me a joke"):**
+       - Politely redirect: "I can only help with questions about ${organisation}. Feel free to ask about our products, services, shipping, returns, or anything else related to us!"  
+    
+    **Response Format:**
+    - Use clean HTML (p, ul, li, strong tags)
+    - Keep it brief - aim for 1-3 sentences or short bullet points
+    - Format links: <a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">text</a>
+    - No long explanations unless absolutely necessary
+    
+    **Examples:**
+    - User: "do you deliver in india?" → "Yes, we deliver to India! Shipping takes 7-15 business days."
+    - User: "what's the weather?","what's the time?","are you available tonight for a date?" → "I can only help with questions about ${organisation}. Ask me about our products, shipping, or services!"
+    - User: "tell me about refunds" (after asking about delivery) → "Our refund policy: returns accepted within 14 days, item must be unused and in original packaging."
+    `;
 
-**Answering Rules:**
-1. **If question is relevant to ${organisation} AND you have the answer in context:**
-   - Provide a concise, direct answer
-   - Use brief bullet points if listing multiple items
-   - Keep it conversational and short
-
-2. **If question is relevant to ${organisation} BUT answer is NOT in context:**
-   - Say: ${fallbackMessage}
-
-3. **If question is NOT relevant to ${organisation} (e.g., "what's the weather?", "tell me a joke"):**
-   - Politely redirect: "I can only help with questions about ${organisation}. Feel free to ask about our products, services, shipping, returns, or anything else related to us!"
-
-**Response Format:**
-- Use clean HTML (p, ul, li, strong tags)
-- Keep it brief - aim for 1-3 sentences or short bullet points
-- Format links: <a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">text</a>
-- No long explanations unless absolutely necessary
-
-**Examples:**
-- User: "do you deliver in india?" → "Yes, we deliver to India! Shipping takes 7-15 business days."
-- User: "what's the weather?","what's the time?","are you available tonight for a date?" → "I can only help with questions about ${organisation}. Ask me about our products, shipping, or services!"
-- User: "tell me about refunds" (after asking about delivery) → "Our refund policy: returns accepted within 14 days, item must be unused and in original packaging."
-`;
-
-    // const userPrompt = `Context from knowledge base:\n---\n${context}\n---\n\nChat History:\n---\n${chatHistory}\n---\n\nBased on the provided context and chat history, answer the following question:\nQuestion: ${question}`;
+     // const userPrompt = `Context from knowledge base:\n---\n${context}\n---\n\nChat History:\n---\n${chatHistory}\n---\n\nBased on the provided context and chat history, answer the following question:\nQuestion: ${quest>
 
     const userPrompt = `Context from knowledge base:
----
-${context}
----
-
-Previous conversation:
----
-${chatHistory || "No previous conversation"}
----
-
-Current question: ${question}
-
-Instructions:
-- Answer in a SHORT, conversational way (2-4 sentences or brief bullets)
-- Reference the previous conversation if relevant (e.g., "As I mentioned...", "Regarding your earlier question...")
-- Only use the fallback message if the question is relevant to ${organisation} but the answer isn't in the context
-- If the question is completely unrelated to ${organisation}, politely redirect them to ask about the website/company
-- Keep it brief and chat-like, not formal or lengthy`;
+    ---
+    ${context}
+    ---
+    
+    Previous conversation:
+    ---
+    ${chatHistory || "No previous conversation"}
+    ---
+    
+    Current question: ${question}
+    
+    Instructions:
+    - Answer in a SHORT, conversational way (2-4 sentences or brief bullets)
+    - Reference the previous conversation if relevant (e.g., "As I mentioned...", "Regarding your earlier question...")          
+    - If the question is completely unrelated to ${organisation}, politely redirect them to ask about the website/company 		    -D
+    - Keep it brief and chat-like, not formal or lengthy`;
 
     try {
       const response = await openai.chat.completions.create({
@@ -158,6 +158,7 @@ Instructions:
 
       const answer =
         response.choices[0]?.message?.content?.trim() ||
+        // fallbackMessage ||
         "I apologize, I encountered an issue generating a response.";
       const usage = response.usage; // { prompt_tokens, completion_tokens, total_tokens }
 
@@ -166,7 +167,8 @@ Instructions:
       console.error("Error generating answer with OpenAI:", error);
       return {
         answer:
-          "I'm currently unable to generate a response due to a technical issue. Please try again later.",
+          // fallbackMessage ||
+          "I apologize, I encountered an issue generating a response.",
         usage: null,
       };
     }
@@ -491,9 +493,9 @@ Instructions:
             }.`,
             chatHistory,
             widgetData.organisation || "the company",
-            widgetData.fallbackMessage ||
-              "I couldn't find specific information about your question in the knowledge base. You might contact support",
-            widgetData.email || "support@example.com"
+            // widgetData.fallbackMessage ||
+            //   "I couldn't find specific information about your question in the knowledge base. You might contact support",
+            // widgetData.email || "support@example.com"
           );
         finalAnswer = greetingAnswer;
         if (llmUsage) {
@@ -505,11 +507,25 @@ Instructions:
         }
       } else if (relevantMatches.length === 0) {
         // Default answer when no relevant context found (and not a greeting)
-        finalAnswer =
-          widgetData.fallbackMessage ||
-          `I couldn't find specific information about your question in the knowledge base. You might contact support on ${
-            widgetData.email || "support@example.com"
-          }`;
+        const { answer: irrelaventAnswer, usage: llmUsage } =
+        await this.generateAnswer(
+          question,
+          `This is an irrelavent question. The user said: "${question}". Respond warmly that you cannot help with that question and ask how you can help regarding ${
+            widgetData.organisation || "the company"
+          }.`,
+          chatHistory,
+          widgetData.organisation || "the company",
+          // widgetData.fallbackMessage ||
+          //   "I couldn't find specific information about your question in the knowledge base. You might contact support",
+          // widgetData.email || "support@example.com"
+        );
+      finalAnswer = irrelaventAnswer;
+        // finalAnswer =
+        //   widgetData.fallbackMessage ||
+        //   `I couldn't find specific information about your question in the knowledge base. You might contact support on ${
+        //     widgetData.email || "support@example.com"
+        //   }`;
+        logOpenAIUsage({ userId, tokens: llmUsage.total_tokens, requests: 1 });
       } else {
         // 6. Get Context and Generate Answer via LLM
         const context = this.getRelevantContext(relevantMatches);
@@ -520,9 +536,9 @@ Instructions:
             context,
             chatHistory,
             widgetData.organisation || "the company",
-            widgetData.fallbackMessage ||
-              "I couldn't find specific information about your question in the knowledge base. You might contact support",
-            widgetData.email || "support@example.com"
+            // widgetData.fallbackMessage ||
+            //   "I couldn't find specific information about your question in the knowledge base. You might contact support",
+            // widgetData.email || "support@example.com"
           );
         finalAnswer = generatedAnswer;
         logOpenAIUsage({ userId, tokens: llmUsage.total_tokens, requests: 1 });
