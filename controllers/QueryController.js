@@ -107,11 +107,15 @@ class QuestionAnsweringSystem {
        - Keep it conversational and short
     
     2. **If question is relevant to ${organisation} BUT answer is NOT in context:**       
-       - Say: I'm not fully sure about that yet, but I’d be happy to help with anything related to our products, services, or policies!
+       - Say: I'm not fully sure about that yet, but I'd be happy to help with anything related to our products, services, or policies!
     
     
     3. **If question is NOT relevant to ${organisation} (e.g., "what's the weather?", "tell me a joke"):**
-       - Politely redirect: "I can only help with questions about ${organisation}. Feel free to ask about our products, services, shipping, returns, or anything else related to us!"  
+       - Give a SHORT, firm redirect: "I can only help with questions about ${organisation}. Please ask me about our products, services, or anything else related to us."
+       - DO NOT continue the conversation about the irrelevant topic
+       - DO NOT ask follow-up questions about the irrelevant topic
+       - DO NOT provide information or engage with topics unrelated to ${organisation}
+       - Keep it to ONE sentence maximum  
     
     **Response Format:**
     - Use clean HTML (p, ul, li, strong tags)
@@ -141,8 +145,9 @@ class QuestionAnsweringSystem {
     
     Instructions:
     - Answer in a SHORT, conversational way (2-4 sentences or brief bullets)
-    - Reference the previous conversation if relevant (e.g., "As I mentioned...", "Regarding your earlier question...")          
-    - If the question is completely unrelated to ${organisation}, politely redirect them to ask about the website/company 		    -D
+    - Reference the previous conversation ONLY if it's relevant to ${organisation}
+    - If the question is completely unrelated to ${organisation}, give a SHORT, firm redirect (one sentence max). DO NOT continue conversations about irrelevant topics.
+    - If the user keeps asking about irrelevant topics, keep redirecting them firmly but politely
     - Keep it brief and chat-like, not formal or lengthy`;
 
     try {
@@ -419,8 +424,22 @@ class QuestionAnsweringSystem {
         (match) => match.score >= effectiveThreshold
       );
 
+      // Check if query is completely irrelevant (all scores are very low)
+      const maxScore = queryResponse.length > 0 
+        ? Math.max(...queryResponse.map((m) => m.score))
+        : 0;
+      const IRRELEVANT_THRESHOLD = 0.3; // If best match is below this, treat as irrelevant
+      const isIrrelevant = queryResponse.length > 0 && maxScore < IRRELEVANT_THRESHOLD;
+      
+      if (isIrrelevant) {
+        console.warn(
+          `[QueryController] IRRELEVANT QUERY DETECTED: "${question.substring(0, 50)}..." | Max similarity score: ${maxScore.toFixed(3)} (below threshold ${IRRELEVANT_THRESHOLD}). Will redirect user.`
+        );
+      }
+
       // If no matches found with current threshold, try with a lower threshold as fallback
-      if (relevantMatches.length === 0 && queryResponse.length > 0) {
+      // BUT only if the query seems relevant (maxScore is reasonable)
+      if (relevantMatches.length === 0 && queryResponse.length > 0 && !isIrrelevant) {
         const fallbackThreshold = Math.max(0.2, effectiveThreshold - 0.15); // Lower by 0.15 but not below 0.2
         console.warn(
           `[QueryController] No matches above threshold ${effectiveThreshold}. Trying fallback threshold ${fallbackThreshold.toFixed(
@@ -505,14 +524,17 @@ class QuestionAnsweringSystem {
             requests: 1,
           });
         }
-      } else if (relevantMatches.length === 0) {
+      } else if ((relevantMatches.length === 0 || isIrrelevant) && !this.isSimpleGreeting(question)) {
         // Default answer when no relevant context found (and not a greeting)
+        // If query is completely irrelevant (low similarity scores), give a firm redirect
+        const contextMessage = isIrrelevant
+          ? `This question is completely irrelevant to ${widgetData.organisation || "the company"}. The user asked: "${question}". The highest similarity score was ${maxScore.toFixed(3)}, which is below the relevance threshold. Give a SHORT, firm redirect (one sentence max) telling them you can only help with questions about ${widgetData.organisation || "the company"}. DO NOT continue the conversation about this topic.`
+          : `This question may not be directly related to ${widgetData.organisation || "the company"}. The user asked: "${question}". Give a SHORT redirect (one sentence max) telling them you can only help with questions about ${widgetData.organisation || "the company"}. DO NOT continue the conversation about unrelated topics.`;
+        
         const { answer: irrelaventAnswer, usage: llmUsage } =
         await this.generateAnswer(
           question,
-          `This is an irrelavent question. The user said: "${question}". Respond warmly that you cannot help with that question and ask how you can help regarding ${
-            widgetData.organisation || "the company"
-          }.`,
+          contextMessage,
           chatHistory,
           widgetData.organisation || "the company",
           // widgetData.fallbackMessage ||
