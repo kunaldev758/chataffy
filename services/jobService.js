@@ -2,6 +2,7 @@ require("dotenv").config();
 const { Queue, Worker } = require("bullmq");
 const Client = require("../models/Client.js");
 const Url = require("../models/Url.js");
+const WebsiteData = require("../models/WebsiteData.js");
 const batchTrainingService = require("./BatchTrainingService.js");
 const appEvents = require("../events.js");
 const axios = require("axios");
@@ -20,6 +21,120 @@ const redisConfig =
         maxRetriesPerRequest: null,
       };
 
+// Helper function to extract website metadata from HTML
+const extractWebsiteMetadata = ($, url) => {
+  const metadata = {
+    company_name: "",
+    company_type: "",
+    industry: "",
+    founded_year: "",
+    services_list: [],
+    value_proposition: "",
+    does_not_list: [],
+    website_url: url,
+    domain: new URL(url).hostname,
+  };
+
+  try {
+    // Extract company name from various sources
+    const title = $("title").text().trim();
+    const h1 = $("h1").first().text().trim();
+    const ogTitle = $('meta[property="og:title"]').attr("content")?.trim();
+    const siteName = $('meta[property="og:site_name"]').attr("content")?.trim();
+    
+    // Try to extract company name (remove common suffixes)
+    metadata.company_name = 
+      siteName || 
+      ogTitle || 
+      title.split("|")[0].split("-")[0].trim() || 
+      h1 || 
+      title;
+
+    // Extract company type from meta tags or content
+    const keywords = $('meta[name="keywords"]').attr("content")?.toLowerCase() || "";
+    const description = $('meta[name="description"]').attr("content")?.toLowerCase() || "";
+    const combinedText = (keywords + " " + description).toLowerCase();
+
+    // Detect company type
+    if (combinedText.includes("saas") || combinedText.includes("software")) {
+      metadata.company_type = "SaaS company";
+    } else if (combinedText.includes("e-commerce") || combinedText.includes("online store") || combinedText.includes("shop")) {
+      metadata.company_type = "e-commerce platform";
+    } else if (combinedText.includes("service") || combinedText.includes("consulting")) {
+      metadata.company_type = "service provider";
+    } else if (combinedText.includes("agency")) {
+      metadata.company_type = "agency";
+    } else {
+      metadata.company_type = "company";
+    }
+
+    // Extract industry
+    const industryKeywords = {
+      "technology": ["tech", "software", "it", "saas", "platform"],
+      "healthcare": ["health", "medical", "hospital", "clinic", "wellness"],
+      "real estate": ["real estate", "property", "realty", "housing", "realty"],
+      "finance": ["finance", "financial", "banking", "investment", "fintech"],
+      "education": ["education", "learning", "school", "university", "course"],
+      "retail": ["retail", "store", "shop", "e-commerce", "shopping"],
+    };
+
+    for (const [industry, keywords] of Object.entries(industryKeywords)) {
+      if (keywords.some(keyword => combinedText.includes(keyword))) {
+        metadata.industry = industry;
+        break;
+      }
+    }
+
+    // Extract founded year from footer or content
+    const footerText = $("footer").text();
+    const bodyText = $("body").text();
+    const yearMatch = (footerText + " " + bodyText).match(/(?:founded|established|since|©)\s*(?:in\s*)?(\d{4})/i);
+    if (yearMatch) {
+      metadata.founded_year = yearMatch[1];
+    }
+
+    // Extract services from navigation, services section, or meta tags
+    const services = new Set();
+    
+    // Check navigation links
+    $("nav a, header a").each((_, el) => {
+      const text = $(el).text().trim().toLowerCase();
+      if (text && !text.match(/^(home|about|contact|blog|login|sign up|sign in)$/i)) {
+        if (text.length < 50) { // Reasonable service name length
+          services.add($(el).text().trim());
+        }
+      }
+    });
+
+    // Check for services section
+    $('[class*="service"], [id*="service"], [class*="product"], [id*="product"]').each((_, el) => {
+      const text = $(el).text().trim();
+      const headings = $(el).find("h2, h3, h4").map((_, h) => $(h).text().trim()).get();
+      headings.forEach(heading => {
+        if (heading.length < 50 && heading.length > 3) {
+          services.add(heading);
+        }
+      });
+    });
+
+    metadata.services_list = Array.from(services).slice(0, 10); // Limit to 10 services
+
+    // Extract value proposition from meta description or hero section
+    const metaDesc = $('meta[name="description"]').attr("content")?.trim();
+    const heroText = $('[class*="hero"], [class*="banner"], [class*="headline"]').first().text().trim();
+    
+    metadata.value_proposition = metaDesc || heroText.substring(0, 200) || "";
+
+    // Extract "does not" list - this is harder to extract automatically
+    // We'll leave it empty for now, can be manually filled or enhanced later
+    metadata.does_not_list = [];
+
+  } catch (error) {
+    console.error("Error extracting website metadata:", error);
+  }
+
+  return metadata;
+};
 
 const processWebPage = async (url, sourceCode, footerCache = {}) => {
   try {
@@ -106,11 +221,28 @@ const processWebPage = async (url, sourceCode, footerCache = {}) => {
       .replace(/\n{3,}/g, "\n\n") // Replace 3+ newlines with double newline
       .trim();
 
+    // Extract website metadata (from homepage-like URLs or we'll extract from first URL)
+    let websiteMetadata = null;
+    const urlPath = new URL(url).pathname;
+    const isHomepage = urlPath === '/' || 
+                      urlPath === '' || 
+                      urlPath.split('/').filter(p => p).length <= 1; // Root or one-level deep
+    
+    // Always extract metadata (we'll decide whether to use it based on homepage status)
+    const $meta = cheerio.load(sourceCode);
+    websiteMetadata = extractWebsiteMetadata($meta, url);
+    
+    // Mark if this is homepage for priority
+    if (isHomepage) {
+      websiteMetadata._isHomepage = true;
+    }
+
     return {
       content: cleanContent,
       webPageURL,
       title,
       metaDescription,
+      websiteMetadata, // Include metadata if this is homepage
     };
   } catch (error) {
     console.error("Error processing webpage:", error);
@@ -198,6 +330,7 @@ new Worker(
       let scrapedDocs = [];
       let currentDataSize = 0;
       const footerCache = {};
+      let metadataExtracted = false; // Track if metadata has been extracted
       
       // Use startTime from job data or current time as fallback
       const scrapingStartTime = startTime ? new Date(startTime) : new Date();
@@ -285,7 +418,34 @@ new Worker(
             continue;
           }
 
-          const { content, title, metaDescription, webPageURL } = processResult;
+          const { content, title, metaDescription, webPageURL, websiteMetadata } = processResult;
+
+          // Store website metadata if extracted
+          // Priority: homepage > first URL > any URL with company_name
+          if (websiteMetadata && !metadataExtracted) {
+            // Prefer homepage metadata, but use first URL if no homepage found
+            const shouldStore = websiteMetadata._isHomepage || 
+                               (i === 0) || 
+                               (websiteMetadata.company_name && !metadataExtracted);
+            
+            if (shouldStore) {
+              try {
+                let websiteData = await WebsiteData.getOrCreate(userId);
+                // Remove internal flag before storing
+                const { _isHomepage, ...cleanMetadata } = websiteMetadata;
+                await websiteData.updateData({
+                  ...cleanMetadata,
+                  website_url: cleanMetadata.website_url || url,
+                  domain: cleanMetadata.domain || new URL(url).hostname,
+                });
+                metadataExtracted = true; // Mark as extracted to avoid overwriting
+                console.log(`[jobService] Stored website metadata for user ${userId} from ${url}`);
+              } catch (metadataError) {
+                console.error(`[jobService] Error storing website metadata:`, metadataError);
+                // Don't fail the job if metadata storage fails
+              }
+            }
+          }
 
           const contentSize = Buffer.byteLength(content, "utf8");
 
