@@ -123,6 +123,9 @@ class QuestionAnsweringSystem {
     prompt += `- Clear, concise, friendly\n\n`;
     prompt += `- Professional and helpful\n\n`;
     prompt += `- Focused on ${companyName} only\n\n`;
+    prompt += `**Response Format:**\n\n`;
+    prompt += `- Use clean HTML (p, ul, li, strong tags)\n\n`;
+    prompt += `- Format links: <a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">text</a>\n\n`;
     prompt += `---\n\n### Example Expected Behavior\n\n`;
     prompt += `**User:** "Can you help me buy something unrelated?"\n\n`;
     prompt += `**You:** "${companyName} doesn't provide that service. I can help you with questions related to our offerings."`;
