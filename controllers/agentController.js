@@ -6,6 +6,8 @@ const bcrypt = require("bcrypt");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const {checkPlanLimits} = require('../services/PlanService');
+const path = require('path');
+const fs = require('fs');
 
 
 exports.agentLogin = async (req, res) => {
@@ -50,6 +52,7 @@ exports.agentLogin = async (req, res) => {
         status: agent.status,
         isActive: agent.isActive,
         userId: agent.userId,
+        avatar: agent.avatar,
       },
     });
   } catch (error) {
@@ -107,6 +110,7 @@ exports.createAgent = async (req, res) => {
       inviteToken,
       inviteTokenExpires,
       userId:userId,
+      avatar: '/uploads/default-avatar.png' // Default avatar path
     });
 
     await agent.save();
@@ -125,6 +129,7 @@ exports.createAgent = async (req, res) => {
         inviteToken,
         inviteTokenExpires,
         userId:agent.userId,
+        avatar: agent.avatar,
       },
     });
   } catch (error) {
@@ -137,7 +142,7 @@ exports.createAgent = async (req, res) => {
 exports.getAllAgents = async (req, res) => {
   try {
     const userId = req.body.userId;
-    const agents = await Agent.find({userId:userId}, "-password");
+    const agents = await Agent.find({userId:userId, isClient: { $ne: true }}, "-password");
     res.json(agents);
   } catch (error) {
     console.error("Error fetching agents:", error);
@@ -201,6 +206,7 @@ exports.updateAgent = async (req, res) => {
         status: agent.status,
         isActive: agent.isActive,
         userId: agent.userId,
+        avatar: agent.avatar,
       },
     });
   } catch (error) {
@@ -269,10 +275,119 @@ exports.updateAgentStatus = async (req, res) => {
         status: agent.status,
         isActive: agent.isActive,
         lastActive: agent.lastActive,
+        avatar: agent.avatar,
       },
     });
   } catch (error) {
     console.error("Error updating agent status:", error);
     res.status(500).json({ message: "Error updating agent status" });
+  }
+};
+
+// Upload agent avatar
+exports.uploadAgentAvatar = async (req, res) => {
+  try {
+    const agentId = req.params.id;
+    
+    if (!agentId) {
+      return res.status(400).json({ 
+        status_code: 400, 
+        message: "Agent ID is required" 
+      });
+    }
+    
+    if (!req.file) {
+      return res.status(400).json({ 
+        status_code: 400, 
+        message: "No file uploaded" 
+      });
+    }
+    
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png'];
+    const allowedExtensions = ['.jpg', '.jpeg', '.png'];
+    const fileExtension = path.extname(req.file.originalname).toLowerCase();
+    
+    if (!allowedTypes.includes(req.file.mimetype) || !allowedExtensions.includes(fileExtension)) {
+      // Delete uploaded file if validation fails
+      if (req.file.path) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (deleteError) {
+          console.error('Error deleting invalid file:', deleteError);
+        }
+      }
+      return res.status(400).json({ 
+        status_code: 400, 
+        message: "Invalid file type. Only JPG and PNG files are allowed." 
+      });
+    }
+    
+    // Check file size (5MB limit)
+    if (req.file.size > 5 * 1024 * 1024) {
+      // Delete uploaded file if too large
+      if (req.file.path) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (deleteError) {
+          console.error('Error deleting file:', deleteError);
+        }
+      }
+      return res.status(400).json({ 
+        status_code: 400, 
+        message: "File too large. Maximum size is 5MB." 
+      });
+    }
+    
+    const agent = await Agent.findById(agentId);
+    
+    if (!agent) {
+      // Delete uploaded file if agent not found
+      if (req.file.path) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (deleteError) {
+          console.error('Error deleting file:', deleteError);
+        }
+      }
+      return res.status(404).json({ 
+        status_code: 404, 
+        message: "Agent not found" 
+      });
+    }
+    
+    // Delete old avatar if exists
+    if (agent.avatar) {
+      const oldAvatarPath = path.join(__dirname, '..', agent.avatar);
+      try {
+        if (fs.existsSync(oldAvatarPath)) {
+          fs.unlinkSync(oldAvatarPath);
+        }
+      } catch (deleteError) {
+        console.error('Error deleting old avatar:', deleteError);
+      }
+    }
+    
+    const filePath = `/uploads/${req.file.filename}`;
+    
+    agent.avatar = filePath;
+    await agent.save();
+    
+    res.status(200).json({ 
+      status_code: 200,
+      message: "Avatar uploaded successfully",
+      agent: {
+        id: agent._id,
+        name: agent.name,
+        email: agent.email,
+        avatar: agent.avatar,
+      }
+    });
+  } catch (error) {
+    console.error("Error uploading avatar:", error);
+    res.status(500).json({ 
+      status_code: 500, 
+      message: "Error uploading avatar" 
+    });
   }
 };

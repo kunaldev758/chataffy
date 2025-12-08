@@ -59,7 +59,7 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
    const locationData = transformData(location)
 
    //total Agents
-    const totalAgents = await Agent.find({ userId: userId }).countDocuments();
+    const totalAgents = await Agent.find({ userId: userId, isClient: false }).countDocuments();
 
     let totalChatsInPlan = 0;
 

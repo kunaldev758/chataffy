@@ -60,11 +60,14 @@ const initializeVisitorEvents = (io, socket) => {
       let chatMessages = [];
       chatMessages = await ChatMessageController.getAllChatMessages(visitorId);
 
+      // Get the conversation to check aiChat status
+      let conversation = await ConversationController.getOpenConversation(
+        visitorId,
+        userId
+      );
+      let aiChat = true; // Default to true (AI chat mode)
+
       if (chatMessages.length <= 0) {
-        const conversation = await ConversationController.getOpenConversation(
-          visitorId,
-          userId
-        );
         const conversationId = conversation?._id || null;
 
         await ChatMessageController.createChatMessage(
@@ -80,10 +83,19 @@ const initializeVisitorEvents = (io, socket) => {
         );
       }
 
+      // Get aiChat status from conversation
+      if (conversation) {
+        aiChat = conversation.aiChat !== undefined ? conversation.aiChat : true;
+        console.log('🔌 visitor-connect: aiChat status:', aiChat, 'for conversation:', conversation._id);
+      } else {
+        console.log('⚠️ visitor-connect: No conversation found, defaulting aiChat to true');
+      }
+
       // Emit visitor-connect-response with visitor data
       socket.emit("visitor-connect-response", {
         chatMessages,
         themeSettings,
+        aiChat: aiChat,
       });
     } catch (error) {
       console.error("Error handling visitor-connect:", error);
@@ -157,7 +169,7 @@ const initializeVisitorEvents = (io, socket) => {
       );
       callback?.({ success: true, chatMessage, id });
       if (conversation.aiChat) {
-        response_data = await QueryController.handleQuestionAnswer(
+        const response_data = await QueryController.handleQuestionAnswer(
           userId,
           message,
           conversationId

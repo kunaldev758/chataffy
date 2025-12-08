@@ -9,7 +9,7 @@ const chatMessageSchema = new Schema({
   },
   sender_type: {
     type: String,
-    enum: ['visitor', 'agent', 'assistant', 'user','bot'],
+    enum: ['visitor', 'agent', 'assistant', 'user','bot', 'system'],
     required: true,
   },
   is_note:{
@@ -27,6 +27,11 @@ const chatMessageSchema = new Schema({
     type: Schema.Types.ObjectId,
     ref: 'Conversation',
     required: true,
+  },
+  agentId: {
+    type: Schema.Types.ObjectId,
+    ref: 'Agent',
+    required: false,
   }
 },
 { timestamps: true }

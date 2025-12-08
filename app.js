@@ -4,6 +4,7 @@ const dotenv = require("dotenv");
 const mongoose = require("mongoose");
 const rateLimit = require('express-rate-limit');
 const path = require("path");
+const fs = require("fs");
 const apiRoutes = require("./routes/");
 const paymentsRouter = require('./routes/payments');
 const cron = require('node-cron');
@@ -21,6 +22,13 @@ initializeSocketController(server);
 
 mongoose.connect(process.env.MONGODB_URI);
 
+// Ensure uploads directory exists
+const uploadsDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log("Created uploads directory");
+}
+
 app.use(cors());
 
 // Apply rate limit to all requests
@@ -34,7 +42,7 @@ const limiter = rateLimit({
 app.use(limiter); // apply to all requests
 
 app.use(express.json());
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use("/uploads", express.static(uploadsDir));
 app.use("/api", apiRoutes);
 app.use('/api/paypal', paymentsRouter);
 

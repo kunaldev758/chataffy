@@ -159,6 +159,7 @@ router.get('/agents/:id',middleware, agentController.getAgent);
 router.post('/agents/:id',middleware, agentController.updateAgent);
 router.post('/agents/delete/:id',middleware, agentController.deleteAgent);
 router.post('/agents/:id/status',middleware, agentController.updateAgentStatus);
+router.post('/agents/:id/avatar',middleware, upload.single('avatar'), agentController.uploadAgentAvatar);
 
 router.post('/sendEmailForOfflineChat', ConversationController.sendEmailForOfflineChatController);
 

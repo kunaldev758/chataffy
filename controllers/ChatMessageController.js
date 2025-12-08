@@ -28,7 +28,9 @@ const getAllChatMessages = async (visitor_id) => {
         visitor: visitor_id,
         conversationOpenStatus: "open",
       });
-      chatMessages = await ChatMessage.find({ conversation_id });
+      chatMessages = await ChatMessage.find({ conversation_id })
+        .populate('agentId', 'name avatar isClient')
+        .lean();
     } else {
       throw new error();
     }
@@ -53,7 +55,9 @@ ChatMessageController.getAllOldChatMessages = async (req, res) => {
     let conversation_id = req.body.id.conversationId;
     let chatMessages;
     if (conversation_id) {
-      chatMessages = await ChatMessage.find({ conversation_id });
+      chatMessages = await ChatMessage.find({ conversation_id })
+        .populate('agentId', 'name avatar isClient')
+        .lean();
     } else {
       throw new error();
     }
@@ -70,7 +74,8 @@ ChatMessageController.createChatMessage = async (
   sender_type,
   message,
   userId,
-  sources = undefined
+  sources = undefined,
+  agentId = undefined
 ) => {
   try {
     const chatMessage = new ChatMessage({
@@ -80,6 +85,7 @@ ChatMessageController.createChatMessage = async (
       conversation_id,
       infoSources: sources,
       userId,
+      agentId: sender_type === 'agent' ? agentId : undefined,
     });
     await chatMessage.save();
     return chatMessage;
@@ -113,7 +119,8 @@ ChatMessageController.addNoteToChat = async (
   sender_type,
   message,
   conversation_id,
-  userId
+  userId,
+  agentId = undefined
 ) => {
   try {
     const chatMessage = new ChatMessage({
@@ -124,6 +131,7 @@ ChatMessageController.addNoteToChat = async (
       infoSources: undefined,
       is_note: true,
       userId,
+      agentId: sender_type === 'agent' ? agentId : undefined,
     });
     await chatMessage.save();
     return chatMessage;

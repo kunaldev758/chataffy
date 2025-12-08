@@ -2,12 +2,14 @@ require("dotenv").config();
 const User = require('../models/User');
 const Client = require('../models/Client');
 const Widget = require('../models/Widget');
+const Agent = require('../models/Agent');
 const path = require('path');
 const fs = require('fs');
 const nodemailer = require('nodemailer');
 const smtpTransport = require('nodemailer-smtp-transport');
 const commonHelper = require("../helpers/commonHelper.js");
 const crypto = require('crypto');
+const bcrypt = require('bcrypt');
 const UserController = {};
 const https = require('https');
 
@@ -52,6 +54,47 @@ UserController.createUser = async (req, res) => {
     const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
     const widget = new Widget({userId,widgetToken});
     await widget.save();
+
+    // Create agent for client
+    try {
+      // Check if agent already exists with this email (email is unique)
+      const existingAgent = await Agent.findOne({ email });
+      if (!existingAgent) {
+        const agentPassword = crypto.randomBytes(16).toString('hex');
+        const hashedPassword = await bcrypt.hash(agentPassword, 10);
+        const agent = new Agent({
+          name: 'client',
+          email: email,
+          password: hashedPassword,
+          userId: userId,
+          status: 'approved',
+          isClient: true,
+          avatar: '/uploads/default-avatar.png' // Default avatar path
+        });
+        await agent.save();
+      } else {
+        // If agent exists, update it to be a client agent if needed
+        if (!existingAgent.isClient || existingAgent.userId.toString() !== userId.toString()) {
+          existingAgent.isClient = true;
+          existingAgent.userId = userId;
+          existingAgent.status = 'approved';
+          if (!existingAgent.avatar) {
+            existingAgent.avatar = '/uploads/default-avatar.png';
+          }
+          await existingAgent.save();
+        }
+      }
+    } catch (agentError) {
+      // Log error but don't fail client creation if agent creation fails
+      console.error('Error creating/updating client agent:', agentError);
+      console.error('Agent error details:', {
+        message: agentError.message,
+        code: agentError.code,
+        keyPattern: agentError.keyPattern,
+        keyValue: agentError.keyValue,
+        stack: agentError.stack
+      });
+    }
 
     const client_url = process.env.CLIENT_URL;
     const verificationLink = `${client_url}verify-email?token=${emailVerificationToken}`;
@@ -230,6 +273,47 @@ UserController.googleOAuth = async (req, res) => {
       const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
       const widget = new Widget({ userId, widgetToken });
       await widget.save();
+
+      // Create agent for client
+      try {
+        // Check if agent already exists with this email (email is unique)
+        const existingAgent = await Agent.findOne({ email });
+        if (!existingAgent) {
+          const agentPassword = crypto.randomBytes(16).toString('hex');
+          const hashedPassword = await bcrypt.hash(agentPassword, 10);
+          const agent = new Agent({
+            name: 'client',
+            email: email,
+            password: hashedPassword,
+            userId: userId,
+            status: 'approved',
+            isClient: true,
+            avatar: '/uploads/default-avatar.png' // Default avatar path
+          });
+          await agent.save();
+        } else {
+          // If agent exists, update it to be a client agent if needed
+          if (!existingAgent.isClient || existingAgent.userId.toString() !== userId.toString()) {
+            existingAgent.isClient = true;
+            existingAgent.userId = userId;
+            existingAgent.status = 'approved';
+            if (!existingAgent.avatar) {
+              existingAgent.avatar = '/uploads/default-avatar.png';
+            }
+            await existingAgent.save();
+          }
+        }
+      } catch (agentError) {
+        // Log error but don't fail client creation if agent creation fails
+        console.error('Error creating/updating client agent:', agentError);
+        console.error('Agent error details:', {
+          message: agentError.message,
+          code: agentError.code,
+          keyPattern: agentError.keyPattern,
+          keyValue: agentError.keyValue,
+          stack: agentError.stack
+        });
+      }
     } else {
       // Ensure linkage and verification
       if (!user.googleId) user.googleId = googleId;

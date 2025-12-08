@@ -167,7 +167,7 @@ class PlanService {
       // --- AGENTS USAGE ---
       let totalAgents = 0;
       try {
-        totalAgents = await Agent.countDocuments({ userId });
+        totalAgents = await Agent.countDocuments({ userId , isClient: false });
       } catch (e) {
         totalAgents = 0;
       }

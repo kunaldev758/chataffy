@@ -44,6 +44,14 @@ const agentSchema = new mongoose.Schema({
   updatedAt: {
     type: Date,
     default: Date.now
+  },
+  avatar: {
+    type: String,
+    default: null
+  },
+  isClient: {
+    type: Boolean,
+    default: false
   }
 });
 
