@@ -109,8 +109,8 @@ exports.createAgent = async (req, res) => {
       password: hashedPassword,
       inviteToken,
       inviteTokenExpires,
-      userId:userId,
-      avatar: '/uploads/default-avatar.png' // Default avatar path
+      userId:userId
+      // Avatar will be handled on frontend with default-image.png
     });
 
     await agent.save();
