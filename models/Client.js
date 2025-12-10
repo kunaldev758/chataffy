@@ -72,6 +72,10 @@ const clientSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    liveAgentSupport: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );

@@ -8,6 +8,7 @@ const jwt = require("jsonwebtoken");
 const {checkPlanLimits} = require('../services/PlanService');
 const path = require('path');
 const fs = require('fs');
+const appEvents = require("../events");
 
 
 exports.agentLogin = async (req, res) => {
@@ -266,17 +267,29 @@ exports.updateAgentStatus = async (req, res) => {
     agent.lastActive = isActive ? new Date() : null;
     await agent.save();
 
+    // Emit socket event to notify all clients about agent status change
+    const updatedAgentData = {
+      id: agent._id,
+      name: agent.name,
+      email: agent.email,
+      status: agent.status,
+      isActive: agent.isActive,
+      lastActive: agent.lastActive,
+      avatar: agent.avatar,
+      userId: agent.userId,
+    };
+
+    // Emit to the client's room (userId) so settings page can update
+    if (agent.userId) {
+      appEvents.emit("userEvent", agent.userId, "agent-status-updated", updatedAgentData);
+    }
+
+    // Also emit to the agent's own room (agentId) in case they're viewing settings
+    appEvents.emit("userEvent", agent._id.toString(), "agent-status-updated", updatedAgentData);
+
     res.json({
       message: "Agent status updated successfully",
-      agent: {
-        id: agent._id,
-        name: agent.name,
-        email: agent.email,
-        status: agent.status,
-        isActive: agent.isActive,
-        lastActive: agent.lastActive,
-        avatar: agent.avatar,
-      },
+      agent: updatedAgentData,
     });
   } catch (error) {
     console.error("Error updating agent status:", error);

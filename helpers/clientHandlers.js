@@ -564,8 +564,17 @@ const initializeClientEvents = (io, socket) => {
         }
       }
 
-      // Disable AI chat
-      await ConversationController.disableAiChat({ conversationId });
+      // Disable AI chat and update agentId and transferredAt
+      await Conversation.updateOne(
+        { _id: conversationId },
+        { 
+          $set: { 
+            aiChat: false,
+            agentId: agentIdForMessage || null,
+            transferredAt: new Date()
+          } 
+        }
+      );
       
       // Create a system message for the transfer
       const transferMessage = `The chat is transferred to ${transferName}`;
@@ -661,6 +670,132 @@ const initializeClientEvents = (io, socket) => {
   //   io.emit('update-dashboard-data', realTimeData);
   // }, 5000);
   ////////////////dash end///////////
+
+  // Handle agent connection accept
+  socket.on("accept-agent-connection", async ({ conversationId }, callback) => {
+    try {
+      const conversation = await Conversation.findOne({ _id: conversationId });
+      if (!conversation) {
+        callback?.({ success: false, error: "Conversation not found" });
+        return;
+      }
+
+      // Check if already accepted
+      if (!conversation.aiChat) {
+        callback?.({ success: true, message: "Already connected to agent" });
+        return;
+      }
+
+      const visitorId = conversation?.visitor;
+      
+      // Get agent/client information who is accepting
+      let transferName = "Agent";
+      let agentIdForMessage = undefined;
+      
+      if (socket.type === "agent") {
+        agentIdForMessage = socket.agentId;
+        const agent = await Agent.findById(agentIdForMessage);
+        if (agent) {
+          transferName = agent.isClient ? "Client" : agent.name;
+        }
+      } else if (socket.type === "client") {
+        const clientAgent = await Agent.findOne({ userId: userId, isClient: true });
+        if (clientAgent) {
+          transferName = "Client";
+          agentIdForMessage = clientAgent._id;
+        }
+      }
+
+      // Disable AI chat and assign to agent
+      await Conversation.updateOne(
+        { _id: conversationId },
+        { 
+          $set: { 
+            aiChat: false,
+            agentId: agentIdForMessage || null,
+            transferredAt: new Date()
+          } 
+        }
+      );
+      
+      // Create a system message for the transfer
+      const transferMessage = `Connected to ${transferName}`;
+      const systemMessage = await ChatMessageController.createChatMessage(
+        conversationId,
+        visitorId || "system",
+        "system",
+        transferMessage,
+        userId,
+        undefined,
+        agentIdForMessage
+      );
+
+      // Populate agent info if available
+      if (agentIdForMessage) {
+        await systemMessage.populate('agentId', 'name avatar isClient');
+      }
+
+      const systemMessageObj = systemMessage.toObject ? systemMessage.toObject() : systemMessage;
+
+      // Broadcast the transfer message
+      io.to([
+        `conversation-${conversationId}`,
+        `conversation-${visitorId}`,
+      ]).emit("conversation-append-message", { chatMessage: systemMessageObj });
+
+      // Emit aiChat status update
+      io.to([
+        `conversation-${conversationId}`,
+        `conversation-${visitorId}`,
+      ]).emit('ai-chat-status-update', {
+        aiChat: false,
+        conversationId
+      });
+
+      // Notify visitor that agent accepted
+      io.to(`conversation-${visitorId}`).emit("agent-connection-accepted", {
+        conversationId,
+        agentName: transferName,
+      });
+
+      // Cancel any pending notifications for other agents/clients
+      io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });
+      const agents = await Agent.find({ userId, status: 'approved' }).lean();
+      agents.forEach(agent => {
+        io.to(`user-${agent._id}`).emit("agent-connection-cancelled", { conversationId });
+      });
+
+      // Clear timeout if exists
+      io.to(`conversation-${conversationId}`).emit("agent-connection-accepted-clear-timeout", { conversationId });
+
+      callback?.({ success: true });
+    } catch (error) {
+      console.error("accept-agent-connection error:", error.message);
+      callback?.({ success: false, error: error.message });
+    }
+  });
+
+  // Handle agent connection decline
+  socket.on("decline-agent-connection", async ({ conversationId }, callback) => {
+    try {
+      // Just cancel the notification, don't change conversation state
+      io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });
+      
+      if (socket.type === "agent") {
+        io.to(`user-${socket.agentId}`).emit("agent-connection-cancelled", { conversationId });
+      } else {
+        const agents = await Agent.find({ userId, status: 'approved' }).lean();
+        agents.forEach(agent => {
+          io.to(`user-${agent._id}`).emit("agent-connection-cancelled", { conversationId });
+        });
+      }
+
+      callback?.({ success: true });
+    } catch (error) {
+      console.error("decline-agent-connection error:", error.message);
+      callback?.({ success: false, error: error.message });
+    }
+  });
 
   socket.on("disconnect", () => {
       if (clientRoom) socket.leave(clientRoom);

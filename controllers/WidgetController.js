@@ -1,6 +1,7 @@
 const commonHelper = require("../helpers/commonHelper.js");
 const Widget = require('../models/Widget');
 const User = require('../models/User');
+const Client = require('../models/Client');
 const ObjectId = require('mongoose').Types.ObjectId;
 const path = require('path');
 const fs = require('fs');
@@ -91,7 +92,7 @@ WidgetController.setBasicInfo = async (req, res) => {
     }
     
     // Validate basic info fields
-    const allowedFields = ['website', 'organisation', 'fallbackMessage', 'email', 'phone'];
+    const allowedFields = ['website', 'organisation', 'fallbackMessage', 'email', 'phone', 'liveAgentSupport'];
     const updateData = {};
     
     Object.keys(basicInfo).forEach(key => {
@@ -100,11 +101,24 @@ WidgetController.setBasicInfo = async (req, res) => {
       }
     });
     
+    // Update Widget with basic info (excluding liveAgentSupport)
+    const widgetUpdateData = { ...updateData };
+    delete widgetUpdateData.liveAgentSupport;
+    
     const updatedWidget = await Widget.findOneAndUpdate(
       { userId },
-      { $set: updateData },
+      { $set: widgetUpdateData },
       { new: true }
     );
+    
+    // Update Client with liveAgentSupport if provided
+    if (basicInfo.hasOwnProperty('liveAgentSupport')) {
+      await Client.findOneAndUpdate(
+        { userId },
+        { $set: { liveAgentSupport: basicInfo.liveAgentSupport } },
+        { new: true }
+      );
+    }
     
     if (updatedWidget) {
       res.status(200).json({ 
@@ -139,8 +153,9 @@ WidgetController.getBasicInfo = async (req, res) => {
     }
     
     const widget = await Widget.findOne({ userId });
-
+    const client = await Client.findOne({ userId });
     const user = await User.findById(userId);
+    
     if (!user) {
       return res.status(404).json({ 
         status_code: 404, 
@@ -157,6 +172,7 @@ WidgetController.getBasicInfo = async (req, res) => {
           fallbackMessage: widget.fallbackMessage,
           email: widget.email ? widget.email : user.email,
           phone: widget.phone,
+          liveAgentSupport: client ? (client.liveAgentSupport !== undefined ? client.liveAgentSupport : false) : false,
         }
       });
     } else {

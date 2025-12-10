@@ -262,6 +262,57 @@ class QuestionAnsweringSystem {
     return false;
   }
 
+  // Detect if the visitor is asking to connect to a live agent
+  isAgentConnectionRequest(question) {
+    const normalizedQuestion = question.toLowerCase().trim();
+    
+    // Keywords and phrases that indicate a request to speak with an agent
+    const agentKeywords = [
+      'speak to agent',
+      'talk to agent',
+      'connect to agent',
+      'live agent',
+      'human agent',
+      'real person',
+      'speak to human',
+      'talk to human',
+      'connect to human',
+      'speak to person',
+      'talk to person',
+      'connect to person',
+      'speak to someone',
+      'talk to someone',
+      'connect to someone',
+      'agent please',
+      'human please',
+      'person please',
+      'agent',
+      'human',
+      'representative',
+      'support agent',
+      'customer service',
+      'customer support',
+      'live chat',
+      'live support',
+      'can i speak',
+      'can i talk',
+      'i want to speak',
+      'i want to talk',
+      'need to speak',
+      'need to talk',
+      'want to speak',
+      'want to talk',
+      'let me speak',
+      'let me talk',
+      'transfer to agent',
+      'transfer to human',
+      'transfer to person'
+    ];
+    
+    // Check if question contains any agent connection keywords
+    return agentKeywords.some(keyword => normalizedQuestion.includes(keyword));
+  }
+
   async generateAnswer(
     question,
     context,
@@ -695,6 +746,9 @@ Keep responses short, direct, friendly, and professional. Only use information e
       const isAccidental = this.isAccidentalOrTestMessage(question);
       const companyName = websiteData?.company_name || widgetData.organisation || "the company";
       
+      // Check if visitor is requesting to connect to an agent
+      const isAgentRequest = this.isAgentConnectionRequest(question);
+      
       // Handle simple greetings even without context
       if (relevantMatches.length === 0 && this.isSimpleGreeting(question)) {
         // For greetings, generate a friendly response even without context
@@ -776,6 +830,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         success: true,
         answer: finalAnswer,
         conversationId,
+        isAgentRequest: isAgentRequest || false,
       };
     } catch (error) {
       console.error(

@@ -9,8 +9,12 @@ const Visitor = require("../models/Visitor");
 const Client = require("../models/Client");
 const Conversation = require("../models/Conversation");
 const ChatMessage = require("../models/ChatMessage");
+const Agent = require("../models/Agent");
 const BlockedVisitorIp = require("../models/blockedVisitorIp");
 const { checkPlanLimits } = require("../services/PlanService");
+
+// Store active timeouts for agent connection requests
+const agentConnectionTimeouts = new Map();
 
 const initializeVisitorEvents = (io, socket) => {
   const { agentId } = socket;
@@ -181,6 +185,83 @@ const initializeVisitorEvents = (io, socket) => {
           message: "...replying",
         });
 
+        // Check if visitor requested agent connection and liveAgentSupport is enabled
+        if (response_data.isAgentRequest) {
+          const clientData = await Client.findOne({ userId }).lean();
+          if (clientData && clientData.liveAgentSupport === true) {
+            // Get visitor and conversation details for notification
+            const visitor = await Visitor.findById(visitorId).lean();
+            const conversationDoc = await Conversation.findById(conversationId).lean();
+            
+            // Emit agent connection request to visitor (show connecting state)
+            io.to(`conversation-${visitorId}`).emit("agent-connection-request", {
+              conversationId,
+              visitorId,
+              message: "Connecting to agent...",
+            });
+
+            // Emit notification to client and agents with sound
+            const notificationData = {
+              conversationId,
+              visitorId,
+              visitor: visitor,
+              message: "Visitor requested to connect to an agent",
+              timestamp: new Date(),
+            };
+
+            // Emit to client room
+            io.to(`user-${userId}`).emit("agent-connection-notification", notificationData);
+            
+            // Emit to all agents for this client
+            const agents = await Agent.find({ userId, status: 'approved', isActive: true }).lean();
+            agents.forEach(agent => {
+              io.to(`user-${agent._id}`).emit("agent-connection-notification", notificationData);
+            });
+
+            // Set up 10-second timeout
+            const timeoutId = setTimeout(async () => {
+              // Check if conversation was already accepted
+              const updatedConversation = await Conversation.findById(conversationId).lean();
+              if (updatedConversation && updatedConversation.aiChat === true) {
+                // No agent accepted, continue in AI mode
+                const timeoutMessage = await ChatMessageController.createChatMessage(
+                  conversationId,
+                  "",
+                  "assistant",
+                  "Sorry, currently there is no active agent available. I'll continue helping you.",
+                  userId
+                );
+                
+                io.to(`conversation-${visitorId}`).emit("conversation-append-message", {
+                  chatMessage: timeoutMessage,
+                });
+                io.to(`conversation-${conversationId}`).emit("conversation-append-message", {
+                  chatMessage: timeoutMessage,
+                });
+
+                // Emit to visitor that connection failed
+                io.to(`conversation-${visitorId}`).emit("agent-connection-timeout", {
+                  conversationId,
+                });
+
+                // Cancel notifications
+                io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });
+                agents.forEach(agent => {
+                  io.to(`user-${agent._id}`).emit("agent-connection-cancelled", { conversationId });
+                });
+
+                // Remove timeout from map
+                agentConnectionTimeouts.delete(conversationId.toString());
+              }
+            }, 10000); // 10 seconds
+
+            // Store timeout ID
+            agentConnectionTimeouts.set(conversationId.toString(), timeoutId);
+            
+            return; // Don't send AI response if agent connection is requested
+          }
+        }
+
         if (response_data.success == true) {
           const chatMessageResponse =
             await ChatMessageController.createChatMessage(
@@ -266,6 +347,16 @@ const initializeVisitorEvents = (io, socket) => {
       }
     }
   );
+
+  // Listen for agent connection accepted to clear timeout
+  socket.on("agent-connection-accepted-clear-timeout", ({ conversationId }) => {
+    const timeoutId = agentConnectionTimeouts.get(conversationId?.toString());
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      agentConnectionTimeouts.delete(conversationId?.toString());
+      console.log(`Cleared timeout for conversation ${conversationId}`);
+    }
+  });
 
   socket.on("disconnect", () => {
     socket.leave(VisitorRoom);
