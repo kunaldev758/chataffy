@@ -218,7 +218,7 @@ const initializeVisitorEvents = (io, socket) => {
               io.to(`user-${agent._id}`).emit("agent-connection-notification", notificationData);
             });
 
-            // Set up 10-second timeout
+            // Set up 20-second timeout
             const timeoutId = setTimeout(async () => {
               // Check if conversation was already accepted
               const updatedConversation = await Conversation.findById(conversationId).lean();
@@ -253,7 +253,7 @@ const initializeVisitorEvents = (io, socket) => {
                 // Remove timeout from map
                 agentConnectionTimeouts.delete(conversationId.toString());
               }
-            }, 10000); // 10 seconds
+            }, 20000); // 20 seconds
 
             // Store timeout ID
             agentConnectionTimeouts.set(conversationId.toString(), timeoutId);
