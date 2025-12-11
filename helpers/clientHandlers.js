@@ -10,6 +10,7 @@ const Visitor = require("../models/Visitor");
 const Client = require("../models/Client");
 const Agent = require("../models/Agent");
 const PlanService = require("../services/PlanService");
+const { agentConnectionTimeouts } = require("./visitorHandlers");
 
 const initializeClientEvents = (io, socket) => {
   const { agentId } = socket;
@@ -145,6 +146,42 @@ const initializeClientEvents = (io, socket) => {
       if (typeof callback === 'function') {
         callback({ success: false, error: error.message });
       }
+    }
+  });
+
+  // Check for pending agent connection request when joining a conversation
+  socket.on("check-pending-agent-request", async ({ conversationId }, callback) => {
+    try {
+      // Check if there's an active timeout for this conversation
+      const hasPendingRequest = agentConnectionTimeouts.has(conversationId?.toString());
+      
+      if (hasPendingRequest) {
+        // Get conversation and visitor details
+        const conversation = await Conversation.findById(conversationId).lean();
+        if (conversation && conversation.aiChat === true) {
+          const visitor = await Visitor.findById(conversation.visitor).lean();
+          
+          const notificationData = {
+            conversationId,
+            visitorId: conversation.visitor,
+            visitor: visitor,
+            message: "Visitor requested to connect to an agent",
+            timestamp: new Date(),
+          };
+          
+          // Emit the notification to this socket
+          socket.emit("agent-connection-notification", notificationData);
+          
+          callback?.({ success: true, hasPendingRequest: true });
+        } else {
+          callback?.({ success: true, hasPendingRequest: false });
+        }
+      } else {
+        callback?.({ success: true, hasPendingRequest: false });
+      }
+    } catch (error) {
+      console.error("check-pending-agent-request error:", error.message);
+      callback?.({ success: false, error: error.message });
     }
   });
 

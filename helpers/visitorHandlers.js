@@ -16,6 +16,9 @@ const { checkPlanLimits } = require("../services/PlanService");
 // Store active timeouts for agent connection requests
 const agentConnectionTimeouts = new Map();
 
+// Export for use in other handlers
+module.exports.agentConnectionTimeouts = agentConnectionTimeouts;
+
 const initializeVisitorEvents = (io, socket) => {
   const { agentId } = socket;
   const { userId } = socket;
@@ -365,4 +368,5 @@ const initializeVisitorEvents = (io, socket) => {
 
 module.exports = {
   initializeVisitorEvents,
+  agentConnectionTimeouts,
 };
