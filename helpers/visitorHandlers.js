@@ -98,11 +98,18 @@ const initializeVisitorEvents = (io, socket) => {
         console.log('⚠️ visitor-connect: No conversation found, defaulting aiChat to true');
       }
 
+      // Prepare conversation feedback data
+      const conversationFeedback = conversation ? {
+        feedback: conversation.feedback,
+        comment: conversation.comment
+      } : null;
+
       // Emit visitor-connect-response with visitor data
       socket.emit("visitor-connect-response", {
         chatMessages,
         themeSettings,
         aiChat: aiChat,
+        conversationFeedback: conversationFeedback,
       });
     } catch (error) {
       console.error("Error handling visitor-connect:", error);
@@ -316,11 +323,12 @@ const initializeVisitorEvents = (io, socket) => {
 
   socket.on(
     "conversation-feedback",
-    async ({ conversationId, feedback }, callback) => {
+    async ({ conversationId, feedback, comment }, callback) => {
       try {
         const updatedMessage = await ConversationController.updateFeedback(
           conversationId,
-          feedback
+          feedback,
+          comment
         );
         callback?.({ success: true, updatedMessage });
       } catch (error) {
@@ -340,9 +348,46 @@ const initializeVisitorEvents = (io, socket) => {
         );
         callback?.({ success: true });
 
-        io.to(`conversation-${conversationId}`).emit("visitor-close-chat", {
-          conversationStatus: "close",
-        });
+        // Get conversation to find userId and agentId
+        const conversation = await Conversation.findById(conversationId).lean();
+        if (conversation) {
+          const userId = conversation.userId;
+          const agentId = conversation.agentId;
+          
+          // Emit to conversation room
+          io.to(`conversation-${conversationId}`).emit("visitor-close-chat", {
+            conversationStatus: "close",
+          });
+          
+          // Emit to client room
+          if (userId) {
+            io.to(`user-${userId}`).emit("conversation-close-triggered", {
+              conversationStatus: "close",
+              conversationId: conversationId
+            });
+          }
+          
+          // Emit to agent room if conversation is assigned to an agent
+          if (agentId) {
+            io.to(`user-${agentId}`).emit("conversation-close-triggered", {
+              conversationStatus: "close",
+              conversationId: conversationId
+            });
+          }
+          
+          // Also emit to all agents for this client
+          if (userId) {
+            const Agent = require("../models/Agent");
+            const agents = await Agent.find({ userId, status: 'approved' }).lean();
+            agents.forEach(agent => {
+              io.to(`user-${agent._id}`).emit("conversation-close-triggered", {
+                conversationStatus: "close",
+                conversationId: conversationId
+              });
+            });
+          }
+        }
+        
         socket.leave(conversationRoom);
       } catch (error) {
         console.error("close-conversation error:", error.message);

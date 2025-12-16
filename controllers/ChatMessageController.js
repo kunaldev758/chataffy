@@ -43,7 +43,23 @@ ChatMessageController.getAllChatMessages = getAllChatMessages;
 ChatMessageController.getAllChatMessagesAPI = async (req, res) => {
   try {
     const chatMessages = await getAllChatMessages(req.body.id); //conversationId
-    res.json({ chatMessages: chatMessages, conversationOpenStatus: "open" });
+    const conversationId = chatMessages[0]?.conversation_id;
+    let conversationData = null;
+    if (conversationId) {
+      const Conversation = require("../models/Conversation");
+      const conversation = await Conversation.findById(conversationId).lean();
+      if (conversation) {
+        conversationData = {
+          feedback: conversation.feedback,
+          comment: conversation.comment
+        };
+      }
+    }
+    res.json({ 
+      chatMessages: chatMessages, 
+      conversationOpenStatus: "open",
+      conversationFeedback: conversationData
+    });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch chat messages" });
   }
@@ -58,10 +74,26 @@ ChatMessageController.getAllOldChatMessages = async (req, res) => {
       chatMessages = await ChatMessage.find({ conversation_id })
         .populate('agentId', 'name avatar isClient')
         .lean();
+      
+      // Get conversation feedback data
+      const Conversation = require("../models/Conversation");
+      const conversation = await Conversation.findById(conversation_id).lean();
+      let conversationData = null;
+      if (conversation) {
+        conversationData = {
+          feedback: conversation.feedback,
+          comment: conversation.comment
+        };
+      }
+      
+      res.json({ 
+        chatMessages: chatMessages, 
+        conversationOpenStatus: "close",
+        conversationFeedback: conversationData
+      });
     } else {
       throw new error();
     }
-    res.json({ chatMessages: chatMessages, conversationOpenStatus: "close" });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch chat messages" });
   }

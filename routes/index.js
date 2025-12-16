@@ -118,6 +118,9 @@ router.post('/logout',middleware, UserController.logoutUser);
 //Get Client
 router.post('/client',middleware,UserController.getClient);
 
+//Update Client Status (updates client's agent record)
+router.post('/clients/status',middleware,UserController.updateClientStatus);
+
 // Scraping management
 router.post('/openaiScrape',middleware, scrapingController.startSitemapScraping);
 router.post('/continueAfterUpgrade',middleware, scrapingController.ContinueScrappingAfterUpgrade);

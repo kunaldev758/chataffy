@@ -217,11 +217,83 @@ UserController.getClient = async (req,res) => {
       return res.status(404).json({ status_code: 404, status: false, message: 'Client not found' });
     }
 
-    res.json({ status_code: 200, status: true, client });
+    // Also get the client's agent record (where isClient: true)
+    const Agent = require('../models/Agent');
+    const clientAgent = await Agent.findOne({ userId: userId, isClient: true }).select('-password');
+    
+    // Include agent data in response if found
+    const response = {
+      status_code: 200,
+      status: true,
+      client: client.toObject ? client.toObject() : client
+    };
+    
+    if (clientAgent) {
+      response.clientAgent = clientAgent.toObject ? clientAgent.toObject() : clientAgent;
+    }
+
+    res.json(response);
   } catch (error) {
     res.status(500).json({ status_code: 500, status: false, message: 'Failed to retrieve client' });
   }
 }
+
+// Update client status (online/offline) - updates the client's agent record
+UserController.updateClientStatus = async (req, res) => {
+  try {
+    const { isActive } = req.body;
+    const userId = req.body.userId || req.user?.userId; // Get userId from request body or auth middleware
+    
+    if (!userId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+    }
+
+    // Find the client's agent record (where isClient: true)
+    const Agent = require('../models/Agent');
+    const clientAgent = await Agent.findOne({ userId: userId, isClient: true });
+
+    if (!clientAgent) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'Client agent not found' });
+    }
+
+    clientAgent.isActive = isActive;
+    clientAgent.lastActive = isActive ? new Date() : null;
+    await clientAgent.save();
+
+    // Emit socket event to notify about client status change
+    const appEvents = require("../events");
+    const updatedClientData = {
+      _id: clientAgent._id,
+      userId: clientAgent.userId,
+      email: clientAgent.email,
+      name: clientAgent.name,
+      isActive: clientAgent.isActive,
+      lastActive: clientAgent.lastActive,
+      isClient: true,
+    };
+
+    // Emit to the client's room (userId) so inbox can update
+    if (clientAgent.userId) {
+      appEvents.emit("userEvent", clientAgent.userId.toString(), "client-status-updated", updatedClientData);
+      // Also emit agent-status-updated for consistency
+      appEvents.emit("userEvent", clientAgent.userId.toString(), "agent-status-updated", updatedClientData);
+    }
+
+    // Also emit to the agent's own room (agentId)
+    appEvents.emit("userEvent", clientAgent._id.toString(), "client-status-updated", updatedClientData);
+    appEvents.emit("userEvent", clientAgent._id.toString(), "agent-status-updated", updatedClientData);
+
+    res.json({
+      status_code: 200,
+      status: true,
+      message: "Client status updated successfully",
+      agent: updatedClientData,
+    });
+  } catch (error) {
+    console.error("Error updating client status:", error);
+    res.status(500).json({ status_code: 500, status: false, message: "Error updating client status" });
+  }
+};
 // Google OAuth exchange (login/signup)
 UserController.googleOAuth = async (req, res) => {
   try {

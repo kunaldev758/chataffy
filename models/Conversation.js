@@ -30,6 +30,7 @@ const conversationSchema = new mongoose.Schema(
     },
     aiChat: { type: Boolean, default: true },
     feedback: { type: Boolean },
+    comment: { type: String },
     is_started:{type: Boolean, default: false },
     transferredAt: {
       type: Date,

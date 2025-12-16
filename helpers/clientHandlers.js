@@ -75,7 +75,7 @@ const initializeClientEvents = (io, socket) => {
         userId: userId,
         // agentId: socket.agentId,
         conversationOpenStatus: "open",
-      }).sort({ createdAt: -1 });
+      }).populate('agentId', 'name avatar isClient').sort({ createdAt: -1 });
 
       const updatedVisitors = await Promise.all(
         conv.map(async (conv) => {
@@ -105,7 +105,7 @@ const initializeClientEvents = (io, socket) => {
         userId: userId,
         // agentId: socket.agentId,
         conversationOpenStatus: "close",
-      }).sort({ createdAt: -1 });
+      }).populate('agentId', 'name avatar isClient').sort({ createdAt: -1 });
 
       const updatedVisitors = await Promise.all(
         conv.map(async (conv) => {

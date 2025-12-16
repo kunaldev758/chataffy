@@ -2,6 +2,7 @@ const ConversationTag = require("../models/ConversationTag");
 const Conversation = require("../models/Conversation");
 const Visitor = require("../models/Visitor");
 const ChatMessage = require("../models/ChatMessage");
+const Agent = require("../models/Agent");
 const emailService = require("../services/emailService");
 const ConversationController = {};
 
@@ -69,9 +70,13 @@ ConversationController.createConversation = async (visitorId, userId, agentId) =
   }
 };
 
-ConversationController.updateFeedback = async (conversationId, feedback) => {
+ConversationController.updateFeedback = async (conversationId, feedback, comment) => {
   try {
-    await Conversation.findByIdAndUpdate(conversationId, { feedback: feedback });
+    const updateData = { feedback: feedback };
+    if (comment !== undefined && comment !== null) {
+      updateData.comment = comment;
+    }
+    await Conversation.findByIdAndUpdate(conversationId, updateData);
   } catch (err) {
     throw err;
   }
@@ -139,7 +144,7 @@ ConversationController.searchByTagOrName = async (query, userId) => {
       const conversation = await Conversation.findOne({
         visitor: visitor._id,
         is_started:true,
-      }).lean(); // use lean() for a plain JS object
+      }).populate('agentId', 'name avatar isClient').lean(); // use lean() for a plain JS object
   
       if (conversation) {
         conversation["visitor"] = visitor; // Embed visitor in conversation
@@ -158,7 +163,7 @@ ConversationController.searchByTagOrName = async (query, userId) => {
    const tagConversations = await Promise.all(
     tags.map(async (tag) => {
       // const visitor = visitorDoc.toObject();
-      const conversation = await Conversation.findOne({ _id: tag.conversation, is_started:true, }).lean();
+      const conversation = await Conversation.findOne({ _id: tag.conversation, is_started:true, }).populate('agentId', 'name avatar isClient').lean();
   
       if (conversation) {
         const visitor = await Visitor.findOne({ _id: conversation.visitor }).lean();
