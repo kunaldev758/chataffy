@@ -313,6 +313,93 @@ class QuestionAnsweringSystem {
     return agentKeywords.some(keyword => normalizedQuestion.includes(keyword));
   }
 
+  // Determine appropriate max_tokens based on query type
+  determineMaxTokens(question) {
+    const normalizedQuestion = question.toLowerCase().trim();
+    
+    // Keywords that indicate queries requiring longer responses
+    const longResponseKeywords = [
+      'list',
+      'top',
+      'best',
+      'all',
+      'multiple',
+      'several',
+      'many',
+      'links',
+      'link',
+      'url',
+      'urls',
+      'products',
+      'items',
+      'options',
+      'ways',
+      'steps',
+      'examples',
+      'recommendations',
+      'suggestions',
+      'compare',
+      'difference',
+      'differences',
+      'explain',
+      'detailed',
+      'comprehensive',
+      'complete',
+      'full',
+      'everything',
+      'show me',
+      'give me',
+      'provide me',
+      'send me'
+    ];
+    
+    // Check for numeric patterns indicating quantity (e.g., "10 best", "5 ways")
+    const numericPattern = /\b(\d+)\s+(best|top|ways|steps|items|products|links|options|recommendations|suggestions|examples)\b/i;
+    const hasNumericQuantity = numericPattern.test(question);
+    
+    // Check if question contains long response keywords
+    const hasLongResponseKeyword = longResponseKeywords.some(keyword => 
+      normalizedQuestion.includes(keyword)
+    );
+    
+    // Check for questions asking for lists or multiple items
+    const isListRequest = /\b(list|lists|listing)\b/i.test(question) || 
+                         /\b(all|every|each)\b/i.test(question);
+    
+    // Check for questions asking for links/URLs
+    const isLinkRequest = /\b(link|links|url|urls|website|websites|page|pages)\b/i.test(question);
+    
+    // Check for questions asking for detailed explanations
+    const isDetailedRequest = /\b(explain|describe|detail|detailed|comprehensive|complete|full|everything|how\s+does|how\s+do|what\s+are|what\s+is)\b/i.test(question);
+    
+    // Determine max_tokens based on query characteristics
+    if (hasNumericQuantity || (hasLongResponseKeyword && (isListRequest || isLinkRequest))) {
+      // For queries asking for specific quantities (e.g., "10 best t-shirts") or lists with links
+      // Extract the number if present
+      const numberMatch = question.match(/\b(\d+)\b/);
+      const requestedQuantity = numberMatch ? parseInt(numberMatch[1], 10) : 5;
+      
+      // Calculate tokens: base 200 + (quantity * 50) + extra for links (100 per link)
+      // For example: "10 best t-shirts links" = 200 + (10 * 50) + (10 * 100) = 1700 tokens
+      if (isLinkRequest) {
+        return Math.min(2000, 200 + (requestedQuantity * 150)); // 150 tokens per link item
+      }
+      return Math.min(1000, 200 + (requestedQuantity * 80)); // 80 tokens per list item
+    } else if (isLinkRequest && hasLongResponseKeyword) {
+      // Multiple links requested without specific number
+      return 800;
+    } else if (isListRequest || (hasLongResponseKeyword && isDetailedRequest)) {
+      // List or detailed explanation requested
+      return 600;
+    } else if (hasLongResponseKeyword) {
+      // Has keywords suggesting longer response but not extreme
+      return 400;
+    }
+    
+    // Default for simple queries
+    return 200;
+  }
+
   async generateAnswer(
     question,
     context,
@@ -391,6 +478,16 @@ Keep responses short, direct, friendly, and professional. Only use information e
     - **REMEMBER: Maximum 1-2 sentences total - be direct and concise**`;
 
     try {
+      // Determine dynamic max_tokens based on query type
+      const dynamicMaxTokens = this.determineMaxTokens(question);
+      
+      // Log when dynamic token limit is applied (only if different from default)
+      if (dynamicMaxTokens > 200) {
+        console.log(
+          `[QueryController] Dynamic token limit applied: ${dynamicMaxTokens} tokens for query: "${question.substring(0, 60)}..."`
+        );
+      }
+      
       const response = await openai.chat.completions.create({
         model: CHAT_MODEL,
         messages: [
@@ -398,7 +495,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           { role: "user", content: userPrompt },
         ],
         temperature: 0.4, // Increased for more natural, human-like responses
-        max_tokens: 200, // Reduced for shorter, more concise responses (1-2 sentences)
+        max_tokens: dynamicMaxTokens, // Dynamic token limit based on query type
       });
 
       const answer =
