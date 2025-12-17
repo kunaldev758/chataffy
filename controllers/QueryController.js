@@ -400,6 +400,101 @@ class QuestionAnsweringSystem {
     return 200;
   }
 
+  // Simple intent detector to pick structural vs semantic retrieval
+  detectIntent(query) {
+    const q = (query || "").toLowerCase();
+    const structuralHints = [
+      "list",
+      "show",
+      "give me",
+      "links",
+      "how many",
+      "all ",
+      "urls",
+      "products",
+      "collections",
+      "top "
+    ];
+    const hasHint = structuralHints.some((h) => q.includes(h));
+    return hasHint ? "STRUCTURAL" : "SEMANTIC";
+  }
+
+  extractRequestedCount(question, fallback = 5) {
+    const match = (question || "").match(/\b(\d+)\b/);
+    if (match) {
+      const parsed = parseInt(match[1], 10);
+      if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+    }
+    return fallback;
+  }
+
+  extractKeywords(query) {
+    const stop = new Set([
+      "the","a","an","and","or","of","for","to","in","on","with","all","show",
+      "list","give","me","links","url","urls","how","many","top","best","your",
+      "their","our","my","there","is","are","do","you","please","products",
+      "collections","link","give","items","item"
+    ]);
+    return (query || "")
+      .toLowerCase()
+      .replace(/[^\w\s-]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !stop.has(w));
+  }
+
+  dedupeByUrl(points) {
+    const map = new Map();
+    for (const p of points) {
+      const url = p?.payload?.url;
+      if (!url) continue;
+      if (!map.has(url)) {
+        map.set(url, p.payload);
+      }
+    }
+    return Array.from(map.values());
+  }
+
+  async structuralFetchByKeywords(collectionName, keywords, userId, limit = 500) {
+    if (!keywords || keywords.length === 0) return [];
+
+    const filter =
+      userId && userId.toString().length
+        ? { must: [{ key: "user_id", match: { value: userId.toString() } }] }
+        : undefined;
+
+    let points = [];
+    let nextPage = null;
+    const batchSize = Math.min(limit, 256);
+
+    while (points.length < limit) {
+      const params = {
+        limit: batchSize,
+        with_payload: true,
+        ...(filter ? { filter } : {}),
+        ...(nextPage ? { offset: nextPage } : {}),
+      };
+
+      const res = await this.qdrantClient.scroll(collectionName, params);
+      const batch = res.points || [];
+
+      const filtered = batch.filter((p) => {
+        const url = (p.payload?.url || "").toLowerCase();
+        const title = (p.payload?.title || "").toLowerCase();
+        const text = (p.payload?.text || "").toLowerCase();
+        return keywords.some(
+          (k) => url.includes(k) || title.includes(k) || text.includes(k)
+        );
+      });
+
+      points.push(...filtered);
+
+      if (!res.next_page_offset) break;
+      nextPage = res.next_page_offset;
+    }
+
+    return points;
+  }
+
   async generateAnswer(
     question,
     context,
@@ -689,19 +784,15 @@ Keep responses short, direct, friendly, and professional. Only use information e
     // Lower thresholds (0.2-0.3) may include irrelevant results
     // Higher thresholds (0.5-0.7) may be too strict and miss relevant results
     const { topK = 5, scoreThreshold = 0.4 } = options;
+    // Coerce to a safe numeric value so downstream logic is consistent
+    const requestedTopK = Math.max(1, Number(topK) || 5);
 
     try {
       // 1. Get Chat History
       const chatSession = await this.getChatHistory(conversationId);
       const chatHistory = this.formatChatHistory(chatSession, question);
 
-      // 3. Generate Question Embedding
-      const questionEmbedding = await this.embeddingModel.embedQuery(question);
-      if (!questionEmbedding) {
-        throw new Error("Failed to generate question embedding.");
-      }
-
-      // 4. Get Client, Widget, and WebsiteData
+      // 3. Get Client, Widget, and WebsiteData
       const clientData = await Client.findOne({ userId }).lean();
       const widgetData = await Widget.findOne({ userId }).lean();
       const websiteData = await WebsiteData.findOne({ userId }).lean();
@@ -724,13 +815,63 @@ Keep responses short, direct, friendly, and professional. Only use information e
           ? clientData?.qdrantIndexName
           : clientData?.qdrantIndexNamePaid;
 
-      // 5. Query Qdrant
-      // Convert userId to string to ensure proper matching in Qdrant filter
+      // 4. Intent detection to choose retrieval mode
+      const intent = this.detectIntent(question);
       const userIdString = userId?.toString();
+
+      if (intent === "STRUCTURAL") {
+        const keywords = this.extractKeywords(question);
+        const requestedCount = this.extractRequestedCount(question, requestedTopK);
+
+        const structuralPoints = await this.structuralFetchByKeywords(
+          collectionName,
+          keywords,
+          userIdString,
+          Math.max(500, requestedCount * 5)
+        );
+
+        const uniquePages = this.dedupeByUrl(structuralPoints);
+        const topItems = uniquePages.slice(0, requestedCount);
+
+        if (topItems.length > 0) {
+          const listItems = topItems
+            .map((p, idx) => {
+              const url = p.url || "#";
+              const title = p.title || p.url || `Item ${idx + 1}`;
+              return `<li><a href="${url}" target="_blank" style="color:#007bff; text-decoration:underline;">${title}</a></li>`;
+            })
+            .join("");
+
+          const descriptor = keywords.length ? keywords.slice(0, 3).join(", ") : "items";
+          const structuralAnswer = `<p>Here are ${topItems.length} ${descriptor} links:</p><ul>${listItems}</ul>`;
+
+          return {
+            success: true,
+            answer: structuralAnswer,
+            conversationId,
+            isAgentRequest: false,
+          };
+        }
+
+        // If no structural hits, fall back to semantic path below
+        console.warn(
+          `[QueryController] STRUCTURAL intent detected but no matching payload results for keywords [${keywords.join(
+            ", "
+          )}]. Falling back to semantic search.`
+        );
+      }
+
+      // 5. Semantic path: generate question embedding
+      const questionEmbedding = await this.embeddingModel.embedQuery(question);
+      if (!questionEmbedding) {
+        throw new Error("Failed to generate question embedding.");
+      }
+
+      // 6. Query Qdrant (semantic)
       const queryResponse = await this.queryQdrant(
         collectionName,
         questionEmbedding,
-        topK,
+        requestedTopK,
         userIdString
       );
 
@@ -793,6 +934,30 @@ Keep responses short, direct, friendly, and professional. Only use information e
           console.log(
             `[QueryController] Fallback threshold found ${fallbackMatches.length} matches. Using these results.`
           );
+        }
+      }
+
+      // If we still have fewer matches than requested, relax threshold by
+      // bringing back the highest-scoring remaining results (but keep
+      // ordering and avoid irrelevant queries).
+      if (
+        !isIrrelevant &&
+        queryResponse.length > 0 &&
+        relevantMatches.length < requestedTopK
+      ) {
+        const needed = requestedTopK - relevantMatches.length;
+        const supplemental = [...queryResponse]
+          .sort((a, b) => b.score - a.score)
+          .filter(
+            (m) => !relevantMatches.find((r) => r.id === m.id)
+          )
+          .slice(0, needed);
+
+        if (supplemental.length > 0) {
+          console.warn(
+            `[QueryController] Only ${relevantMatches.length} matches met threshold ${effectiveThreshold}. Adding ${supplemental.length} top-scoring remaining matches to reach requested topK ${requestedTopK}.`
+          );
+          relevantMatches = [...relevantMatches, ...supplemental];
         }
       }
 
