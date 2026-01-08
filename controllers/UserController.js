@@ -36,6 +36,11 @@ UserController.createUser = async (req, res) => {
     const { email, password, role } = req.body;
     // Check if the email is already registered
     const existingUser = await User.findOne({ email });
+    // Check if the email is already registered as an agent
+    const existingAgentForEmail = await Agent.findOne({ email });
+    if (existingAgentForEmail) {
+      return res.status(400).json({ status_code: 201, status: false, message: 'Email already in use' });
+    }
     if (existingUser) {
       return res.status(400).json({ status_code: 201, status: false, message: 'Email already in use' });
     }
@@ -314,84 +319,71 @@ UserController.googleOAuth = async (req, res) => {
       return res.status(401).json({ status_code: 401, status: false, message: 'Unable to extract Google ID' });
     }
 
-    let user = await User.findOne({ email });
-    if (user && user.isDeleted) {
-      return res.status(403).json({ status_code: 403, status: false, message: 'Account is deactivated' });
+    // Check if email already exists in User or Agent
+    const existingUser = await User.findOne({ email });
+    const existingAgent = await Agent.findOne({ email });
+    
+    if (existingAgent) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'Email already in use' });
+    }
+    
+    if (existingUser) {
+      if (existingUser.isDeleted) {
+        return res.status(403).json({ status_code: 403, status: false, message: 'Account is deactivated' });
+      }
+      return res.status(400).json({ status_code: 400, status: false, message: 'Email already in use' });
     }
 
-    const isNewUser = !user;
-    if (!user) {
-      user = new User({
-        email,
-        role: 'client',
-        email_verified: true,
-        provider: 'google',
-        googleId,
-        // set a random password to satisfy schema if needed
-        password: crypto.randomBytes(16).toString('hex')
+    // Create new user only if email doesn't exist in either collection
+    const isNewUser = true;
+    const user = new User({
+      email,
+      role: 'client',
+      email_verified: true,
+      provider: 'google',
+      googleId,
+      // set a random password to satisfy schema if needed
+      password: crypto.randomBytes(16).toString('hex')
+    });
+
+    const userId = user.id;
+    await user.save();
+
+    // Create related Client and Widget like in createUser
+    const client = new Client({ userId });
+    client.qdrantIndexName = `${userId}`;
+    client.qdrantIndexNamePaid = crypto.randomBytes(16).toString('hex');
+    client.email = email;
+    await client.save();
+
+    const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
+    const widget = new Widget({ userId, widgetToken });
+    await widget.save();
+
+    // Create agent for client
+    try {
+      const agentPassword = crypto.randomBytes(16).toString('hex');
+      const hashedPassword = await bcrypt.hash(agentPassword, 10);
+      const agent = new Agent({
+        name: 'client',
+        email: email,
+        password: hashedPassword,
+        userId: userId,
+        status: 'approved',
+        isClient: true,
+        avatar: '/uploads/default-avatar.png' // Default avatar path
       });
-
-      const userId = user.id;
-      await user.save();
-
-      // Create related Client and Widget like in createUser
-      
-      const client = new Client({ userId });
-      client.qdrantIndexName = `${userId}`;
-      client.qdrantIndexNamePaid = crypto.randomBytes(16).toString('hex');
-      client.email = email;
-      await client.save();
-
-      const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
-      const widget = new Widget({ userId, widgetToken });
-      await widget.save();
-
-      // Create agent for client
-      try {
-        // Check if agent already exists with this email (email is unique)
-        const existingAgent = await Agent.findOne({ email });
-        if (!existingAgent) {
-          const agentPassword = crypto.randomBytes(16).toString('hex');
-          const hashedPassword = await bcrypt.hash(agentPassword, 10);
-          const agent = new Agent({
-            name: 'client',
-            email: email,
-            password: hashedPassword,
-            userId: userId,
-            status: 'approved',
-            isClient: true,
-            avatar: '/uploads/default-avatar.png' // Default avatar path
-          });
-          await agent.save();
-        } else {
-          // If agent exists, update it to be a client agent if needed
-          if (!existingAgent.isClient || existingAgent.userId.toString() !== userId.toString()) {
-            existingAgent.isClient = true;
-            existingAgent.userId = userId;
-            existingAgent.status = 'approved';
-            if (!existingAgent.avatar) {
-              existingAgent.avatar = '/uploads/default-avatar.png';
-            }
-            await existingAgent.save();
-          }
-        }
-      } catch (agentError) {
-        // Log error but don't fail client creation if agent creation fails
-        console.error('Error creating/updating client agent:', agentError);
-        console.error('Agent error details:', {
-          message: agentError.message,
-          code: agentError.code,
-          keyPattern: agentError.keyPattern,
-          keyValue: agentError.keyValue,
-          stack: agentError.stack
-        });
-      }
-    } else {
-      // Ensure linkage and verification
-      if (!user.googleId) user.googleId = googleId;
-      user.provider = 'google';
-      user.email_verified = true;
-      await user.save();
+      await agent.save();
+    } catch (agentError) {
+      // Log error but don't fail client creation if agent creation fails
+      console.error('Error creating client agent:', agentError);
+      console.error('Agent error details:', {
+        message: agentError.message,
+        code: agentError.code,
+        keyPattern: agentError.keyPattern,
+        keyValue: agentError.keyValue,
+        stack: agentError.stack
+      });
     }
 
     const appToken = user.generateAuthToken();

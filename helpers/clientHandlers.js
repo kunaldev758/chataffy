@@ -815,16 +815,14 @@ const initializeClientEvents = (io, socket) => {
   // Handle agent connection decline
   socket.on("decline-agent-connection", async ({ conversationId }, callback) => {
     try {
-      // Just cancel the notification, don't change conversation state
-      io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });
-      
+      // Only cancel the notification for the specific agent/client that declined
+      // Don't broadcast to all agents - keep request active for others
       if (socket.type === "agent") {
+        // Agent declined - only cancel for this specific agent
         io.to(`user-${socket.agentId}`).emit("agent-connection-cancelled", { conversationId });
       } else {
-        const agents = await Agent.find({ userId, status: 'approved' }).lean();
-        agents.forEach(agent => {
-          io.to(`user-${agent._id}`).emit("agent-connection-cancelled", { conversationId });
-        });
+        // Client declined - only cancel for this client
+        io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });
       }
 
       callback?.({ success: true });

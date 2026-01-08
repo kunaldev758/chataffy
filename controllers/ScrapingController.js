@@ -139,6 +139,14 @@ async bulkInsertUrls(userId, urls) {
 
   async extractUrlsFromSitemap(sitemapUrl) {
     try {
+      // Auto-add https:// prefix if protocol is missing
+      if (sitemapUrl && typeof sitemapUrl === 'string') {
+        const trimmedUrl = sitemapUrl.trim();
+        if (!trimmedUrl.startsWith('http://') && !trimmedUrl.startsWith('https://')) {
+          sitemapUrl = `https://${trimmedUrl}`;
+        }
+      }
+
       // If a website URL (not a sitemap) is provided, try to discover sitemaps or fallback to homepage links
       let urls = [];
       let isWebsiteUrl = false;
