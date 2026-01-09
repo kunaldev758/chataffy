@@ -319,9 +319,9 @@ UserController.googleOAuth = async (req, res) => {
       return res.status(401).json({ status_code: 401, status: false, message: 'Unable to extract Google ID' });
     }
 
-    // Check if email already exists in Agent (agents cannot use Google OAuth if email exists)
+    // Check if email already exists in Agent (only block if agent is not a client agent)
     const existingAgent = await Agent.findOne({ email });
-    if (existingAgent) {
+    if (existingAgent && !existingAgent.isClient) {
       return res.status(400).json({ status_code: 400, status: false, message: 'Email already in use' });
     }
 
