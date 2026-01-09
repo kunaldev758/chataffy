@@ -319,73 +319,85 @@ UserController.googleOAuth = async (req, res) => {
       return res.status(401).json({ status_code: 401, status: false, message: 'Unable to extract Google ID' });
     }
 
-    // Check if email already exists in User or Agent
-    const existingUser = await User.findOne({ email });
+    // Check if email already exists in Agent (agents cannot use Google OAuth if email exists)
     const existingAgent = await Agent.findOne({ email });
-    
     if (existingAgent) {
       return res.status(400).json({ status_code: 400, status: false, message: 'Email already in use' });
     }
-    
-    if (existingUser) {
-      if (existingUser.isDeleted) {
+
+    // Check if user already exists for login flow
+    let user = await User.findOne({ email });
+    let isNewUser = false;
+
+    if (user) {
+      // User exists - LOGIN flow
+      if (user.isDeleted) {
         return res.status(403).json({ status_code: 403, status: false, message: 'Account is deactivated' });
       }
-      return res.status(400).json({ status_code: 400, status: false, message: 'Email already in use' });
+
+      // Update user with Google info if not already set
+      if (!user.googleId) user.googleId = googleId;
+      if (!user.provider || user.provider !== 'google') user.provider = 'google';
+      user.email_verified = true;
+      await user.save();
+
+      isNewUser = false;
+    } else {
+      // User doesn't exist - SIGNUP flow
+      user = new User({
+        email,
+        role: 'client',
+        email_verified: true,
+        provider: 'google',
+        googleId,
+        // set a random password to satisfy schema if needed
+        password: crypto.randomBytes(16).toString('hex')
+      });
+
+      const userId = user.id;
+      await user.save();
+
+      // Create related Client and Widget like in createUser
+      const client = new Client({ userId });
+      client.qdrantIndexName = `${userId}`;
+      client.qdrantIndexNamePaid = crypto.randomBytes(16).toString('hex');
+      client.email = email;
+      await client.save();
+
+      const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
+      const widget = new Widget({ userId, widgetToken });
+      await widget.save();
+
+      // Create agent for client
+      try {
+        const agentPassword = crypto.randomBytes(16).toString('hex');
+        const hashedPassword = await bcrypt.hash(agentPassword, 10);
+        const agent = new Agent({
+          name: 'client',
+          email: email,
+          password: hashedPassword,
+          userId: userId,
+          status: 'approved',
+          isClient: true,
+          avatar: '/uploads/default-avatar.png' // Default avatar path
+        });
+        await agent.save();
+      } catch (agentError) {
+        // Log error but don't fail client creation if agent creation fails
+        console.error('Error creating client agent:', agentError);
+        console.error('Agent error details:', {
+          message: agentError.message,
+          code: agentError.code,
+          keyPattern: agentError.keyPattern,
+          keyValue: agentError.keyValue,
+          stack: agentError.stack
+        });
+      }
+
+      isNewUser = true;
     }
 
-    // Create new user only if email doesn't exist in either collection
-    const isNewUser = true;
-    const user = new User({
-      email,
-      role: 'client',
-      email_verified: true,
-      provider: 'google',
-      googleId,
-      // set a random password to satisfy schema if needed
-      password: crypto.randomBytes(16).toString('hex')
-    });
-
-    const userId = user.id;
-    await user.save();
-
-    // Create related Client and Widget like in createUser
-    const client = new Client({ userId });
-    client.qdrantIndexName = `${userId}`;
-    client.qdrantIndexNamePaid = crypto.randomBytes(16).toString('hex');
-    client.email = email;
-    await client.save();
-
-    const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
-    const widget = new Widget({ userId, widgetToken });
-    await widget.save();
-
-    // Create agent for client
-    try {
-      const agentPassword = crypto.randomBytes(16).toString('hex');
-      const hashedPassword = await bcrypt.hash(agentPassword, 10);
-      const agent = new Agent({
-        name: 'client',
-        email: email,
-        password: hashedPassword,
-        userId: userId,
-        status: 'approved',
-        isClient: true,
-        avatar: '/uploads/default-avatar.png' // Default avatar path
-      });
-      await agent.save();
-    } catch (agentError) {
-      // Log error but don't fail client creation if agent creation fails
-      console.error('Error creating client agent:', agentError);
-      console.error('Agent error details:', {
-        message: agentError.message,
-        code: agentError.code,
-        keyPattern: agentError.keyPattern,
-        keyValue: agentError.keyValue,
-        stack: agentError.stack
-      });
-    }
-
+    // Generate token for both login and signup
     const appToken = user.generateAuthToken();
     user.auth_token = appToken;
     await user.save();
