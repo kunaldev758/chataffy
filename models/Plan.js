@@ -40,6 +40,14 @@ const planSchema = new mongoose.Schema({
       type: Number,
       default: 1
     },
+    maxHumanAgentsPerAccount: {
+      type: Number,
+      default: 1
+    },
+    maxTokensUsage: {
+      type: Number,
+      default: 1000000
+    },
     maxStorage: {
       type: Number,
       default: 1024 * 1024 * 1024 // 1GB default

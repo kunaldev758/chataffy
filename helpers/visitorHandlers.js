@@ -10,7 +10,9 @@ const Client = require("../models/Client");
 const Conversation = require("../models/Conversation");
 const ChatMessage = require("../models/ChatMessage");
 const Agent = require("../models/Agent");
+const HumanAgent = require("../models/HumanAgent");
 const BlockedVisitorIp = require("../models/blockedVisitorIp");
+const NotificationController = require("../controllers/NotificationController");
 const { checkPlanLimits } = require("../services/PlanService");
 
 // Store active timeouts for agent connection requests
@@ -222,11 +224,18 @@ const initializeVisitorEvents = (io, socket) => {
             // Emit to client room
             io.to(`user-${userId}`).emit("agent-connection-notification", notificationData);
             
-            // Emit to all agents for this client
-            const agents = await Agent.find({ userId, status: 'approved', isActive: true }).lean();
-            agents.forEach(agent => {
+            // Emit to all agents for this client and create notifications
+            const agents = await HumanAgent.find({ userId, status: 'approved', isActive: true }).lean();
+            for (const agent of agents) {
               io.to(`user-${agent._id}`).emit("agent-connection-notification", notificationData);
-            });
+              await NotificationController.createAgentConnectionNotification(
+                agentId,
+                conversationId,
+                visitorId,
+                userId,
+                "Visitor requested to connect to an agent"
+              );
+            }
 
             // Set up 20-second timeout
             const timeoutId = setTimeout(async () => {

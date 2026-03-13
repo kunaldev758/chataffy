@@ -779,7 +779,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
     }
   }
 
-  async getAnswer(userId, question, conversationId, options = {}) {
+  async getAnswer(userId,agentId, question, conversationId, options = {}) {
     // Default threshold: 0.4 is reasonable for cosine similarity
     // Lower thresholds (0.2-0.3) may include irrelevant results
     // Higher thresholds (0.5-0.7) may be too strict and miss relevant results
@@ -794,30 +794,32 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       // 3. Get Client, Widget, and WebsiteData
       const clientData = await Client.findOne({ userId }).lean();
-      const widgetData = await Widget.findOne({ userId }).lean();
-      const websiteData = await WebsiteData.findOne({ userId }).lean();
+      const agentData = await Agent.findOne({ agentId }).lean();
+      const widgetData = await Widget.findOne({ agentId }).lean();
+      const websiteData = await WebsiteData.findOne({ agentId }).lean();
 
       if (
         !clientData ||
-        !clientData.qdrantIndexName ||
-        !clientData.qdrantIndexNamePaid
+        !agentData.qdrantIndexName ||
+        !agentData.qdrantIndexNamePaid
       ) {
-        throw new Error(`Qdrant collection not configured for user ${userId}`);
+        throw new Error(`Qdrant collection not configured for agent ${agentId}`);
       }
       if (!widgetData) {
-        throw new Error(`Widget data not found for user ${userId}`);
+        throw new Error(`Widget data not found for agent ${agentId}`);
       }
 
       // Use the same field name for compatibility, but it represents Qdrant collection now
 
       const collectionName =
         clientData?.plan == "free"
-          ? clientData?.qdrantIndexName
-          : clientData?.qdrantIndexNamePaid;
+          ? agentData?.qdrantIndexName
+          : agentData?.qdrantIndexNamePaid;
 
       // 4. Intent detection to choose retrieval mode
       const intent = this.detectIntent(question);
       const userIdString = userId?.toString();
+      const agentIdString = agentId?.toString();
 
       if (intent === "STRUCTURAL") {
         const keywords = this.extractKeywords(question);
@@ -826,7 +828,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         const structuralPoints = await this.structuralFetchByKeywords(
           collectionName,
           keywords,
-          userIdString,
+          agentIdString,
           Math.max(500, requestedCount * 5)
         );
 
@@ -872,17 +874,17 @@ Keep responses short, direct, friendly, and professional. Only use information e
         collectionName,
         questionEmbedding,
         requestedTopK,
-        userIdString
+        agentIdString
       );
 
       // Log if no results found at all
       if (queryResponse.length === 0) {
         console.warn(
-          `[QueryController] WARNING: No results found in collection "${collectionName}" for user "${userIdString}". This could mean:\n` +
+          `[QueryController] WARNING: No results found in collection "${collectionName}" for user "${agentIdString}". This could mean:\n` +
             `  1. Collection is empty or has no data for this user\n` +
             `  2. Data hasn't been indexed yet\n` +
             `  3. Collection name is incorrect\n` +
-            `  4. user_id filter is too restrictive`
+            `  4. agent_id filter is too restrictive`
         );
       }
 
@@ -1026,6 +1028,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         if (llmUsage) {
           logOpenAIUsage({
             userId,
+            agentId,
             tokens: llmUsage.total_tokens,
             requests: 1,
           });
@@ -1041,7 +1044,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             websiteData,
           );
         finalAnswer = accidentalAnswer;
-        logOpenAIUsage({ userId, tokens: llmUsage.total_tokens, requests: 1 });
+        logOpenAIUsage({ userId, agentId, tokens: llmUsage.total_tokens, requests: 1 });
       } else if ((relevantMatches.length === 0 || isIrrelevant) && !this.isSimpleGreeting(question) && !isAccidental) {
         // Default answer when no relevant context found (and not a greeting or accidental)
         // If query is completely irrelevant (low similarity scores), redirect politely like Fin
@@ -1058,7 +1061,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           websiteData,
         );
       finalAnswer = irrelaventAnswer;
-        logOpenAIUsage({ userId, tokens: llmUsage.total_tokens, requests: 1 });
+        logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       } else {
         // 6. Get Context and Generate Answer via LLM
         const context = this.getRelevantContext(relevantMatches);
@@ -1075,7 +1078,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             // widgetData.email || "support@example.com"
           );
         finalAnswer = generatedAnswer;
-        logOpenAIUsage({ userId, tokens: llmUsage.total_tokens, requests: 1 });
+        logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       }
 
       // 10. Prepare Sources
@@ -1122,21 +1125,23 @@ Keep responses short, direct, friendly, and professional. Only use information e
 // Route Handler
 async function handleQuestionAnswer(
   userId,
+  agentId,
   question,
   conversationId,
   options = {}
 ) {
   try {
-    if (!userId || !question || !conversationId) {
+    if (!userId || !agentId || !question || !conversationId) {
       return {
         success: false,
-        error: "userId, question, and conversationId are required.",
+        error: "userId, agentId, question, and conversationId are required.",
       };
     }
 
     const qa = new QuestionAnsweringSystem();
     const result = await qa.getAnswer(
       userId,
+      agentId,
       question,
       conversationId,
       options

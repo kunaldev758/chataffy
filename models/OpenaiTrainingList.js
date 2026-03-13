@@ -5,6 +5,11 @@ const trainingListSchema = new mongoose.Schema({
       required: true,
       index: true
     },
+    agentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: false,
+      ref: "Agent",
+    },
     type: {
       type: Number,
       required: true,

@@ -65,6 +65,7 @@ const scrapingController = require('../controllers/ScrapingController');
 const PlanAdminController = require('../controllers/PlanAdminController');
 const PlanController = require('../controllers/PlanController');
 const ConversationController = require('../controllers/ConversationController');
+const NotificationController = require('../controllers/NotificationController');
 const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
 
@@ -141,9 +142,6 @@ router.post('/getOldConversationMessages',middleware, ChatMessageController.getA
 
 // Enhanced Widget routes
 router.post('/getWidgetToken',middleware, WidgetController.getWidgetToken);
-router.post('/getBasicInfo',middleware, WidgetController.getBasicInfo);
-router.post('/setBasicInfo',middleware, WidgetController.setBasicInfo);
-
 // Logo upload with enhanced validation
 router.post('/uploadLogo/:userId',middleware, upload.single('logo'), WidgetController.uploadLogo);
 
@@ -165,6 +163,11 @@ router.post('/agents/:id/status',middleware, agentController.updateAgentStatus);
 router.post('/agents/:id/avatar',middleware, upload.single('avatar'), agentController.uploadAgentAvatar);
 
 router.post('/sendEmailForOfflineChat', ConversationController.sendEmailForOfflineChatController);
+
+// Notification routes
+router.get('/notifications/agent/:agentId', middleware, NotificationController.getByAgentId);
+router.put('/notifications/:id/seen', middleware, NotificationController.markAsSeen);
+router.put('/notifications/agent/:agentId/seen-all', middleware, NotificationController.markAllAsSeenByAgentId);
 
 // Error handling middleware for multer errors
 router.use((error, req, res, next) => {

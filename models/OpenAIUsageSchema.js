@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const openAIUsageSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  agentId: { type: mongoose.Schema.Types.ObjectId, ref: "Agent", required: false },
   date: { type: Date, default: Date.now },
   tokens: { type: Number, default: 0 },
   requests: { type: Number, default: 0 },

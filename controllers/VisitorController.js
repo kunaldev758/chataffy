@@ -104,7 +104,7 @@ const colors = [
 const getRandomElement = (array) =>
   array[Math.floor(Math.random() * array.length)];
 
-const generateUniqueName = async (userId) => {
+const generateUniqueName = async (userId,agentId) => {
   let name;
   let isUnique = false;
   let attempt = 0;
@@ -115,7 +115,7 @@ const generateUniqueName = async (userId) => {
     name = `${randomColors} ${randomThings}`; //  ${alphaSequence}
 
     // Check if the generated name already exists in the database
-    const existingVisitor = await Visitor.findOne({ userId, name });
+    const existingVisitor = await Visitor.findOne({ userId, agentId, name });
 
     // If the name doesn't exist, set isUnique to true
     if (!existingVisitor) {
@@ -152,11 +152,11 @@ VisitorController.getVisitorById = async (req, res) => {
 };
 
 // Create a new visitor
-const createVisitor = async (userId, visitorId) => {
+const createVisitor = async (userId, agentId, visitorId) => {
   try {
-    let name = await generateUniqueName(userId);
+    let name = await generateUniqueName(userId, agentId);
 
-    const visitor = new Visitor({ userId, name, visitorId });
+    const visitor = new Visitor({ userId, agentId, name, visitorId });
     await visitor.save();
     return visitor;
   } catch (error) {
@@ -165,9 +165,9 @@ const createVisitor = async (userId, visitorId) => {
 };
 VisitorController.createVisitor = createVisitor;
 VisitorController.createVisitorAPI = async (req, res) => {
-  const { name } = req.body;
+  const { userId, agentId, name } = req.body;
   try {
-    const visitor = await createVisitor(name);
+    const visitor = await createVisitor(userId, agentId, name);
     res.status(201).json(visitor);
   } catch (error) {
     res.status(500).json({ error: "Failed to create visitor" });

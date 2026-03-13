@@ -9,6 +9,11 @@ const websiteDataSchema = new Schema(
       ref: "User",
       unique: true,
     },
+    agentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: false,
+      ref: "Agent",
+    },
     // Company Information
     company_name: {
       type: String,

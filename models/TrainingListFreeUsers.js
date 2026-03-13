@@ -12,6 +12,11 @@ const trainingListFreeUsersSchema = new mongoose.Schema({
     required: true,
     // 0: WebPage, 1: File, 2: Snippet, 3: FAQ
   },
+  agentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    required: false,
+    ref: "Agent",
+  },
   
   // WebPage specific fields
   webPage: {

@@ -10,6 +10,8 @@ const axios = require("axios");
 const xml2js = require("xml2js");
 const cheerio = require("cheerio");
 const { urlProcessingQueue } = require("../services/jobService.js");
+const Agent = require("../models/Agent.js");
+const Widget = require("../models/Widget.js");
 
 class ScrapingController {
   constructor() {
@@ -22,13 +24,14 @@ class ScrapingController {
 
 
   // Method 1: Simple Bulk Insert (Recommended for most cases)
-async bulkInsertUrls(userId, urls) {
+async bulkInsertUrls(userId,agentId, urls) {
   try {
     console.log(`🚀 Bulk inserting ${urls.length} URLs...`);
     const startTime = Date.now();
 
     const urlDocuments = urls.map(url => ({
       userId: userId,
+      agentId: agentId,
       url: url,
       trainStatus: 0,
       createdAt: new Date(),
@@ -54,88 +57,6 @@ async bulkInsertUrls(userId, urls) {
     throw error;
   }
 }
-
-// Method 2: Chunked Insert (For very large datasets > 10k URLs)
-// async chunkedBulkInsert(userId, urls, chunkSize = 1000) {
-//   try {
-//     console.log(`🔄 Chunked insert: ${urls.length} URLs in ${chunkSize} chunks`);
-//     const startTime = Date.now();
-    
-//     let totalInserted = 0;
-//     const totalChunks = Math.ceil(urls.length / chunkSize);
-
-//     for (let i = 0; i < urls.length; i += chunkSize) {
-//       const chunk = urls.slice(i, i + chunkSize);
-//       const chunkNumber = Math.floor(i / chunkSize) + 1;
-      
-//       console.log(`📦 Chunk ${chunkNumber}/${totalChunks} (${chunk.length} URLs)`);
-      
-//       const urlDocuments = chunk.map(url => ({
-//         userId: userId,
-//         url: url,
-//         trainStatus: 0,
-//         createdAt: new Date(),
-//         updatedAt: new Date()
-//       }));
-
-//       try {
-//         const result = await Url.insertMany(urlDocuments, { 
-//           ordered: false,
-//           rawResult: true 
-//         });
-//         totalInserted += result.insertedCount;
-        
-//       } catch (chunkError) {
-//         if (chunkError.code === 11000) {
-//           totalInserted += chunkError.result?.nInserted || 0;
-//         }
-//         console.log(`⚠️ Chunk ${chunkNumber} partial success`);
-//       }
-//     }
-
-//     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-//     console.log(`🎯 Completed: ${totalInserted}/${urls.length} in ${duration}s`);
-//     return totalInserted;
-
-//   } catch (error) {
-//     console.error('❌ Chunked insert failed:', error.message);
-//     throw error;
-//   }
-// }
-
-// // Method 3: Upsert Approach (Update existing, insert new)
-// async upsertUrls(userId, urls) {
-//   try {
-//     console.log(`🔄 Upserting ${urls.length} URLs...`);
-//     const startTime = Date.now();
-
-//     const operations = urls.map(url => ({
-//       updateOne: {
-//         filter: { userId: userId, url: url },
-//         update: { 
-//           $set: { updatedAt: new Date() },
-//           $setOnInsert: { 
-//             userId: userId, 
-//             url: url, 
-//             trainStatus: 0, 
-//             createdAt: new Date() 
-//           }
-//         },
-//         upsert: true
-//       }
-//     }));
-
-//     const result = await Url.bulkWrite(operations, { ordered: false });
-    
-//     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-//     console.log(`✅ Upserted: ${result.upsertedCount} new, ${result.modifiedCount} updated in ${duration}s`);
-//     return result;
-
-//   } catch (error) {
-//     console.error('❌ Upsert failed:', error.message);
-//     throw error;
-//   }
-// }
 
   async extractUrlsFromSitemap(sitemapUrl) {
     try {
@@ -390,26 +311,261 @@ async bulkInsertUrls(userId, urls) {
     }
   }
 
+  async fetchBrandColors(websiteUrl) {
+    try {
+      let normalizedUrl = websiteUrl;
+      if (
+        normalizedUrl &&
+        typeof normalizedUrl === "string" &&
+        !normalizedUrl.startsWith("http://") &&
+        !normalizedUrl.startsWith("https://")
+      ) {
+        normalizedUrl = `https://${normalizedUrl.trim()}`;
+      }
+
+      const parsed = new URL(normalizedUrl);
+      const origin = parsed.origin;
+
+      const response = await axios.get(origin, {
+        timeout: 15000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
+        },
+      });
+
+      if (response.status !== 200 || typeof response.data !== "string") {
+        return [];
+      }
+
+      const html = response.data;
+      const hexMatches = html.match(/#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b/g) || [];
+      const rgbMatches =
+        html.match(/rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)/g) || [];
+
+      const normalizeHex = (value) => {
+        if (!value) return null;
+        const color = value.trim().toLowerCase();
+        if (!color.startsWith("#")) return null;
+        if (color.length === 4) {
+          return (
+            "#" +
+            color[1] +
+            color[1] +
+            color[2] +
+            color[2] +
+            color[3] +
+            color[3]
+          );
+        }
+        if (color.length === 7) return color;
+        return null;
+      };
+
+      const rgbToHex = (rgb) => {
+        const nums = rgb.match(/\d{1,3}/g);
+        if (!nums || nums.length < 3) return null;
+        const [r, g, b] = nums.slice(0, 3).map((n) => Math.max(0, Math.min(255, Number(n))));
+        return (
+          "#" +
+          [r, g, b]
+            .map((n) => n.toString(16).padStart(2, "0"))
+            .join("")
+            .toLowerCase()
+        );
+      };
+
+      const allColors = [
+        ...hexMatches.map(normalizeHex).filter(Boolean),
+        ...rgbMatches.map(rgbToHex).filter(Boolean),
+      ];
+
+      const ignored = new Set(["#fff", "#ffffff", "#000", "#000000", "#f5f5f5", "#fafafa"]);
+      const unique = [];
+      for (const color of allColors) {
+        if (!color || ignored.has(color)) continue;
+        if (!unique.includes(color)) {
+          unique.push(color);
+        }
+        if (unique.length >= 6) break;
+      }
+
+      return unique;
+    } catch (error) {
+      console.warn("Failed to fetch brand colors:", error.message);
+      return [];
+    }
+  }
+
+  async fetchLogo(websiteUrl) {
+    try {
+      let normalizedUrl = websiteUrl;
+      if (
+        normalizedUrl &&
+        typeof normalizedUrl === "string" &&
+        !normalizedUrl.startsWith("http://") &&
+        !normalizedUrl.startsWith("https://")
+      ) {
+        normalizedUrl = `https://${normalizedUrl.trim()}`;
+      }
+
+      const parsed = new URL(normalizedUrl);
+      const origin = parsed.origin;
+
+      const response = await axios.get(origin, {
+        timeout: 15000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
+        },
+      });
+
+      if (response.status !== 200 || typeof response.data !== "string") {
+        return null;
+      }
+
+      const $ = cheerio.load(response.data);
+
+      const candidates = [
+        $('link[rel="apple-touch-icon"]').attr("href"),
+        $('link[rel="icon"]').attr("href"),
+        $('link[rel="shortcut icon"]').attr("href"),
+        $('meta[property="og:image"]').attr("content"),
+        $('img[alt*="logo" i]').first().attr("src"),
+        $('img[class*="logo" i]').first().attr("src"),
+        $('img[id*="logo" i]').first().attr("src"),
+      ].filter(Boolean);
+
+      for (const candidate of candidates) {
+        try {
+          return new URL(candidate, origin).toString();
+        } catch (_) {
+          // Skip invalid candidate URLs
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.warn("Failed to fetch logo:", error.message);
+      return null;
+    }
+  }
+
+  async getSitemapUrls(req, res) {
+    try {
+      const { userId, sitemapUrl, agentId } = req.body;
+      if (!userId || !agentId) {
+        return res.status(400).json({
+          success: false,
+          error: "Missing required parameters: userId, agentId",
+        });
+      }
+
+      if (!sitemapUrl) {
+        return res.status(400).json({
+          success: false,
+          error: "sitemapUrl must be provided",
+        });
+      }
+
+      const agent = await Agent.findOne({ _id: agentId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
+      }
+      if (agent.isSitemapAdded == true && sitemapUrl) {
+        return res.status(400).json({
+          success: false,
+          error: "one sitemap already added",
+        });
+      }
+
+      let urls = [];
+      if (sitemapUrl) {
+        urls = await this.extractUrlsFromSitemap(sitemapUrl);
+        console.log(`Found ${urls.length} URLs in sitemap`);
+      }
+
+      const [brandColors, logo] = await Promise.all([
+        this.fetchBrandColors(sitemapUrl),
+        this.fetchLogo(sitemapUrl),
+      ]);
+
+      const widgetUpdateData = {};
+      if (logo) {
+        widgetUpdateData.logo = logo;
+      }
+
+      if (brandColors.length > 0) {
+        const colorFieldNames = [
+          "title_bar",
+          "title_bar_text",
+          "visitor_bubble",
+          "visitor_bubble_text",
+          "ai_bubble",
+          "ai_bubble_text",
+        ];
+
+        widgetUpdateData.colorFields = colorFieldNames.map((name, index) => ({
+          id: index + 1,
+          name,
+          value: brandColors[index] || brandColors[0],
+        }));
+      }
+
+      if (Object.keys(widgetUpdateData).length > 0) {
+        await Widget.updateOne(
+          { agentId },
+          {
+            $set: widgetUpdateData,
+          }
+        );
+      }
+
+      await Agent.updateOne({ 
+        _id: agentId 
+      }, { 
+        $set: { 
+          isSitemapAdded: true,
+        } 
+      });
+      
+
+        await this.bulkInsertUrls(userId,agentId, urls);
+      
+      res.json({
+        success: true,
+        urls: urls,
+      });
+    } catch (error) {
+      console.error("Error starting sitemap urls:", error);
+      res.status(500).json({
+        success: false,
+        urls: [],
+      });
+    }
+  }
+
   // Start sitemap scraping
   async startSitemapScraping(req, res) {
     try {
-      const { userId, sitemapUrl, url } = req.body;
-      if (!userId) {
+      const { userId, urls, agentId } = req.body;
+      if (!userId || !agentId) {
         return res.status(400).json({
           success: false,
-          error: "Missing required parameters: userId",
+          error: "Missing required parameters: userId, agentId",
         });
       }
 
-      if (!sitemapUrl && !url) {
+      if (!urls) {
         return res.status(400).json({
           success: false,
-          error: "At least one of sitemapUrl or url must be provided",
+          error: "urls must be provided",
         });
       }
 
-      const TrainingModel = await PlanService.getTrainingModel(userId);
-      const plan = await PlanService.getUserPlan(userId);
+      const TrainingModel = await PlanService.getTrainingModel(userId,agentId);
+      const plan = await PlanService.getUserPlan(userId,agentId);
 
       const client = await Client.findOne({ userId });
       if (!client) {
@@ -418,79 +574,85 @@ async bulkInsertUrls(userId, urls) {
           error: "Client not found",
         });
       }
-      if (client.sitemapAdded == true && sitemapUrl) {
-        return res.status(400).json({
+      const agent = await Agent.findOne({ _id: agentId });
+      if (!agent) {
+        return res.status(404).json({
           success: false,
-          error: "one sitemap already added",
+          error: "Agent not found",
         });
       }
+      // if (client.sitemapAdded == true && sitemapUrl) {
+      //   return res.status(400).json({
+      //     success: false,
+      //     error: "one sitemap already added",
+      //   });
+      // }
       const qdrantIndexName =
         client?.plan == "free"
-          ? client?.qdrantIndexName
-          : client?.qdrantIndexNamePaid;
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
 
       // Check if user is already scraping
-      const scrapingStatus = await Client.findOne({ userId });
+      const scrapingStatus = await Agent.findOne({ _id: agentId });
       if (scrapingStatus.dataTrainingStatus == 1) {
         return res.status(409).json({
           success: false,
-          error: "Scraping already in progress for this user",
+          error: "Scraping already in progress for this agent",
         });
       }
       //here updte the mongodb that scrapping started
       const scrapingStartTime = new Date();
       
       // Fetch and parse sitemap
-      let urls = [];
-      if (sitemapUrl) {
-        urls = await this.extractUrlsFromSitemap(sitemapUrl);
-        console.log(`Found ${urls.length} URLs in sitemap`);
-      }
-      if (url) {
-        const batchService = new batchTrainingService();
-        const urlArray = url.split(",").map((u) => u.trim());
+      // let urls = [];
+      // if (sitemapUrl) {
+      //   urls = await this.extractUrlsFromSitemap(sitemapUrl);
+      //   console.log(`Found ${urls.length} URLs in sitemap`);
+      // }
+      // if (url) {
+      //   const batchService = new batchTrainingService();
+      //   const urlArray = url.split(",").map((u) => u.trim());
 
-        for (const singleUrl of urlArray) {
-          // Check if the url already exists in the TrainingModel
-          const existing = await TrainingModel.findOne({
-            userId: userId,
-            type: 0, // WebPage
-            trainingStatus: 1,
-            "webPage.url": singleUrl,
-          });
+      //   for (const singleUrl of urlArray) {
+      //     // Check if the url already exists in the TrainingModel
+      //     const existing = await TrainingModel.findOne({
+      //       userId: userId,
+      //       type: 0, // WebPage
+      //       trainingStatus: 1,
+      //       "webPage.url": singleUrl,
+      //     });
 
-          if (existing) {
-            try {
-              await batchService.deleteItemFromVectorStore(
-                userId,
-                singleUrl,
-                0
-              );
-            } catch (error) {
-              console.log(error);
-            }
-            await Url.deleteOne({ userId: userId, url: singleUrl });
-            await TrainingModel.deleteOne({ _id: existing._id });
-          }
-        }
-        urls.push(...urlArray);
-      }
+      //     if (existing) {
+      //       try {
+      //         await batchService.deleteItemFromVectorStore(
+      //           userId,
+      //           singleUrl,
+      //           0
+      //         );
+      //       } catch (error) {
+      //         console.log(error);
+      //       }
+      //       await Url.deleteOne({ userId: userId, url: singleUrl });
+      //       await TrainingModel.deleteOne({ _id: existing._id });
+      //     }
+      //   }
+      //   urls.push(...urlArray);
+      // }
 
       if (urls.length == 0) {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
         appEvents.emit("userEvent", userId, "training-event", {
-          message: "Sitemap not found or no urls found in sitemap",
-          client: await Client.findOne({ userId }),
+          message: "No urls found",
+          agent: await Agent.findOne({ _id: agentId }),
         });
         return res.json({
           success: false,
-          error: "Sitemap not found or no urls found in sitemap",
+          error: "No urls found",
         });
       }
-
       // Set scraping status and start time before starting the queue
-      await Client.updateOne({ 
-        userId 
+      await Agent.updateOne({ 
+        _id: agentId 
       }, { 
         $set: { 
           dataTrainingStatus: 1,
@@ -498,21 +660,21 @@ async bulkInsertUrls(userId, urls) {
         } 
       });
       
-      if (sitemapUrl) {
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
-        });
-      }
+      // if (sitemapUrl) {
+      //   appEvents.emit("userEvent", userId, "training-event", {
+      //     client: await Client.findOne({ userId }),
+      //   });
+      // }
 
       // Add the fetched URLs to the Url model
       // for (const url of urls) {
         // await Url.create({ userId: userId, url: url, trainStatus: 0 });
-        await this.bulkInsertUrls(userId, urls);
+        // await this.bulkInsertUrls(userId, urls);
       // }
 
-      await Client.updateOne(
-        { userId },
-        { $inc: { "pagesAdded.total": urls.length || 0 } }
+      await Agent.updateOne(
+        { _id: agentId },
+        { $set: { "pagesAdded.total": urls.length || 0 } }
       );
 
       await urlProcessingQueue.add("processSingleUrl", {
@@ -520,7 +682,7 @@ async bulkInsertUrls(userId, urls) {
         userId,
         qdrantIndexName,
         plan,
-        sitemapUrl: !!sitemapUrl,
+        agentId,
         startTime: scrapingStartTime.getTime(),
         totalUrls: urls.length,
       });
@@ -531,11 +693,11 @@ async bulkInsertUrls(userId, urls) {
         // message: "Scraping sta successfully",
       });
     } catch (error) {
-      const { userId } = req.body;
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+      const { userId, agentId } = req.body;
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
       appEvents.emit("userEvent", userId, "training-event", {
         message: error.message,
-        client: await Client.findOne({ userId }),
+        agent: await Agent.findOne({ _id: agentId }),
       });
       console.error("Error starting sitemap scraping:", error);
       res.status(500).json({
@@ -548,12 +710,12 @@ async bulkInsertUrls(userId, urls) {
   // Upgrade plan and continue scraping
   async ContinueScrappingAfterUpgrade(req, res) {
     try {
-      const { userId } = req.body;
+      const { userId, agentId } = req.body;
 
-      if (!userId) {
+      if (!userId || !agentId) {
         return res.status(400).json({
           success: false,
-          error: "Missing required parameters: userId",
+          error: "Missing required parameters: userId, agentId",
         });
       }
 
@@ -564,26 +726,34 @@ async bulkInsertUrls(userId, urls) {
           error: "Client not found",
         });
       }
+      const agent = await Agent.findOne({ _id: agentId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
+      }
       const qdrantIndexName =
         client?.plan == "free"
-          ? client?.qdrantIndexName
-          : client?.qdrantIndexNamePaid;
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
       const plan = await PlanService.getUserPlan(userId);
 
       const remainingUrls = await Url.distinct("url", {
-        userId: userId,
+        // userId: userId,
+        agentId: agentId,
         trainStatus: 0,
       });
       if (remainingUrls.length <= 0) {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
         appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+          agent: await Agent.findOne({ _id: agentId }),
           message: "No URL found to scrape",
         });
       } else {
         const scrapingStartTime = new Date();
-        await Client.updateOne({ 
-          userId 
+        await Agent.updateOne({ 
+          _id: agentId 
         }, { 
           $set: { 
             dataTrainingStatus: 1,
@@ -591,7 +761,7 @@ async bulkInsertUrls(userId, urls) {
           } 
         });
         appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+          agent: await Agent.findOne({ _id: agentId }),
         });
 
         await urlProcessingQueue.add("processSingleUrl", {
@@ -599,7 +769,7 @@ async bulkInsertUrls(userId, urls) {
           userId,
           qdrantIndexName,
           plan,
-          sitemapUrl: false,
+          agentId: agentId,
           startTime: scrapingStartTime.getTime(),
           totalUrls: remainingUrls.length,
         });
@@ -610,9 +780,9 @@ async bulkInsertUrls(userId, urls) {
         // message: "Plan upgraded and scraping continued",
       });
     } catch (error) {
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
       appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+        agent: await Agent.findOne({ _id: agentId }),
         message: error.message,
       });
       console.error("Error upgrading plan and continuing scraping:", error);
@@ -810,9 +980,21 @@ async bulkInsertUrls(userId, urls) {
 
   async createSnippet(req, res) {
     try {
-      const { title, content } = req.body;
+      const { title, content, agentId,userId } = req.body;
       const file = req.file;
-      const userId = req.body.userId;
+      if (!agentId) {
+        return res.status(400).json({
+          success: false,
+          error: "Missing required parameters: agentId",
+        });
+      }
+      const agent = await Agent.findOne({ _id: agentId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
+      }
 
       const client = await Client.findOne({ userId });
       if (!client) {
@@ -823,16 +1005,16 @@ async bulkInsertUrls(userId, urls) {
 
       const qdrantIndexName =
         client?.plan == "free"
-          ? client?.qdrantIndexName
-          : client?.qdrantIndexNamePaid;
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
 
       const TrainingModel = await PlanService.getTrainingModel(userId);
 
       let documentsToProcess = [];
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 1 } });
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 1 } });
 
       appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+        agent: await Agent.findOne({ _id: agentId }),
       });
 
       // Process snippet if provided
@@ -846,12 +1028,12 @@ async bulkInsertUrls(userId, urls) {
           );
 
         if (!snippetValidation.isValid) {
-          await Client.updateOne(
-            { userId },
+          await Agent.updateOne(
+            { _id: agentId },
             { $set: { dataTrainingStatus: 0 } }
           );
           appEvents.emit("userEvent", userId, "training-event", {
-            client: await Client.findOne({ userId }),
+            agent: await Agent.findOne({ _id: agentId }),
             message: snippetValidation.error,
           });
           return res.status(400).json({
@@ -863,7 +1045,8 @@ async bulkInsertUrls(userId, urls) {
         }
 
         const trainingList = new TrainingModel({
-          userId,
+          userId: userId,
+          agentId: agentId,
           title,
           type: 2, // Snippet
           content: snippetValidation.cleanContent,
@@ -884,6 +1067,7 @@ async bulkInsertUrls(userId, urls) {
             title: title,
             type: "snippet",
             user_id: userId,
+            agent_id: agentId,
             // plan: plan.name,
             // wordCount: snippetValidation.wordCount,
             // estimatedTokens: snippetValidation.estimatedTokens,
@@ -904,12 +1088,12 @@ async bulkInsertUrls(userId, urls) {
           );
 
           if (!fileValidation.isValid) {
-            await Client.updateOne(
-              { userId },
+            await Agent.updateOne(
+              { _id: agentId },
               { $set: { dataTrainingStatus: 0 } }
             );
             appEvents.emit("userEvent", userId, "training-event", {
-              client: await Client.findOne({ userId }),
+              agent: await Agent.findOne({ _id: agentId }),
               message: fileValidation.error,
             });
             return res.status(400).json({
@@ -922,6 +1106,7 @@ async bulkInsertUrls(userId, urls) {
 
           const trainingList = new TrainingModel({
             userId,
+            agentId: agentId,
             title: file.originalname.toString(),
             type: 1, // File
             fileContent: fileValidation.cleanContent.toString(),
@@ -947,6 +1132,7 @@ async bulkInsertUrls(userId, urls) {
               originalFileName: file.originalname,
               type: "file",
               user_id: userId,
+              agent_id: agentId,
               // plan: plan.name,
               // wordCount: fileValidation.wordCount,
               // estimatedTokens: fileValidation.estimatedTokens,
@@ -954,12 +1140,12 @@ async bulkInsertUrls(userId, urls) {
             },
           });
         } catch (fileError) {
-          await Client.updateOne(
-            { userId },
+          await Agent.updateOne(
+            { _id: agentId },
             { $set: { dataTrainingStatus: 0 } }
           );
           appEvents.emit("userEvent", userId, "training-event", {
-            client: await Client.findOne({ userId }),
+            agent: await Agent.findOne({ _id: agentId }),
             message: fileError.message,
           });
           console.error("Error processing file:", fileError);
@@ -973,9 +1159,9 @@ async bulkInsertUrls(userId, urls) {
       }
 
       if (!documentsToProcess.length) {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
         appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+          agent: await Agent.findOne({ _id: agentId }),
           message: "No document found to process ",
         });
         return res.status(400).json({
@@ -990,28 +1176,29 @@ async bulkInsertUrls(userId, urls) {
       let result = await batchService.processDocumentAndTrain(
         documentsToProcess,
         userId,
+        agentId,
         qdrantIndexName,
         false
       );
       if (result.success) {
         await TrainingModel.findOneAndUpdate(
-          { userId: userId, title: title || file.originalname },
+          { userId: userId, agentId: agentId, title: title || file.originalname },
           {
             trainingStatus: 1, // Completed
             chunkCount: result.totalChunks,
             lastEdit: Date.now(),
           }
         );
-        await Client.updateOne({ userId: userId }, { $inc: { filesAdded: 1 } });
+        await Agent.updateOne({ _id: agentId }, { $inc: { filesAdded: 1 } });
 
         // Update client flags
-        await Client.updateOne({ userId: userId }, { dataTrainingStatus: 0 });
+        await Agent.updateOne({ _id: agentId }, { dataTrainingStatus: 0 });
         appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+          agent: await Agent.findOne({ _id: agentId }),
         });
       } else {
         await TrainingModel.findByIdAndUpdate(
-          { userId: userId, title: title || file.originalname },
+          { userId: userId, agentId: agentId, title: title || file.originalname },
           {
             trainingStatus: 2, // Error
             lastEdit: Date.now(),
@@ -1019,9 +1206,9 @@ async bulkInsertUrls(userId, urls) {
           }
         );
         // Update client flags
-        await Client.updateOne({ userId: userId }, { dataTrainingStatus: 0 });
+        await Agent.updateOne({ _id: agentId }, { dataTrainingStatus: 0 });
         appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+          agent: await Agent.findOne({ _id: agentId }),
           message: "Data training failed",
         });
       }
@@ -1032,9 +1219,10 @@ async bulkInsertUrls(userId, urls) {
       });
     } catch (error) {
       const userId = req.body.userId;
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+      const agentId = req.body.agentId;
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
       appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+        agent: await Agent.findOne({ _id: agentId }),
         message: error.message,
       });
       console.error("Error in createSnippet:", error);
@@ -1049,8 +1237,7 @@ async bulkInsertUrls(userId, urls) {
 
   // Updated createFaq with validation - now handles array of FAQs
   async createFaq(req, res) {
-    const { faqs } = req.body;
-    const userId = req.body.userId;
+    const { faqs,userId,agentId } = req.body;
 
     try {
       const client = await Client.findOne({ userId });
@@ -1058,6 +1245,13 @@ async bulkInsertUrls(userId, urls) {
         return res
           .status(404)
           .json({ status: false, message: "Client not found" });
+      }
+      const agent = await Agent.findOne({ _id: agentId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
       }
 
       // Validate that faqs is an array
@@ -1071,14 +1265,14 @@ async bulkInsertUrls(userId, urls) {
 
       const qdrantIndexName =
         client?.plan == "free"
-          ? client?.qdrantIndexName
-          : client?.qdrantIndexNamePaid;
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
 
       const TrainingModel = await PlanService.getTrainingModel(userId);
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 1 } });
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 1 } });
 
       appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+        agent: await Agent.findOne({ _id: agentId }),
       });
 
       const documentsToProcess = [];
@@ -1122,6 +1316,7 @@ async bulkInsertUrls(userId, urls) {
         // Create training model entry
         const trainingList = new TrainingModel({
           userId,
+          agentId: agentId,
           title: question,
           type: 3, // FAQ
           content: faqValidation.cleanContent,
@@ -1145,15 +1340,16 @@ async bulkInsertUrls(userId, urls) {
             answer: answer,
             type: "faq",
             user_id: userId,
+            agent_id: agentId,
           },
         });
       }
 
       // If no valid FAQs after validation, return error
       if (documentsToProcess.length === 0) {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
         appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+          agent: await Agent.findOne({ _id: agentId }),
           message: "No valid FAQs to process",
         });
         return res.status(400).json({
@@ -1169,6 +1365,7 @@ async bulkInsertUrls(userId, urls) {
       let result = await batchService.processDocumentAndTrain(
         documentsToProcess,
         userId,
+        agentId,
         qdrantIndexName,
         false
       );
@@ -1195,8 +1392,8 @@ async bulkInsertUrls(userId, urls) {
           );
         }
 
-        await Client.updateOne(
-          { userId: userId },
+        await Agent.updateOne(
+          { _id: agentId },
           { 
             $inc: { faqsAdded: documentsToProcess.length },
             $set: { dataTrainingStatus: 0 }
@@ -1204,7 +1401,7 @@ async bulkInsertUrls(userId, urls) {
         );
 
         appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+          agent: await Agent.findOne({ _id: agentId }),
         });
 
         res.status(201).json({
@@ -1228,10 +1425,10 @@ async bulkInsertUrls(userId, urls) {
         }
 
         // Update client flags
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
 
         appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+          agent: await Agent.findOne({ _id: agentId }),
           message: "failed to train data",
         });
 
@@ -1243,10 +1440,10 @@ async bulkInsertUrls(userId, urls) {
         });
       }
     } catch (error) {
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
 
       appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+        agent: await Agent.findOne({ _id: agentId }),
         message: error.message,
       });
 

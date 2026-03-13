@@ -8,6 +8,11 @@ const widgetSchema = new Schema(
       required: true,
       ref: 'User'
     },
+    agentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: false,
+      ref: "Agent",
+    },
     widgetToken: {
       type: String,
       required: true,

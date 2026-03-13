@@ -2,7 +2,8 @@ require("dotenv").config();
 const User = require('../models/User');
 const Client = require('../models/Client');
 const Widget = require('../models/Widget');
-const Agent = require('../models/Agent');
+const Agent = require('../models/Agent.js');
+const HumanAgent = require('../models/HumanAgent.js');
 const path = require('path');
 const fs = require('fs');
 const nodemailer = require('nodemailer');
@@ -49,55 +50,51 @@ UserController.createUser = async (req, res) => {
     user.verification_token = emailVerificationToken; // Store the token in the user document    
     const userId = user.id;
     await user.save();
+    //create agent 
+    const agent = new Agent({
+      userId: userId
+    });
+    await agent.save();
+    agent.qdrantIndexName = `${userId}-${agent._id}`;
+    agent.qdrantIndexNamePaid = `${crypto.randomBytes(16).toString('hex')}-${agent._id}`;
+    await agent.save();
     // Generate client specific details
     const client = new Client({userId});
-    client.qdrantIndexName = `${userId}`;
-    client.qdrantIndexNamePaid = crypto.randomBytes(16).toString('hex');
     client.email = email;
     await client.save();
     // Generate widget token and insert in widget table
-    const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
-    const widget = new Widget({userId,widgetToken});
+    const widgetToken = crypto.randomBytes(8).toString('hex') + userId + agent._id;
+    const widget = new Widget({userId,widgetToken,agentId:agent._id});
     await widget.save();
 
     // Create agent for client
     try {
       // Check if agent already exists with this email (email is unique)
-      const existingAgent = await Agent.findOne({ email });
+      const existingAgent = await HumanAgent.findOne({ email });
       if (!existingAgent) {
-        const agentPassword = crypto.randomBytes(16).toString('hex');
-        const hashedPassword = await bcrypt.hash(agentPassword, 10);
-        const agent = new Agent({
+        const humanAgentPassword = crypto.randomBytes(16).toString('hex');
+        const hashedPassword = await bcrypt.hash(humanAgentPassword, 10);
+        const humanAgent = new HumanAgent({
           name: 'client',
           email: email,
           password: hashedPassword,
           userId: userId,
           status: 'approved',
           isClient: true,
-          avatar: '/uploads/default-avatar.png' // Default avatar path
+          avatar: '/uploads/default-avatar.png',
+          assignedAgents: [agent._id] // Default avatar path
         });
-        await agent.save();
-      } else {
-        // If agent exists, update it to be a client agent if needed
-        if (!existingAgent.isClient || existingAgent.userId.toString() !== userId.toString()) {
-          existingAgent.isClient = true;
-          existingAgent.userId = userId;
-          existingAgent.status = 'approved';
-          if (!existingAgent.avatar) {
-            existingAgent.avatar = '/uploads/default-avatar.png';
-          }
-          await existingAgent.save();
-        }
-      }
-    } catch (agentError) {
+        await humanAgent.save();
+      } 
+    } catch (humanAgentError) {
       // Log error but don't fail client creation if agent creation fails
-      console.error('Error creating/updating client agent:', agentError);
-      console.error('Agent error details:', {
-        message: agentError.message,
-        code: agentError.code,
-        keyPattern: agentError.keyPattern,
-        keyValue: agentError.keyValue,
-        stack: agentError.stack
+      console.error('Error creating/updating client agent:', humanAgentError);
+      console.error('HumanAgent error details:', {
+        message: humanAgentError.message,
+        code: humanAgentError.code,
+        keyPattern: humanAgentError.keyPattern,
+        keyValue: humanAgentError.keyValue,
+        stack: humanAgentError.stack
       });
     }
 
@@ -223,7 +220,7 @@ UserController.getClient = async (req,res) => {
     }
 
     // Also get the client's agent record (where isClient: true)
-    const Agent = require('../models/Agent');
+    const Agent = require('../models/HumanAgent.js');
     const clientAgent = await Agent.findOne({ userId: userId, isClient: true }).select('-password');
     
     // Include agent data in response if found
@@ -254,7 +251,7 @@ UserController.updateClientStatus = async (req, res) => {
     }
 
     // Find the client's agent record (where isClient: true)
-    const Agent = require('../models/Agent');
+    const Agent = require('../models/HumanAgent.js');
     const clientAgent = await Agent.findOne({ userId: userId, isClient: true });
 
     if (!clientAgent) {
@@ -275,6 +272,7 @@ UserController.updateClientStatus = async (req, res) => {
       isActive: clientAgent.isActive,
       lastActive: clientAgent.lastActive,
       isClient: true,
+      assignedAgents: clientAgent.assignedAgents,
     };
 
     // Emit to the client's room (userId) so inbox can update
@@ -356,35 +354,41 @@ UserController.googleOAuth = async (req, res) => {
 
       const userId = user.id;
       await user.save();
+      const agent = new Agent({ userId });
+      await agent.save();
+
+      agent.qdrantIndexName = `${userId}-${agent._id}`;
+      agent.qdrantIndexNamePaid = `${crypto.randomBytes(16).toString('hex')}-${agent._id}`;
+      await agent.save();
 
       // Create related Client and Widget like in createUser
       const client = new Client({ userId });
-      client.qdrantIndexName = `${userId}`;
-      client.qdrantIndexNamePaid = crypto.randomBytes(16).toString('hex');
+      
       client.email = email;
       await client.save();
 
-      const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
-      const widget = new Widget({ userId, widgetToken });
+      const widgetToken = crypto.randomBytes(8).toString('hex') + userId + agent._id;
+      const widget = new Widget({ userId, widgetToken, agentId: agent._id });
       await widget.save();
 
       // Create agent for client
       try {
         const agentPassword = crypto.randomBytes(16).toString('hex');
         const hashedPassword = await bcrypt.hash(agentPassword, 10);
-        const agent = new Agent({
+        const humanAgent = new HumanAgent({
           name: 'client',
           email: email,
           password: hashedPassword,
           userId: userId,
           status: 'approved',
           isClient: true,
-          avatar: '/uploads/default-avatar.png' // Default avatar path
+          avatar: '/uploads/default-avatar.png', // Default avatar path
+          assignedAgents: [agent._id] // Default avatar path
         });
-        await agent.save();
-      } catch (agentError) {
+        await humanAgent.save();
+      } catch (humanAgentError) {
         // Log error but don't fail client creation if agent creation fails
-        console.error('Error creating client agent:', agentError);
+        console.error('Error creating client agent:', humanAgentError);
         console.error('Agent error details:', {
           message: agentError.message,
           code: agentError.code,

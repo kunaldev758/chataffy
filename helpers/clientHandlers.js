@@ -266,7 +266,7 @@ const initializeClientEvents = (io, socket) => {
     }
   });
 
-  socket.on("client-send-message", async ({ message, visitorId }, callback) => {
+  socket.on("client-send-message", async ({ message, visitorId, replyTo }, callback) => {
     try {
       const conversation = await ConversationController.getOpenConversation(
         visitorId,
@@ -292,12 +292,17 @@ const initializeClientEvents = (io, socket) => {
         message,
         userId,
         undefined,
-        agentIdForMessage
+        agentIdForMessage,
+        undefined,
+        replyTo
       );
 
-      // Populate agent info before emitting
+      // Populate agent info and replyTo before emitting
       if (agentIdForMessage) {
         await chatMessage.populate('agentId', 'name avatar isClient');
+      }
+      if (replyTo) {
+        await chatMessage.populate('replyTo', 'sender message createdAt sender_type');
       }
 
       // Convert to plain object to ensure populated fields are included

@@ -14,50 +14,51 @@ const appEvents = require("../events");
 exports.agentLogin = async (req, res) => {
   try {
     const { email, password } = req.body;
-    const agent = await Agent.findOne({ email });
+    const humanAgent = await HumanAgent.findOne({ email });
 
-    if (!agent) {
+    if (!humanAgent) {
       return res.status(400).json({ message: "Invalid email or password" });
     }
-    if (agent.status !== "approved") {
+    if (humanAgent.status !== "approved") {
       return res.status(403).json({ message: "Your invitation is not yet accepted or approved." });
     }
 
-    const isMatch = await bcrypt.compare(password, agent.password);
+    const isMatch = await bcrypt.compare(password, humanAgent.password);
     if (!isMatch) {
       return res.status(400).json({ message: "Invalid email or password" });
     }
 
     // Create JWT
     const token = jwt.sign(
-      { id: agent._id, email: agent.email, role: "agent" },
+      { id: humanAgent._id, email: humanAgent.email, role: "human-agent" },
       process.env.JWT_SECRET_KEY,
       { expiresIn: "7d" }
     );
 
-    if (agent?.isActive) {
-      agent.lastActive = new Date();
-      await Agent.updateOne(
-        { _id: agent._id },
-        { $set: { lastActive: agent.lastActive } }
+    if (humanAgent?.isActive) {
+      humanAgent.lastActive = new Date();
+      await HumanAgent.updateOne(
+        { _id: humanAgent._id },
+        { $set: { lastActive: humanAgent.lastActive } }
       );
     }
 
     res.json({
       message: "Login successful",
       token,
-      agent: {
-        id: agent._id,
-        name: agent.name,
-        email: agent.email,
-        status: agent.status,
-        isActive: agent.isActive,
-        userId: agent.userId,
-        avatar: agent.avatar,
+      humanAgent: {
+        id: humanAgent._id,
+        name: humanAgent.name,
+        email: humanAgent.email,
+        status: humanAgent.status,
+        isActive: humanAgent.isActive,
+        userId: humanAgent.userId,
+        avatar: humanAgent.avatar,
+        assignedAgents: humanAgent.assignedAgents,
       },
     });
   } catch (error) {
-    console.error("Agent login error:", error);
+    console.error("Human agent login error:", error);
     res.status(500).json({ message: "Server error" });
   }
 };
@@ -72,9 +73,9 @@ async function generateRandomPassword(length = 10) {
 }
 
 // Create a new agent
-exports.createAgent = async (req, res) => {
+exports.createHumanAgent = async (req, res) => {
   try {
-    const { name, email, userId } = req.body;
+    const { name, email, userId, agentId } = req.body;
 
     const checkLimit = await checkPlanLimits(userId, 'add_agent');
 
@@ -87,7 +88,7 @@ exports.createAgent = async (req, res) => {
     }
 
     // Check if agent already exists
-    const existingAgent = await Agent.findOne({ email });
+    const existingAgent = await HumanAgent.findOne({ email });
     const existingClinet = await Client.findOne({ email });
     if (existingAgent || existingClinet) {
       return res
@@ -104,75 +105,77 @@ exports.createAgent = async (req, res) => {
     const inviteTokenExpires = Date.now() + 1000 * 60 * 60 * 24; // 24 hours
 
     // Create new agent
-    const agent = new Agent({
-      name,
-      email,
-      password: hashedPassword,
-      inviteToken,
-      inviteTokenExpires,
-      userId:userId
-      // Avatar will be handled on frontend with default-image.png
+    const humanAgent = new HumanAgent({
+      userId:userId,
+      name:name,
+      email:email,
+      password:hashedPassword,
+      status:'approved',
+      isClient:false,
+      avatar:'/uploads/default-avatar.png',
+      assignedAgents:[agentId]
     });
 
-    await agent.save();
+    await humanAgent.save();
 
     const acceptUrl = `${process.env.CLIENT_URL}agent-accept-invite/?token=${inviteToken}`;
     await sendAgentApprovalEmail({ ...agent.toObject()}, acceptUrl, password );
 
     res.status(201).json({
-      message: "Agent created successfully",
-      agent: {
-        id: agent._id,
-        name: agent.name,
-        email: agent.email,
-        status: agent.status,
-        isActive: agent.isActive,
-        inviteToken,
-        inviteTokenExpires,
-        userId:agent.userId,
-        avatar: agent.avatar,
+      message: "Human agent created successfully",
+      humanAgent: {
+        id: humanAgent._id,
+        name: humanAgent.name,
+        email: humanAgent.email,
+        status: humanAgent.status,
+        isActive: humanAgent.isActive,
+        inviteToken: inviteToken,
+        inviteTokenExpires: inviteTokenExpires,
+        userId:humanAgent.userId,
+        avatar: humanAgent.avatar,
+        assignedAgents: humanAgent.assignedAgents,
       },
     });
   } catch (error) {
-    console.error("Error creating agent:", error);
-    res.status(500).json({ message: "Error creating agent" });
+    console.error("Error creating human agent:", error);
+    res.status(500).json({ message: "Error creating human agent" });
   }
 };
 
 // Get all agents
-exports.getAllAgents = async (req, res) => {
+exports.getAllHumanAgents = async (req, res) => {
   try {
     const userId = req.body.userId;
-    const agents = await Agent.find({userId:userId, isClient: { $ne: true }}, "-password");
-    res.json(agents);
+    const humanAgents = await HumanAgent.find({userId:userId, isClient: { $ne: true }}, "-password");
+    res.json(humanAgents);
   } catch (error) {
-    console.error("Error fetching agents:", error);
-    res.status(500).json({ message: "Error fetching agents" });
+    console.error("Error fetching human agents:", error);
+    res.status(500).json({ message: "Error fetching human agents" });
   }
 };
 
 // Get single agent
-exports.getAgent = async (req, res) => {
+exports.getHumanAgent = async (req, res) => {
   try {
-    const agent = await Agent.findById(req.params.id, "-password");
-    if (!agent) {
-      return res.status(404).json({ message: "Agent not found" });
+    const humanAgent = await HumanAgent.findById(req.params.id, "-password");
+    if (!humanAgent) {
+      return res.status(404).json({ message: "Human agent not found" });
     }
-    res.json(agent);
+    res.json(humanAgent);
   } catch (error) {
-    console.error("Error fetching agent:", error);
-    res.status(500).json({ message: "Error fetching agent" });
+    console.error("Error fetching human agent:", error);
+    res.status(500).json({ message: "Error fetching human agent" });
   }
 };
 
 // Update agent
-exports.updateAgent = async (req, res) => {
+exports.updateHumanAgent = async (req, res) => {
   try {
-    const { name, currentPassword, newPassword } = req.body;
-    const agent = await Agent.findById(req.params.id);
+    const { name, currentPassword, newPassword , assignedAgents} = req.body;
+    const humanAgent = await HumanAgent.findById(req.params.id);
 
-    if (!agent) {
-      return res.status(404).json({ message: "Agent not found" });
+    if (!humanAgent) {
+      return res.status(404).json({ message: "Human agent not found" });
     }
 
     // If password change is requested
@@ -182,32 +185,34 @@ exports.updateAgent = async (req, res) => {
       }
       
       // Verify current password (adjust based on your auth setup)
-      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, agent.password);
+      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, humanAgent.password);
       if (!isCurrentPasswordValid) {
         return res.status(400).json({ message: "Current password is incorrect" });
       }
       
       // Hash and update new password
       const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-      agent.password = hashedNewPassword;
+      humanAgent.password = hashedNewPassword;
     }
 
     // Update other fields
-    agent.name = name || agent.name;
+    humanAgent.name = name || humanAgent.name;
+    humanAgent.assignedAgents = assignedAgents || humanAgent.assignedAgents;
     // agent.email = email || agent.email;
 
-    await agent.save();
+    await humanAgent.save();
 
     res.json({
-      message: "Agent updated successfully",
-      agent: {
-        id: agent._id,
-        name: agent.name,
-        email: agent.email,
-        status: agent.status,
-        isActive: agent.isActive,
-        userId: agent.userId,
-        avatar: agent.avatar,
+      message: "Human agent updated successfully",
+      humanAgent: {
+        id: humanAgent._id,
+        name: humanAgent.name,
+        email: humanAgent.email,
+        status: humanAgent.status,
+        isActive: humanAgent.isActive,
+        userId: humanAgent.userId,
+        avatar: humanAgent.avatar,
+        assignedAgents: humanAgent.assignedAgents,
       },
     });
   } catch (error) {
@@ -217,95 +222,96 @@ exports.updateAgent = async (req, res) => {
 };
 
 // Delete agent
-exports.deleteAgent = async (req, res) => {
+exports.deleteHumanAgent = async (req, res) => {
   try {
-    const agent = await Agent.findByIdAndDelete(req.params.id);
-    if (!agent) {
-      return res.status(404).json({ message: "Agent not found" });
+    const humanAgent = await HumanAgent.findByIdAndDelete(req.params.id);
+    if (!humanAgent) {
+      return res.status(404).json({ message: "Human agent not found" });
     }
-    res.json({ message: "Agent deleted successfully" });
+    res.json({ message: "Human agent deleted successfully" });
   } catch (error) {
-    console.error("Error deleting agent:", error);
-    res.status(500).json({ message: "Error deleting agent" });
+    console.error("Error deleting human agent:", error);
+    res.status(500).json({ message: "Error deleting human agent" });
   }
 };
 
 // Approve agent
-exports.acceptInvite = async (req, res) => {
+exports.acceptInviteHumanAgent = async (req, res) => {
   try {
     const { token } = req.params;
-    const agent = await Agent.findOne({
+    const humanAgent = await HumanAgent.findOne({
       inviteToken: token,
       inviteTokenExpires: { $gt: Date.now() },
     });
-    if (!agent) {
+    if (!humanAgent) {
       return res
         .status(400)
         .json({ message: "Invalid or expired invitation token" });
     }
-    agent.status = "approved";
-    agent.inviteToken = undefined;
-    agent.inviteTokenExpires = undefined;
-    await agent.save();
-    res.status(200).json({ message: "Invitation accepted, agent approved!" });
+    humanAgent.status = "approved";
+    humanAgent.inviteToken = undefined;
+    humanAgent.inviteTokenExpires = undefined;
+    await humanAgent.save();
+    res.status(200).json({ message: "Invitation accepted, human agent approved!" });
   } catch (error) {
-    res.status(500).json({ message: "Error accepting invitation" });
+    res.status(500).json({ message: "Error accepting invitation for human agent" });
   }
 };
 
 // Update agent status (online/offline)
-exports.updateAgentStatus = async (req, res) => {
+exports.updateHumanAgentStatus = async (req, res) => {
   try {
     const { isActive } = req.body;
-    const agent = await Agent.findById(req.params.id);
+    const humanAgent = await HumanAgent.findById(req.params.id);
 
-    if (!agent) {
-      return res.status(404).json({ message: "Agent not found" });
+    if (!humanAgent) {
+      return res.status(404).json({ message: "Human agent not found" });
     }
 
-    agent.isActive = isActive;
-    agent.lastActive = isActive ? new Date() : null;
-    await agent.save();
+    humanAgent.isActive = isActive;
+    humanAgent.lastActive = isActive ? new Date() : null;
+    await humanAgent.save();
 
     // Emit socket event to notify all clients about agent status change
     const updatedAgentData = {
-      id: agent._id,
-      name: agent.name,
-      email: agent.email,
-      status: agent.status,
-      isActive: agent.isActive,
-      lastActive: agent.lastActive,
-      avatar: agent.avatar,
-      userId: agent.userId,
+      id: humanAgent._id,
+      name: humanAgent.name,
+      email: humanAgent.email,
+      status: humanAgent.status,
+      isActive: humanAgent.isActive,
+      lastActive: humanAgent.lastActive,
+      avatar: humanAgent.avatar,
+      userId: humanAgent.userId,
+      assignedAgents: humanAgent.assignedAgents,
     };
 
     // Emit to the client's room (userId) so settings page can update
-    if (agent.userId) {
-      appEvents.emit("userEvent", agent.userId, "agent-status-updated", updatedAgentData);
+    if (humanAgent.userId) {
+      appEvents.emit("userEvent", humanAgent.userId, "human-agent-status-updated", updatedAgentData);
     }
 
     // Also emit to the agent's own room (agentId) in case they're viewing settings
-    appEvents.emit("userEvent", agent._id.toString(), "agent-status-updated", updatedAgentData);
+    appEvents.emit("userEvent", humanAgent._id.toString(), "human-agent-status-updated", updatedAgentData);
 
     res.json({
-      message: "Agent status updated successfully",
-      agent: updatedAgentData,
+      message: "Human agent status updated successfully",
+      humanAgent: updatedAgentData,
     });
   } catch (error) {
-    console.error("Error updating agent status:", error);
-    res.status(500).json({ message: "Error updating agent status" });
+    console.error("Error updating human agent status:", error);
+    res.status(500).json({ message: "Error updating human agent status" });
   }
 };
 
 // Upload agent avatar
-exports.uploadAgentAvatar = async (req, res) => {
+exports.uploadHumanAgentAvatar = async (req, res) => {
   try {
-    const agentId = req.params.id;
+    const humanAgentId = req.params.id;
     
-    if (!agentId) {
+    if (!humanAgentId) {
       return res.status(400).json({ 
         status_code: 400, 
-        message: "Agent ID is required" 
+        message: "Human agent ID is required" 
       });
     }
     
@@ -352,9 +358,9 @@ exports.uploadAgentAvatar = async (req, res) => {
       });
     }
     
-    const agent = await Agent.findById(agentId);
+    const humanAgent = await HumanAgent.findById(humanAgentId);
     
-    if (!agent) {
+    if (!humanAgent) {
       // Delete uploaded file if agent not found
       if (req.file.path) {
         try {
@@ -365,13 +371,13 @@ exports.uploadAgentAvatar = async (req, res) => {
       }
       return res.status(404).json({ 
         status_code: 404, 
-        message: "Agent not found" 
+        message: "Human agent not found" 
       });
     }
     
     // Delete old avatar if exists
-    if (agent.avatar) {
-      const oldAvatarPath = path.join(__dirname, '..', agent.avatar);
+    if (humanAgent.avatar) {
+      const oldAvatarPath = path.join(__dirname, '..', humanAgent.avatar);
       try {
         if (fs.existsSync(oldAvatarPath)) {
           fs.unlinkSync(oldAvatarPath);
@@ -383,17 +389,17 @@ exports.uploadAgentAvatar = async (req, res) => {
     
     const filePath = `/uploads/${req.file.filename}`;
     
-    agent.avatar = filePath;
-    await agent.save();
+    humanAgent.avatar = filePath;
+    await humanAgent.save();
     
     res.status(200).json({ 
       status_code: 200,
       message: "Avatar uploaded successfully",
       agent: {
-        id: agent._id,
-        name: agent.name,
-        email: agent.email,
-        avatar: agent.avatar,
+        id: humanAgent._id,
+        name: humanAgent.name,
+        email: humanAgent.email,
+        avatar: humanAgent.avatar,
       }
     });
   } catch (error) {
