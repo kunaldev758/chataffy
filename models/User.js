@@ -43,6 +43,10 @@ const userSchema = new Schema(
       enum: ["admin", "client", "agent"],
       default: "client",
     },
+    isOnboarded: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );

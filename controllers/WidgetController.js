@@ -113,12 +113,13 @@ WidgetController.getThemeSettings = async (req, res) => {
           colorFields: widget.colorFields,
           position: widget.position,
           settings: widget.settings,
-          website: widget.website,
-          organisation: widget.organisation,
-          fallbackMessage: widget.fallbackMessage,
-          email: widget.email || user?.email,
-          phone: widget.phone,
-          liveAgentSupport: widget?.liveAgentSupport ?? false,
+          widgetToken: widget.widgetToken,
+          // website: widget.website,
+          // organisation: widget.organisation,
+          // fallbackMessage: widget.fallbackMessage,
+          // email: widget.email || user?.email,
+          // phone: widget.phone,
+          // liveAgentSupport: widget?.liveAgentSupport ?? false,
         }
       });
     } else {
@@ -221,7 +222,7 @@ WidgetController.updateThemeSettings = async (req, res) => {
     }
     
     const updatedWidget = await Widget.findOneAndUpdate(
-      { userId },
+      { agentId },
       { $set: updateData },
       { new: true }
     );

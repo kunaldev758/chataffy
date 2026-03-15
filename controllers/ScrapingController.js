@@ -20,6 +20,7 @@ class ScrapingController {
       this.ContinueScrappingAfterUpgrade.bind(this);
     this.upgradePlan = this.upgradePlan.bind(this);
     this.getScrapingHistory = this.getScrapingHistory.bind(this);
+    this.getSitemapUrls = this.getSitemapUrls.bind(this);
   }
 
 
@@ -451,7 +452,7 @@ async bulkInsertUrls(userId,agentId, urls) {
 
   async getSitemapUrls(req, res) {
     try {
-      const { userId, sitemapUrl, agentId } = req.body;
+      const { userId, sitemapUrl, agentId, skipBulkInsert } = req.body;
       if (!userId || !agentId) {
         return res.status(400).json({
           success: false,
@@ -473,7 +474,7 @@ async bulkInsertUrls(userId,agentId, urls) {
           error: "Agent not found",
         });
       }
-      if (agent.isSitemapAdded == true && sitemapUrl) {
+      if (!skipBulkInsert && agent.isSitemapAdded == true && sitemapUrl) {
         return res.status(400).json({
           success: false,
           error: "one sitemap already added",
@@ -522,16 +523,16 @@ async bulkInsertUrls(userId,agentId, urls) {
         );
       }
 
-      await Agent.updateOne({ 
-        _id: agentId 
-      }, { 
-        $set: { 
-          isSitemapAdded: true,
-        } 
-      });
-      
-
-        await this.bulkInsertUrls(userId,agentId, urls);
+      if (!skipBulkInsert) {
+        await Agent.updateOne({ 
+          _id: agentId 
+        }, { 
+          $set: { 
+            isSitemapAdded: true,
+          } 
+        });
+        await this.bulkInsertUrls(userId, agentId, urls);
+      }
       
       res.json({
         success: true,
@@ -541,6 +542,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       console.error("Error starting sitemap urls:", error);
       res.status(500).json({
         success: false,
+        error: error.message,
         urls: [],
       });
     }
@@ -650,6 +652,10 @@ async bulkInsertUrls(userId,agentId, urls) {
           error: "No urls found",
         });
       }
+
+      // Bulk insert URLs so the job can update them (job expects URLs in Url table)
+      await this.bulkInsertUrls(userId, agentId, urls);
+
       // Set scraping status and start time before starting the queue
       await Agent.updateOne({ 
         _id: agentId 
@@ -910,11 +916,11 @@ async bulkInsertUrls(userId,agentId, urls) {
     }
   }
 
-  async getScrapingHistoryBySocket(userId, skip, limit, type, status) {
+  async getScrapingHistoryBySocket(userId, agentId, skip, limit, type, status) {
     try {
       const TrainingModel = await PlanService.getTrainingModel(userId);
 
-      const query = { userId };
+      const query = { userId, agentId };
       // Handle sourceType filter from frontend
       let filterType = null;
       switch (type) {
@@ -1299,7 +1305,8 @@ async bulkInsertUrls(userId,agentId, urls) {
         const faqValidation = await ContentValidationService.validateFAQ(
           question,
           answer,
-          userId
+          userId,
+          agentId
         );
 
         if (!faqValidation.isValid) {

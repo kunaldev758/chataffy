@@ -1,4 +1,5 @@
 require("dotenv").config();
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const Client = require('../models/Client');
 const Widget = require('../models/Widget');
@@ -50,13 +51,14 @@ UserController.createUser = async (req, res) => {
     user.verification_token = emailVerificationToken; // Store the token in the user document    
     const userId = user.id;
     await user.save();
-    //create agent 
+    //create agent — set qdrant fields before first save (they are required)
+    const agentId = new mongoose.Types.ObjectId();
     const agent = new Agent({
-      userId: userId
+      _id: agentId,
+      userId: userId,
+      qdrantIndexName: `${userId}-${agentId}`,
+      qdrantIndexNamePaid: `${crypto.randomBytes(16).toString('hex')}-${agentId}`,
     });
-    await agent.save();
-    agent.qdrantIndexName = `${userId}-${agent._id}`;
-    agent.qdrantIndexNamePaid = `${crypto.randomBytes(16).toString('hex')}-${agent._id}`;
     await agent.save();
     // Generate client specific details
     const client = new Client({userId});
@@ -114,6 +116,7 @@ UserController.createUser = async (req, res) => {
       return res.status(200).json({ status_code: 200, status: true, message: 'User registered. Check your email for verification.' });
     });
   } catch (error) {
+    console.error("Error creating user:", error);
     commonHelper.logErrorToFile(error);
     res.status(500).json({ status_code: 500, status: false, message: 'User creation failed' });
   }
@@ -154,11 +157,22 @@ UserController.loginUser = async (req, res) => {
     user.auth_token = token;
     await user.save();
 
+    // Fetch all AI agents for this user
+    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id website_name isActive');
+
     if (req.io) {
       req.io.emit('user-logged-in', { userId: user._id });
     }
     
-    res.json({ status_code: 200, status: true, token,userId:user?._id, message: 'Login successful' });
+    res.json({
+      status_code: 200,
+      status: true,
+      token,
+      userId: user?._id,
+      isOnboarded: user.isOnboarded,
+      agents,
+      message: 'Login successful'
+    });
   } catch (error) {
     commonHelper.logErrorToFile(error);
     res.status(500).json({ status_code: 500, status: false, message: 'Login failed' });
@@ -354,11 +368,13 @@ UserController.googleOAuth = async (req, res) => {
 
       const userId = user.id;
       await user.save();
-      const agent = new Agent({ userId });
-      await agent.save();
-
-      agent.qdrantIndexName = `${userId}-${agent._id}`;
-      agent.qdrantIndexNamePaid = `${crypto.randomBytes(16).toString('hex')}-${agent._id}`;
+      const agentId = new mongoose.Types.ObjectId();
+      const agent = new Agent({
+        _id: agentId,
+        userId: userId,
+        qdrantIndexName: `${userId}-${agentId}`,
+        qdrantIndexNamePaid: `${crypto.randomBytes(16).toString('hex')}-${agentId}`,
+      });
       await agent.save();
 
       // Create related Client and Widget like in createUser
@@ -406,6 +422,9 @@ UserController.googleOAuth = async (req, res) => {
     user.auth_token = appToken;
     await user.save();
 
+    // Fetch all AI agents for this user
+    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id website_name isActive');
+
     if (req.io) {
       req.io.emit('user-logged-in', { userId: user._id });
     }
@@ -416,6 +435,8 @@ UserController.googleOAuth = async (req, res) => {
       token: appToken,
       role: user.role,
       userId: user?._id,
+      isOnboarded: user.isOnboarded,
+      agents,
       isNewUser
     });
   } catch (error) {

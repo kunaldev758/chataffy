@@ -8,7 +8,27 @@ const agentSchema = new mongoose.Schema({
   },
   website_name: {
     type: String,
-    required: true,
+    default: '',
+    trim: true,
+  },
+  agentName: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  email: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  phone: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  fallbackMessage: {
+    type: String,
+    default: '',
     trim: true,
   },
   isActive: {

@@ -9,21 +9,23 @@ const Conversation = require("../models/Conversation");
 const Visitor = require("../models/Visitor");
 const Client = require("../models/Client");
 const Agent = require("../models/Agent");
+const HumanAgent = require("../models/HumanAgent");
 const PlanService = require("../services/PlanService");
 const { agentConnectionTimeouts } = require("./visitorHandlers");
 
 const initializeClientEvents = (io, socket) => {
-  const { agentId } = socket;
+  const { humanAgentId } = socket;
   const { userId } = socket;
+  const { agentId } = socket;
   let conversationRoom = ``;
   let clientRoom = "";
   let agentRoom = "";
 
-  if (agentId) {
-    agentRoom = `user-${agentId}`;
+  if (humanAgentId) {
+    agentRoom = `user-${agentId}-${humanAgentId}`;
   }
-  if (!agentId && userId) {
-    clientRoom = `user-${userId}`;
+  if (!humanAgentId && userId && agentId) {
+    clientRoom = `user-${agentId}-${userId}`;
   }
   socket.join(agentRoom);
   socket.join(clientRoom);
@@ -35,7 +37,7 @@ const initializeClientEvents = (io, socket) => {
   });
 
   socket.on("get-training-list-count", async () => {
-    const data = await Client.findOne({userId});
+    const data = await Agent.findOne({userId});
 
     socket.emit("get-training-list-count-response", {
       response: "Received data from message",
@@ -49,6 +51,7 @@ const initializeClientEvents = (io, socket) => {
     let type = sourcetype
     const webPages = await ScrappingController.getScrapingHistoryBySocket(
       userId,
+      agentId,
       skip,
       limit,
       type,
@@ -73,9 +76,10 @@ const initializeClientEvents = (io, socket) => {
     try {
       const conv = await Conversation.find({
         userId: userId,
-        // agentId: socket.agentId,
+        agentId: agentId,
+        // humanAgentId: socket.humanAgentId,
         conversationOpenStatus: "open",
-      }).populate('agentId', 'name avatar isClient').sort({ createdAt: -1 });
+      }).populate('humanAgentId', 'name avatar isClient').sort({ createdAt: -1 });
 
       const updatedVisitors = await Promise.all(
         conv.map(async (conv) => {
@@ -103,9 +107,10 @@ const initializeClientEvents = (io, socket) => {
     try {
       const conv = await Conversation.find({
         userId: userId,
-        // agentId: socket.agentId,
+        agentId: agentId,
+        // humanAgentId: socket.humanAgentId,
         conversationOpenStatus: "close",
-      }).populate('agentId', 'name avatar isClient').sort({ createdAt: -1 });
+      }).populate('humanAgentId', 'name avatar isClient').sort({ createdAt: -1 });
 
       const updatedVisitors = await Promise.all(
         conv.map(async (conv) => {
@@ -270,19 +275,20 @@ const initializeClientEvents = (io, socket) => {
     try {
       const conversation = await ConversationController.getOpenConversation(
         visitorId,
-        userId
-        // socket.agentId
+        userId,
+        agentId,
+        // socket.humanAgentId
       );
       const conversationId = conversation?._id || null;
 
-      // Get agentId if socket type is agent, or find client's agent record
-      let agentIdForMessage;
+      // Get humanAgentId if socket type is agent, or find client's agent record
+      let humanAgentIdForMessage;
       if (socket.type === "agent") {
-        agentIdForMessage = socket.agentId;
+        humanAgentIdForMessage = socket.humanAgentId;
       } else if (socket.type === "client") {
         // Find the client's agent record (isClient: true)
-        const clientAgent = await Agent.findOne({ userId: userId, isClient: true });
-        agentIdForMessage = clientAgent ? clientAgent._id : undefined;
+        const clientAgent = await HumanAgent.findOne({ userId: userId, isClient: true });
+        humanAgentIdForMessage = clientAgent ? clientAgent._id : undefined;
       }
 
       const chatMessage = await ChatMessageController.createChatMessage(
@@ -291,15 +297,16 @@ const initializeClientEvents = (io, socket) => {
         "agent",
         message,
         userId,
+        agentId,
         undefined,
-        agentIdForMessage,
+        humanAgentIdForMessage,
         undefined,
         replyTo
       );
 
       // Populate agent info and replyTo before emitting
-      if (agentIdForMessage) {
-        await chatMessage.populate('agentId', 'name avatar isClient');
+      if (humanAgentIdForMessage) {
+        await chatMessage.populate('humanAgentId', 'name avatar isClient');
       }
       if (replyTo) {
         await chatMessage.populate('replyTo', 'sender message createdAt sender_type');
@@ -336,14 +343,14 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("client-send-add-note",async ({ message, visitorId, conversationId }, callback) => {
       try {
-        // Get agentId if socket type is agent, or find client's agent record
-        let agentIdForMessage;
+        // Get humanAgentId if socket type is agent, or find client's agent record
+        let humanAgentIdForMessage;
         if (socket.type === "agent") {
-          agentIdForMessage = socket.agentId;
+          humanAgentIdForMessage = socket.humanAgentId;
         } else if (socket.type === "client") {
           // Find the client's agent record (isClient: true)
-          const clientAgent = await Agent.findOne({ userId: userId, isClient: true });
-          agentIdForMessage = clientAgent ? clientAgent._id : undefined;
+          const clientAgent = await HumanAgent.findOne({ userId: userId, isClient: true });
+          humanAgentIdForMessage = clientAgent ? clientAgent._id : undefined;
         }
 
         const note = await ChatMessageController.addNoteToChat(
@@ -352,12 +359,13 @@ const initializeClientEvents = (io, socket) => {
           message,
           conversationId,
           userId,
-          agentIdForMessage
+          agentId,
+          humanAgentIdForMessage
         );
 
         // Populate agent info before emitting
-        if (agentIdForMessage) {
-          await note.populate('agentId', 'name avatar isClient');
+        if (humanAgentIdForMessage) {
+          await note.populate('humanAgentId', 'name avatar isClient');
         }
 
         // Convert to plain object to ensure populated fields are included
@@ -409,6 +417,7 @@ const initializeClientEvents = (io, socket) => {
           name,
           conversationId,
           userId,
+          agentId,
         });
         callback({ success: true, tags: updatedTags });
       } catch (error) {
@@ -560,7 +569,7 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("agent-deleted",async ({}, callback) => {
     try {
-      // await AgentController.deleteAgent(agentId);
+      // await AgentController.deleteAgent(humanAgentId);
       io.to(agentRoom).emit("agent-deleted-success");
       // callback({ success: true });
     } catch (error) {
@@ -588,31 +597,31 @@ const initializeClientEvents = (io, socket) => {
       
       // Get agent/client information who is toggling
       let transferName = "Agent";
-      let agentIdForMessage = undefined;
+      let humanAgentIdForMessage = undefined;
       
       if (socket.type === "agent") {
         // If it's an agent, get the agent details
-        agentIdForMessage = socket.agentId;
-        const agent = await Agent.findById(agentIdForMessage);
-        if (agent) {
-          transferName = agent.isClient ? "Client" : agent.name;
+        humanAgentIdForMessage = socket.humanAgentId;
+        const humanAgent = await HumanAgent.findById(humanAgentIdForMessage);
+        if (humanAgent) {
+          transferName = humanAgent.isClient ? "Client" : humanAgent.name;
         }
       } else if (socket.type === "client") {
         // If it's a client, find the client's agent record
-        const clientAgent = await Agent.findOne({ userId: userId, isClient: true });
+        const clientAgent = await HumanAgent.findOne({ userId: userId, isClient: true });
         if (clientAgent) {
           transferName = "Client";
-          agentIdForMessage = clientAgent._id;
+          humanAgentIdForMessage = clientAgent._id;
         }
       }
 
-      // Disable AI chat and update agentId and transferredAt
+      // Disable AI chat and update humanAgentId and transferredAt
       await Conversation.updateOne(
         { _id: conversationId },
         { 
           $set: { 
             aiChat: false,
-            agentId: agentIdForMessage || null,
+            humanAgentId: humanAgentIdForMessage || null,
             transferredAt: new Date()
           } 
         }
@@ -626,13 +635,14 @@ const initializeClientEvents = (io, socket) => {
         "system",
         transferMessage,
         userId,
+        agentId,
         undefined,
-        agentIdForMessage
+        humanAgentIdForMessage
       );
 
       // Populate agent info if available
-      if (agentIdForMessage) {
-        await systemMessage.populate('agentId', 'name avatar isClient');
+      if (humanAgentIdForMessage) {
+        await systemMessage.populate('humanAgentId', 'name avatar isClient');
       }
 
       // Convert to plain object
@@ -651,7 +661,7 @@ const initializeClientEvents = (io, socket) => {
       ]).emit("chat-transferred", {
         conversationId,
         transferredTo: transferName,
-        agentId: agentIdForMessage
+        humanAgentId: humanAgentIdForMessage
       });
       
       // Emit to both client and visitor rooms
@@ -680,7 +690,8 @@ const initializeClientEvents = (io, socket) => {
     try {
       const visitors = await ConversationController.searchByTagOrName(
         query,
-        userId
+        userId,
+        agentId,
       );
       callback({ success: true, data: visitors });
     } catch (error) {
@@ -732,19 +743,19 @@ const initializeClientEvents = (io, socket) => {
       
       // Get agent/client information who is accepting
       let transferName = "Agent";
-      let agentIdForMessage = undefined;
+      let humanAgentIdForMessage = undefined;
       
       if (socket.type === "agent") {
-        agentIdForMessage = socket.agentId;
-        const agent = await Agent.findById(agentIdForMessage);
-        if (agent) {
-          transferName = agent.isClient ? "Client" : agent.name;
+        humanAgentIdForMessage = socket.humanAgentId;
+        const agent = await HumanAgent.findById(humanAgentIdForMessage);
+        if (humanAgent) {
+          transferName = humanAgent.isClient ? "Client" : humanAgent.name;
         }
       } else if (socket.type === "client") {
-        const clientAgent = await Agent.findOne({ userId: userId, isClient: true });
+        const clientAgent = await HumanAgent.findOne({ userId: userId, isClient: true });
         if (clientAgent) {
           transferName = "Client";
-          agentIdForMessage = clientAgent._id;
+          humanAgentIdForMessage = clientAgent._id;
         }
       }
 
@@ -754,7 +765,7 @@ const initializeClientEvents = (io, socket) => {
         { 
           $set: { 
             aiChat: false,
-            agentId: agentIdForMessage || null,
+            humanAgentId: humanAgentIdForMessage || null,
             transferredAt: new Date()
           } 
         }
@@ -768,13 +779,14 @@ const initializeClientEvents = (io, socket) => {
         "system",
         transferMessage,
         userId,
+        agentId,
         undefined,
-        agentIdForMessage
+        humanAgentIdForMessage
       );
 
       // Populate agent info if available
-      if (agentIdForMessage) {
-        await systemMessage.populate('agentId', 'name avatar isClient');
+      if (humanAgentIdForMessage) {
+        await systemMessage.populate('humanAgentId', 'name avatar isClient');
       }
 
       const systemMessageObj = systemMessage.toObject ? systemMessage.toObject() : systemMessage;
@@ -824,7 +836,7 @@ const initializeClientEvents = (io, socket) => {
       // Don't broadcast to all agents - keep request active for others
       if (socket.type === "agent") {
         // Agent declined - only cancel for this specific agent
-        io.to(`user-${socket.agentId}`).emit("agent-connection-cancelled", { conversationId });
+        io.to(`user-${agentId}-${socket.humanAgentId}`).emit("agent-connection-cancelled", { conversationId });
       } else {
         // Client declined - only cancel for this client
         io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });

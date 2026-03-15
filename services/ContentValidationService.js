@@ -221,7 +221,7 @@ class ContentValidationService {
    * @param {string} userId - User ID
    * @returns {Object} Validation result
    */
-  static async validateFAQ(question, answer, userId) {
+  static async validateFAQ(question, answer, userId,agentId) {
     if (!question || !answer) {
       return {
         isValid: false,

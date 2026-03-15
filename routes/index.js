@@ -59,7 +59,8 @@ const preserveBody = (req, res, next) => {
 const ChatMessageController = require('../controllers/ChatMessageController');
 const UserController = require('../controllers/UserController');
 const WidgetController = require('../controllers/WidgetController');
-const agentController = require('../controllers/agentController');
+const agentController = require('../controllers/HumanAgentController');
+const AIAgentController = require('../controllers/AIAgentController');
 const superAdminController = require('../controllers/superAdminController');
 const scrapingController = require('../controllers/ScrapingController');
 const PlanAdminController = require('../controllers/PlanAdminController');
@@ -75,7 +76,7 @@ router.get('/test', (req, res) => {
 });
 
 // Agent invitation acceptance (public)
-router.post('/agents/accept-invite/:token', agentController.acceptInvite);
+router.post('/agents/accept-invite/:token', agentController.acceptInviteHumanAgent);
 
 // Authentication routes (public)
 router.post('/login', UserController.loginUser);
@@ -123,7 +124,8 @@ router.post('/client',middleware,UserController.getClient);
 router.post('/clients/status',middleware,UserController.updateClientStatus);
 
 // Scraping management
-router.post('/openaiScrape',middleware, scrapingController.startSitemapScraping);
+router.post('/getSitemapUrls', middleware, scrapingController.getSitemapUrls);
+router.post('/openaiScrape', middleware, scrapingController.startSitemapScraping);
 router.post('/continueAfterUpgrade',middleware, scrapingController.ContinueScrappingAfterUpgrade);
 router.post('/upgradePlan',middleware,scrapingController.upgradePlan); //->check this if in use or not
 // // Create snippet/document
@@ -143,10 +145,10 @@ router.post('/getOldConversationMessages',middleware, ChatMessageController.getA
 // Enhanced Widget routes
 router.post('/getWidgetToken',middleware, WidgetController.getWidgetToken);
 // Logo upload with enhanced validation
-router.post('/uploadLogo/:userId',middleware, upload.single('logo'), WidgetController.uploadLogo);
+router.post('/uploadLogo/:agentId',middleware, upload.single('logo'), WidgetController.uploadLogo);
 
 // Theme settings routes
-router.get('/getThemeSettings/:userId',middleware, WidgetController.getThemeSettings);
+router.get('/getThemeSettings/:agentId',middleware, WidgetController.getThemeSettings);
 router.post('/getThemeSettings',middleware, WidgetController.getThemeSettings); // Alternative POST method
 router.post('/updateThemeSettings',middleware, WidgetController.updateThemeSettings);
 
@@ -154,13 +156,20 @@ router.post('/updateThemeSettings',middleware, WidgetController.updateThemeSetti
 router.post('/updateWidgetPosition',middleware, WidgetController.updateWidgetPosition);
 
 // Agent management routes
-router.post('/agents',middleware, agentController.createAgent);
-router.get('/agents',middleware, agentController.getAllAgents);
-router.get('/agents/:id',middleware, agentController.getAgent);
-router.post('/agents/:id',middleware, agentController.updateAgent);
-router.post('/agents/delete/:id',middleware, agentController.deleteAgent);
-router.post('/agents/:id/status',middleware, agentController.updateAgentStatus);
-router.post('/agents/:id/avatar',middleware, upload.single('avatar'), agentController.uploadAgentAvatar);
+router.post('/agents',middleware, agentController.createHumanAgent);
+router.get('/agents',middleware, agentController.getAllHumanAgents);
+router.get('/agents/:id',middleware, agentController.getHumanAgent);
+router.post('/agents/:id',middleware, agentController.updateHumanAgent);
+router.post('/agents/delete/:id',middleware, agentController.deleteHumanAgent);
+router.post('/agents/:id/status',middleware, agentController.updateHumanAgentStatus);
+router.post('/agents/:id/avatar',middleware, upload.single('avatar'), agentController.uploadHumanAgentAvatar);
+
+// AI Agent (website) management routes
+router.get('/ai-agents', middleware, AIAgentController.getAgents);
+router.post('/ai-agents', middleware, AIAgentController.createAgent);
+router.post('/complete-onboarding', middleware, AIAgentController.completeOnboarding);
+router.get('/agent-settings/:agentId', middleware, AIAgentController.getAgentSettings);
+router.post('/updateAgentSettings', middleware, AIAgentController.updateAgentSettings);
 
 router.post('/sendEmailForOfflineChat', ConversationController.sendEmailForOfflineChatController);
 

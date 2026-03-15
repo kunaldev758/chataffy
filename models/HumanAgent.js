@@ -67,4 +67,4 @@ agentSchema.pre('save', function(next) {
   next();
 });
 
-module.exports = mongoose.model('Agent', agentSchema); 
+module.exports = mongoose.model('HumanAgent', agentSchema); 

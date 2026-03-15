@@ -22,21 +22,22 @@ const agentConnectionTimeouts = new Map();
 module.exports.agentConnectionTimeouts = agentConnectionTimeouts;
 
 const initializeVisitorEvents = (io, socket) => {
-  const { agentId } = socket;
+  const { humanAgentId } = socket;
   const { userId } = socket;
   const { visitorId } = socket;
+  const { agentId } = socket;
   let conversationRoom = ``;
   let clientRoom = "";
   let agentRoom = "";
 
-  if (agentId) {
-    agentRoom = `user-${agentId}`;
+  if (humanAgentId) {
+    agentRoom = `user-${agentId}-${humanAgentId}`;
   }
-  if (!agentId && userId) {
-    clientRoom = `user-${userId}`;
+  if (!humanAgentId && userId) {
+    clientRoom = `user-${agentId}-${userId}`;
   }
 
-  const VisitorRoom = `conversation-${visitorId}`;
+  const VisitorRoom = `conversation-${agentId}-${visitorId}`;
   socket.join(VisitorRoom);
 
   socket.on("visitor-ip", async ({ ip }, callback) => {
@@ -72,7 +73,8 @@ const initializeVisitorEvents = (io, socket) => {
       // Get the conversation to check aiChat status
       let conversation = await ConversationController.getOpenConversation(
         visitorId,
-        userId
+        userId,
+        agentId
       );
       let aiChat = true; // Default to true (AI chat mode)
 
@@ -84,7 +86,8 @@ const initializeVisitorEvents = (io, socket) => {
           visitorId,
           "bot",
           themeSettings?.welcomeMessage,
-          userId
+          userId,
+          agentId
         );
 
         chatMessages = await ChatMessageController.getAllChatMessages(
@@ -140,8 +143,9 @@ const initializeVisitorEvents = (io, socket) => {
     try {
       const conversation = await ConversationController.getOpenConversation(
         visitorId,
-        userId
-        // socket.agentId
+        userId,
+        agentId
+        // socket.humanAgentId
       );
       const conversationId = conversation?._id || null;
       const messages = await ChatMessage.find({
@@ -168,7 +172,8 @@ const initializeVisitorEvents = (io, socket) => {
         visitorId,
         "visitor",
         "<p>" + encodedMessage + "</p>",
-        userId
+        userId,
+        agentId
       );
 
       io.to([`conversation-${conversationId}`, VisitorRoom]).emit(
@@ -187,6 +192,7 @@ const initializeVisitorEvents = (io, socket) => {
       if (conversation.aiChat) {
         const response_data = await QueryController.handleQuestionAnswer(
           userId,
+          agentId,
           message,
           conversationId
         );
@@ -199,7 +205,7 @@ const initializeVisitorEvents = (io, socket) => {
 
         // Check if visitor requested agent connection and liveAgentSupport is enabled
         if (response_data.isAgentRequest) {
-          const clientData = await Client.findOne({ userId }).lean();
+          const clientData = await Agent.findOne({ _id: agentId }).lean();
           if (clientData && clientData.liveAgentSupport === true) {
             // Get visitor and conversation details for notification
             const visitor = await Visitor.findById(visitorId).lean();
@@ -216,20 +222,21 @@ const initializeVisitorEvents = (io, socket) => {
             const notificationData = {
               conversationId,
               visitorId,
+              agentId,
               visitor: visitor,
               message: "Visitor requested to connect to an agent",
               timestamp: new Date(),
             };
 
             // Emit to client room
-            io.to(`user-${userId}`).emit("agent-connection-notification", notificationData);
+            io.to(`user-${agentId}-${userId}`).emit("agent-connection-notification", notificationData);
             
             // Emit to all agents for this client and create notifications
-            const agents = await HumanAgent.find({ userId, status: 'approved', isActive: true }).lean();
+            const agents = await HumanAgent.find({ agentId, status: 'approved', isActive: true }).lean();
             for (const agent of agents) {
               io.to(`user-${agent._id}`).emit("agent-connection-notification", notificationData);
               await NotificationController.createAgentConnectionNotification(
-                agentId,
+                humanAgentId,
                 conversationId,
                 visitorId,
                 userId,
@@ -289,6 +296,7 @@ const initializeVisitorEvents = (io, socket) => {
               "assistant",
               response_data.answer,
               userId,
+              agentId,
               response_data?.sources
             );
           io.to(`conversation-${visitorId}`).emit(
@@ -312,7 +320,8 @@ const initializeVisitorEvents = (io, socket) => {
               "",
               "assistant",
               "error in generating Response",
-              userId
+              userId,
+              agentId
             );
           io.to(`conversation-${visitorId}`).emit(
             "conversation-append-message",
@@ -357,11 +366,11 @@ const initializeVisitorEvents = (io, socket) => {
         );
         callback?.({ success: true });
 
-        // Get conversation to find userId and agentId
+        // Get conversation to find userId and humanAgentId
         const conversation = await Conversation.findById(conversationId).lean();
         if (conversation) {
           const userId = conversation.userId;
-          const agentId = conversation.agentId;
+          const humanAgentId = conversation.humanAgentId;
           
           // Emit to conversation room
           io.to(`conversation-${conversationId}`).emit("visitor-close-chat", {
@@ -377,8 +386,8 @@ const initializeVisitorEvents = (io, socket) => {
           }
           
           // Emit to agent room if conversation is assigned to an agent
-          if (agentId) {
-            io.to(`user-${agentId}`).emit("conversation-close-triggered", {
+          if (humanAgentId) {
+            io.to(`user-${humanAgentId}`).emit("conversation-close-triggered", {
               conversationStatus: "close",
               conversationId: conversationId
             });
