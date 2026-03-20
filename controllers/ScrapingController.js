@@ -9,7 +9,7 @@ const appEvents = require("../events.js");
 const axios = require("axios");
 const xml2js = require("xml2js");
 const cheerio = require("cheerio");
-const { urlProcessingQueue } = require("../services/jobService.js");
+const { urlProcessingQueue, deleteTrainingDataQueue, retrainTrainingDataQueue } = require("../services/jobService.js");
 const Agent = require("../models/Agent.js");
 const Widget = require("../models/Widget.js");
 
@@ -643,9 +643,10 @@ async bulkInsertUrls(userId,agentId, urls) {
 
       if (urls.length == 0) {
         await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
-        appEvents.emit("userEvent", userId, "training-event", {
+        appEvents.emit("userEvent", agentId, "training-event", {
           message: "No urls found",
           agent: await Agent.findOne({ _id: agentId }),
+          client: await Client.findOne({ userId }),
         });
         return res.json({
           success: false,
@@ -701,7 +702,8 @@ async bulkInsertUrls(userId,agentId, urls) {
     } catch (error) {
       const { userId, agentId } = req.body;
       await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
-      appEvents.emit("userEvent", userId, "training-event", {
+      appEvents.emit("userEvent", agentId, "training-event", {
+        client: await Client.findOne({ userId }),
         message: error.message,
         agent: await Agent.findOne({ _id: agentId }),
       });
@@ -1460,6 +1462,206 @@ async bulkInsertUrls(userId,agentId, urls) {
         message: "Failed to create FAQ",
         errorCode: "INTERNAL_ERROR",
         error: error.message,
+      });
+    }
+  }
+
+  /**
+   * Delete training data by IDs. Runs in background.
+   * Body: { ids: string[], agentId: string }
+   */
+  async deleteTrainingData(req, res) {
+    try {
+      const { ids, agentId, userId } = req.body;
+
+      if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "ids array is required and must not be empty",
+        });
+      }
+
+      if (!agentId) {
+        return res.status(400).json({
+          success: false,
+          error: "agentId is required",
+        });
+      }
+
+      // Verify agent belongs to user
+      const agent = await Agent.findOne({ _id: agentId, userId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
+      }
+
+      const client = await Client.findOne({ userId });
+      if (!client) {
+        return res.status(404).json({
+          success: false,
+          error: "Client not found",
+        });
+      }
+
+      const qdrantIndexName =
+        client?.plan === "free"
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
+
+      if (!qdrantIndexName) {
+        return res.status(400).json({
+          success: false,
+          error: "Agent has no Qdrant collection configured",
+        });
+      }
+
+      const TrainingModel = await PlanService.getTrainingModel(userId);
+      const plan = await PlanService.getUserPlan(userId);
+      const TrainingModelName =
+        plan?.name === "free" ? "TrainingListFreeUsers" : "OpenaiTrainingList";
+
+      // Fetch entries by _ids, ensure they belong to this user and agent
+      const mongoose = require("mongoose");
+      const objectIds = ids
+        .filter((id) => id)
+        .map((id) => (typeof id === "string" ? new mongoose.Types.ObjectId(id) : id));
+      const entries = await TrainingModel.find({
+        _id: { $in: objectIds },
+        userId: userId?.toString(),
+        agentId,
+      }).lean();
+
+      if (entries.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: "No matching training entries found",
+        });
+      }
+
+      // Add job to background queue
+      await deleteTrainingDataQueue.add("deleteTrainingData", {
+        entries,
+        userId: userId?.toString(),
+        agentId: agentId?.toString(),
+        qdrantIndexName,
+        TrainingModelName,
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Delete job queued. Training data will be removed in the background.",
+        count: entries.length,
+      });
+    } catch (error) {
+      console.error("deleteTrainingData error:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message || "Failed to delete training data",
+      });
+    }
+  }
+
+  /**
+   * Retrain training data by IDs. Only webpages (type 0) are retrained. Runs in background.
+   * Body: { ids: string[], agentId: string }
+   */
+  async retrainTrainingData(req, res) {
+    try {
+      const { ids, agentId, userId } = req.body;
+
+      if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "ids array is required and must not be empty",
+        });
+      }
+
+      if (!agentId) {
+        return res.status(400).json({
+          success: false,
+          error: "agentId is required",
+        });
+      }
+
+      const agent = await Agent.findOne({ _id: agentId, userId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
+      }
+
+      const client = await Client.findOne({ userId });
+      if (!client) {
+        return res.status(404).json({
+          success: false,
+          error: "Client not found",
+        });
+      }
+
+      const qdrantIndexName =
+        client?.plan === "free"
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
+
+      if (!qdrantIndexName) {
+        return res.status(400).json({
+          success: false,
+          error: "Agent has no Qdrant collection configured",
+        });
+      }
+
+      const TrainingModel = await PlanService.getTrainingModel(userId);
+      const plan = await PlanService.getUserPlan(userId);
+      const TrainingModelName =
+        plan?.name === "free" ? "TrainingListFreeUsers" : "OpenaiTrainingList";
+
+      const mongoose = require("mongoose");
+      const objectIds = ids
+        .filter((id) => id)
+        .map((id) => (typeof id === "string" ? new mongoose.Types.ObjectId(id) : id));
+      const entries = await TrainingModel.find({
+        _id: { $in: objectIds },
+        userId: userId?.toString(),
+        agentId,
+      }).lean();
+
+      if (entries.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: "No matching training entries found",
+        });
+      }
+
+      // Filter to only webpages (type 0) - others are skipped in the job
+      const webpageEntries = entries.filter((e) => e.type === 0 && e.webPage?.url);
+      if (webpageEntries.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "No webpage entries found to retrain. Only web pages (type 0) can be retrained.",
+        });
+      }
+
+      await retrainTrainingDataQueue.add("retrainTrainingData", {
+        entries: webpageEntries,
+        userId: userId?.toString(),
+        agentId: agentId?.toString(),
+        qdrantIndexName,
+        TrainingModelName,
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Retrain job queued. Web pages will be scraped and retrained in the background.",
+        count: webpageEntries.length,
+      });
+    } catch (error) {
+      console.error("retrainTrainingData error:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message || "Failed to retrain training data",
       });
     }
   }

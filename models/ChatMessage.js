@@ -21,7 +21,8 @@ const chatMessageSchema = new Schema({
     required: true,
   },
   infoSources: {
-    type: [String],
+    type: [mongoose.Schema.Types.Mixed],
+    default: undefined,
   },
   conversation_id: {
     type: Schema.Types.ObjectId,

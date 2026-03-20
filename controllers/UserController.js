@@ -158,7 +158,7 @@ UserController.loginUser = async (req, res) => {
     await user.save();
 
     // Fetch all AI agents for this user
-    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id website_name isActive');
+    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id agentName isActive');
 
     if (req.io) {
       req.io.emit('user-logged-in', { userId: user._id });
@@ -423,7 +423,7 @@ UserController.googleOAuth = async (req, res) => {
     await user.save();
 
     // Fetch all AI agents for this user
-    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id website_name isActive');
+    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id agentName isActive');
 
     if (req.io) {
       req.io.emit('user-logged-in', { userId: user._id });
@@ -482,4 +482,148 @@ function getJson(url, headers = {}) {
     }
   });
 }
+
+function isStrongPassword(pw) {
+  if (typeof pw !== 'string' || pw.length < 8) return false;
+  if (!/[A-Z]/.test(pw)) return false;
+  if (!/[0-9]/.test(pw)) return false;
+  if (!/[^A-Za-z0-9]/.test(pw)) return false;
+  return true;
+}
+
+/** Dashboard client profile: HumanAgent (isClient) display + User account fields */
+UserController.getClientProfile = async (req, res) => {
+  try {
+    const userId = req.body.userId;
+    if (!userId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+    }
+    const user = await User.findById(userId).select('-password -verification_token -auth_token');
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+    }
+    const clientAgent = await HumanAgent.findOne({ userId, isClient: true }).select('-password');
+    if (!clientAgent) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'Client profile not found' });
+    }
+    return res.json({
+      status_code: 200,
+      status: true,
+      clientAgent: {
+        _id: clientAgent._id,
+        name: clientAgent.name,
+        avatar: clientAgent.avatar,
+        email: clientAgent.email,
+      },
+      user: {
+        email: user.email,
+        phone: user.phone || '',
+        provider: user.provider || 'local',
+      },
+    });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to load profile' });
+  }
+};
+
+/** Name on HumanAgent (isClient); email + phone on User (sync HumanAgent + Client email) */
+UserController.updateClientProfileGeneral = async (req, res) => {
+  try {
+    const userId = req.body.userId;
+    const { name, email, phone } = req.body;
+    if (!userId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+    }
+    const user = await User.findById(userId);
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+    }
+    const clientAgent = await HumanAgent.findOne({ userId, isClient: true });
+    if (!clientAgent) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'Client profile not found' });
+    }
+
+    if (typeof name === 'string' && name.trim()) {
+      clientAgent.name = name.trim();
+    }
+
+    if (phone !== undefined) {
+      const p = phone === null || phone === '' ? undefined : String(phone).trim();
+      user.phone = p;
+    }
+
+    if (email !== undefined && String(email).trim()) {
+      const normalized = String(email).toLowerCase().trim();
+      const emailTaken = await User.findOne({ email: normalized, _id: { $ne: userId } });
+      if (emailTaken) {
+        return res.status(400).json({ status_code: 400, status: false, message: 'Email is already in use' });
+      }
+      user.email = normalized;
+      clientAgent.email = normalized;
+      await Client.updateOne({ userId }, { $set: { email: normalized } });
+    }
+
+    await user.save();
+    await clientAgent.save();
+
+    return res.json({
+      status_code: 200,
+      status: true,
+      message: 'Profile updated',
+      clientAgent: {
+        _id: clientAgent._id,
+        name: clientAgent.name,
+        avatar: clientAgent.avatar,
+        email: clientAgent.email,
+      },
+      user: {
+        email: user.email,
+        phone: user.phone || '',
+      },
+    });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to update profile' });
+  }
+};
+
+/** Password change on User only */
+UserController.updateClientPassword = async (req, res) => {
+  try {
+    const userId = req.body.userId;
+    const { currentPassword, newPassword } = req.body;
+    if (!userId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+    }
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'Current and new password are required' });
+    }
+    if (newPassword !== req.body.confirmPassword && req.body.confirmPassword !== undefined) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'New passwords do not match' });
+    }
+    if (!isStrongPassword(newPassword)) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: 'Password must be at least 8 characters and include uppercase, number, and symbol',
+      });
+    }
+    const user = await User.findById(userId);
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+    }
+    const ok = await user.comparePassword(currentPassword);
+    if (!ok) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'Current password is incorrect' });
+    }
+    user.password = newPassword;
+    await user.save();
+    return res.json({ status_code: 200, status: true, message: 'Password updated successfully' });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to update password' });
+  }
+};
+
 module.exports = UserController;

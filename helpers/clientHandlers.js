@@ -13,22 +13,90 @@ const HumanAgent = require("../models/HumanAgent");
 const PlanService = require("../services/PlanService");
 const { agentConnectionTimeouts } = require("./visitorHandlers");
 
+/**
+ * Resolves the human agent id and display name from a socket.
+ * Avoids repeated HumanAgent.findOne calls across multiple handlers.
+ */
+async function resolveHumanAgent(socket, userId) {
+  if (socket.type === "human-agent") {
+    const humanAgent = await HumanAgent.findById(socket.humanAgentId).lean();
+    return {
+      id: socket.humanAgentId,
+      name: humanAgent ? (humanAgent.isClient ? "Client" : humanAgent.name) : "Agent",
+    };
+  }
+  if (socket.type === "client") {
+    const rec = await HumanAgent.findOne({ userId, isClient: true }).lean();
+    return rec ? { id: rec._id, name: "Client" } : { id: undefined, name: "Client" };
+  }
+  return { id: undefined, name: "Agent" };
+}
+
+/**
+ * Shared logic for transferring a conversation from AI to a human agent.
+ * Used by both close-ai-response and accept-agent-connection.
+ */
+async function transferChatToHuman(io, { conversationId, visitorId, humanAgentIdForMessage, transferName, userId, agentId, systemMessageText }) {
+  await Conversation.updateOne(
+    { _id: conversationId },
+    {
+      $set: {
+        aiChat: false,
+        humanAgentId: humanAgentIdForMessage || null,
+        transferredAt: new Date(),
+      },
+    }
+  );
+
+  const systemMessage = await ChatMessageController.createChatMessage(
+    conversationId,
+    visitorId || "system",
+    "system",
+    systemMessageText,
+    userId,
+    agentId,
+    undefined,
+    humanAgentIdForMessage
+  );
+
+  if (humanAgentIdForMessage) {
+    await systemMessage.populate("humanAgentId", "name avatar isClient");
+  }
+
+  const systemMessageObj = systemMessage.toObject ? systemMessage.toObject() : systemMessage;
+
+  // conversation-${conversationId}  → client/agent sockets (joined via set-conversation-id)
+  // conversation-${visitorId}       → legacy alias some sockets may use
+  // visitor-${agentId}-${visitorId} → the actual room the visitor widget socket joins
+  const agentRooms = [`conversation-${conversationId}`, `conversation-${visitorId}`];
+  const visitorRoom = `visitor-${agentId}-${visitorId}`;
+
+  io.to([...agentRooms, visitorRoom]).emit("conversation-append-message", { chatMessage: systemMessageObj });
+
+  io.to([...agentRooms, visitorRoom]).emit("ai-chat-status-update", {
+    aiChat: false,
+    conversationId,
+    transferredTo: transferName,
+    humanAgentId: humanAgentIdForMessage,
+  });
+
+  return systemMessageObj;
+}
+
 const initializeClientEvents = (io, socket) => {
   const { humanAgentId } = socket;
   const { userId } = socket;
   const { agentId } = socket;
-  let conversationRoom = ``;
-  let clientRoom = "";
-  let agentRoom = "";
+  let conversationRoom = "";
+  let userAgentRoom = "";
+  let userRoom = "";
 
-  if (humanAgentId) {
-    agentRoom = `user-${agentId}-${humanAgentId}`;
-  }
-  if (!humanAgentId && userId && agentId) {
-    clientRoom = `user-${agentId}-${userId}`;
-  }
-  socket.join(agentRoom);
-  socket.join(clientRoom);
+  userAgentRoom = `user-${agentId}-${humanAgentId}`;
+  userRoom = `user-${userId}`;
+  const agentRoom = agentId ? `user-${agentId}` : null;
+
+  socket.join(userAgentRoom);
+  if (agentRoom) socket.join(agentRoom);
 
   socket.on("client-connect", async () => {
     socket.emit("client-connect-response", {
@@ -36,26 +104,33 @@ const initializeClientEvents = (io, socket) => {
     });
   });
 
-  socket.on("get-training-list-count", async () => {
-    const data = await Agent.findOne({userId});
-
-    socket.emit("get-training-list-count-response", {
+  socket.on("get-agent-data", async () => {
+    const agentData = await Agent.findOne({ _id: agentId });
+    socket.emit("get-agent-data-response", {
       response: "Received data from message",
-      data,
+      agentData,
+    });
+  });
+
+  socket.on("get-client-data", async () => {
+    const clientData = await Client.findOne({ userId: userId });
+    socket.emit("get-client-data-response", {
+      response: "Received data from message",
+      clientData,
     });
   });
 
   socket.on("get-training-list", async (data) => {
     const { skip, limit, sourcetype, actionType } = data;
     let status = actionType;
-    let type = sourcetype
+    let type = sourcetype;
     const webPages = await ScrappingController.getScrapingHistoryBySocket(
       userId,
       agentId,
       skip,
       limit,
       type,
-      status,
+      status
     );
     socket.emit("get-training-list-response", {
       response: "Received data from message",
@@ -63,23 +138,30 @@ const initializeClientEvents = (io, socket) => {
     });
   });
 
-  socket.on("continue-scrapping-button",async ()=>{
-    const clientData = await Client.findOne({userId});
-    if(clientData?.pagesAdded?.success+clientData?.pagesAdded?.failed<clientData?.pagesAdded?.total && clientData?.upgradePlanStatus?.storageLimitExceeded != true && clientData?.dataTrainingStatus ==0){
+  socket.on("continue-scrapping-button", async () => {
+    const clientData = await Client.findOne({ userId });
+    const agentData = await Agent.findOne({ _id: agentId });
+    if (
+      agentData?.pagesAdded?.success + agentData?.pagesAdded?.failed <
+        agentData?.pagesAdded?.total &&
+      clientData?.upgradePlanStatus?.storageLimitExceeded != true &&
+      agentData?.dataTrainingStatus == 0
+    ) {
       socket.emit("show-continue-scrapping-button", {
         response: "show button",
       });
     }
-  })
+  });
 
   socket.on("get-open-conversations-list", async (data) => {
     try {
       const conv = await Conversation.find({
         userId: userId,
         agentId: agentId,
-        // humanAgentId: socket.humanAgentId,
         conversationOpenStatus: "open",
-      }).populate('humanAgentId', 'name avatar isClient').sort({ createdAt: -1 });
+      })
+        .populate("humanAgentId", "name avatar isClient")
+        .sort({ createdAt: -1 });
 
       const updatedVisitors = await Promise.all(
         conv.map(async (conv) => {
@@ -108,9 +190,10 @@ const initializeClientEvents = (io, socket) => {
       const conv = await Conversation.find({
         userId: userId,
         agentId: agentId,
-        // humanAgentId: socket.humanAgentId,
         conversationOpenStatus: "close",
-      }).populate('humanAgentId', 'name avatar isClient').sort({ createdAt: -1 });
+      })
+        .populate("humanAgentId", "name avatar isClient")
+        .sort({ createdAt: -1 });
 
       const updatedVisitors = await Promise.all(
         conv.map(async (conv) => {
@@ -136,36 +219,31 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("set-conversation-id", async ({ conversationId }, callback) => {
     try {
-       // Leave previous conversation room if exists
       if (conversationRoom) {
         socket.leave(conversationRoom);
       }
       conversationRoom = `conversation-${conversationId}`;
       await socket.join(conversationRoom);
-        // Send success callback
-      if (typeof callback === 'function') {
+      if (typeof callback === "function") {
         callback({ success: true });
       }
     } catch (error) {
       console.error("set-conversation-id error:", error.message);
-      if (typeof callback === 'function') {
+      if (typeof callback === "function") {
         callback({ success: false, error: error.message });
       }
     }
   });
 
-  // Check for pending agent connection request when joining a conversation
   socket.on("check-pending-agent-request", async ({ conversationId }, callback) => {
     try {
-      // Check if there's an active timeout for this conversation
       const hasPendingRequest = agentConnectionTimeouts.has(conversationId?.toString());
-      
+
       if (hasPendingRequest) {
-        // Get conversation and visitor details
         const conversation = await Conversation.findById(conversationId).lean();
         if (conversation && conversation.aiChat === true) {
           const visitor = await Visitor.findById(conversation.visitor).lean();
-          
+
           const notificationData = {
             conversationId,
             visitorId: conversation.visitor,
@@ -173,10 +251,8 @@ const initializeClientEvents = (io, socket) => {
             message: "Visitor requested to connect to an agent",
             timestamp: new Date(),
           };
-          
-          // Emit the notification to this socket
+
           socket.emit("agent-connection-notification", notificationData);
-          
           callback?.({ success: true, hasPendingRequest: true });
         } else {
           callback?.({ success: true, hasPendingRequest: false });
@@ -202,69 +278,32 @@ const initializeClientEvents = (io, socket) => {
     }
   });
 
-  // Handle agent typing events - only emit when aiChat = false
-  socket.on("agent-start-typing", async ({ conversationId, visitorId }, callback) => {
+  // Typing events — aiChat guard is enforced on the client side (isAIChat state).
+  // No DB fetch needed here; client passes aiChat status in the payload.
+  socket.on("agent-start-typing", async ({ conversationId, visitorId, aiChat }, callback) => {
     try {
-      console.log('⌨️ agent-start-typing received:', { conversationId, visitorId, userId });
-      
-      // Get conversation to check aiChat status
-      const conversation = await Conversation.findOne({ _id: conversationId });
-      
-      if (!conversation) {
-        console.log('⚠️ Conversation not found for typing event');
-        callback?.({ success: false, error: "Conversation not found" });
-        return;
-      }
-
-      // Only emit typing event if aiChat is false (agent chat mode)
-      if (!conversation.aiChat) {
-        console.log('✅ Emitting agent-typing event (aiChat = false)');
+      if (aiChat === false) {
         io.to([
           `conversation-${conversationId}`,
           `conversation-${visitorId}`,
-        ]).emit("agent-typing", {
-          conversationId,
-          visitorId
-        });
-        callback?.({ success: true });
-      } else {
-        console.log('⏭️ Ignoring agent-typing event (aiChat = true, AI mode)');
-        callback?.({ success: true, ignored: true, reason: "AI chat mode" });
+        ]).emit("agent-typing", { conversationId, visitorId });
       }
+      callback?.({ success: true });
     } catch (error) {
       console.error("agent-start-typing error:", error.message);
       callback?.({ success: false, error: error.message });
     }
   });
 
-  socket.on("agent-stop-typing", async ({ conversationId, visitorId }, callback) => {
+  socket.on("agent-stop-typing", async ({ conversationId, visitorId, aiChat }, callback) => {
     try {
-      console.log('⏹️ agent-stop-typing received:', { conversationId, visitorId, userId });
-      
-      // Get conversation to check aiChat status
-      const conversation = await Conversation.findOne({ _id: conversationId });
-      
-      if (!conversation) {
-        console.log('⚠️ Conversation not found for stop typing event');
-        callback?.({ success: false, error: "Conversation not found" });
-        return;
-      }
-
-      // Only emit stop typing event if aiChat is false (agent chat mode)
-      if (!conversation.aiChat) {
-        console.log('✅ Emitting agent-stop-typing event (aiChat = false)');
+      if (aiChat === false) {
         io.to([
           `conversation-${conversationId}`,
           `conversation-${visitorId}`,
-        ]).emit("agent-stop-typing", {
-          conversationId,
-          visitorId
-        });
-        callback?.({ success: true });
-      } else {
-        console.log('⏭️ Ignoring agent-stop-typing event (aiChat = true, AI mode)');
-        callback?.({ success: true, ignored: true, reason: "AI chat mode" });
+        ]).emit("agent-stop-typing", { conversationId, visitorId });
       }
+      callback?.({ success: true });
     } catch (error) {
       console.error("agent-stop-typing error:", error.message);
       callback?.({ success: false, error: error.message });
@@ -276,57 +315,40 @@ const initializeClientEvents = (io, socket) => {
       const conversation = await ConversationController.getOpenConversation(
         visitorId,
         userId,
-        agentId,
-        // socket.humanAgentId
+        agentId
       );
       const conversationId = conversation?._id || null;
 
-      // Get humanAgentId if socket type is agent, or find client's agent record
-      let humanAgentIdForMessage;
-      if (socket.type === "agent") {
-        humanAgentIdForMessage = socket.humanAgentId;
-      } else if (socket.type === "client") {
-        // Find the client's agent record (isClient: true)
-        const clientAgent = await HumanAgent.findOne({ userId: userId, isClient: true });
-        humanAgentIdForMessage = clientAgent ? clientAgent._id : undefined;
-      }
+      const { id: humanAgentIdForMessage } = await resolveHumanAgent(socket, userId);
 
+      const senderType = socket.type === "client" ? "client" : "humanAgent";
       const chatMessage = await ChatMessageController.createChatMessage(
         conversationId,
         visitorId,
-        "agent",
+        senderType,
         message,
         userId,
         agentId,
         undefined,
         humanAgentIdForMessage,
-        undefined,
         replyTo
       );
 
-      // Populate agent info and replyTo before emitting
       if (humanAgentIdForMessage) {
-        await chatMessage.populate('humanAgentId', 'name avatar isClient');
+        await chatMessage.populate("humanAgentId", "name avatar isClient");
       }
       if (replyTo) {
-        await chatMessage.populate('replyTo', 'sender message createdAt sender_type');
+        await chatMessage.populate("replyTo", "sender message createdAt sender_type");
       }
 
-      // Convert to plain object to ensure populated fields are included
       const chatMessageObj = chatMessage.toObject ? chatMessage.toObject() : chatMessage;
 
-      // Emit stop-typing event when message is sent (if in agent mode)
-      // Fetch conversation again to get latest aiChat status
-      const conversationDoc = await Conversation.findOne({ _id: conversationId });
-      if (conversationDoc && !conversationDoc.aiChat) {
-        console.log('📤 Agent sent message, emitting agent-stop-typing');
+      // Use the conversation already fetched above — no second DB call needed
+      if (conversation && !conversation.aiChat) {
         io.to([
           `conversation-${conversationId}`,
           `conversation-${visitorId}`,
-        ]).emit("agent-stop-typing", {
-          conversationId,
-          visitorId
-        });
+        ]).emit("agent-stop-typing", { conversationId, visitorId });
       }
 
       io.to([
@@ -341,53 +363,47 @@ const initializeClientEvents = (io, socket) => {
     }
   });
 
-  socket.on("client-send-add-note",async ({ message, visitorId, conversationId }, callback) => {
-      try {
-        // Get humanAgentId if socket type is agent, or find client's agent record
-        let humanAgentIdForMessage;
-        if (socket.type === "agent") {
-          humanAgentIdForMessage = socket.humanAgentId;
-        } else if (socket.type === "client") {
-          // Find the client's agent record (isClient: true)
-          const clientAgent = await HumanAgent.findOne({ userId: userId, isClient: true });
-          humanAgentIdForMessage = clientAgent ? clientAgent._id : undefined;
-        }
+  socket.on("client-send-add-note", async ({ message, visitorId, conversationId, replyTo }, callback) => {
+    try {
+      const { id: humanAgentIdForMessage } = await resolveHumanAgent(socket, userId);
 
-        const note = await ChatMessageController.addNoteToChat(
-          visitorId,
-          "agent",
-          message,
-          conversationId,
-          userId,
-          agentId,
-          humanAgentIdForMessage
-        );
+      const noteSenderType = socket.type === "client" ? "client" : "humanAgent";
+      const note = await ChatMessageController.addNoteToChat(
+        visitorId,
+        noteSenderType,
+        message,
+        conversationId,
+        userId,
+        agentId,
+        humanAgentIdForMessage,
+        replyTo
+      );
 
-        // Populate agent info before emitting
-        if (humanAgentIdForMessage) {
-          await note.populate('humanAgentId', 'name avatar isClient');
-        }
-
-        // Convert to plain object to ensure populated fields are included
-        const noteObj = note.toObject ? note.toObject() : note;
-
-        await io.to(`conversation-${conversationId}`).emit("note-append-message", {
-          note: noteObj,
-        });
-
-        callback?.({ success: true, note: noteObj });
-      } catch (error) {
-        console.error("client-send-add-note error:", error.message);
-        callback?.({ success: false, error: error.message });
+      if (humanAgentIdForMessage) {
+        await note.populate("humanAgentId", "name avatar isClient");
       }
+      if (replyTo) {
+        await note.populate({
+          path: "replyTo",
+          select: "sender message createdAt sender_type humanAgentId",
+          populate: { path: "humanAgentId", select: "name isClient" },
+        });
+      }
+
+      const noteObj = note.toObject ? note.toObject() : note;
+
+      io.to(`conversation-${conversationId}`).emit("note-append-message", { note: noteObj });
+
+      callback?.({ success: true, note: noteObj });
+    } catch (error) {
+      console.error("client-send-add-note error:", error.message);
+      callback?.({ success: false, error: error.message });
     }
-  );
+  });
 
   socket.on("get-all-note-messages", async ({ conversationId }, callback) => {
     try {
-      const notes = await ChatMessageController.getAllChatNotesMessages(
-        conversationId
-      );
+      const notes = await ChatMessageController.getAllChatNotesMessages(conversationId);
       callback?.({ success: true, notes: notes });
     } catch (error) {
       console.error("get-all-note-messages error:", error.message);
@@ -395,290 +411,154 @@ const initializeClientEvents = (io, socket) => {
     }
   });
 
-  socket.on(
-    "get-visitor-old-conversations",
-    async ({ visitorId }, callback) => {
-      try {
-        const conversations =
-          await ConversationController.getAllOldConversations(visitorId);
-        callback?.({ success: true, conversations: conversations });
-      } catch (error) {
-        console.error("get-visitor-old-conversations error:", error.message);
-        callback?.({ success: false, error: error.message });
-      }
+  socket.on("get-visitor-old-conversations", async ({ visitorId }, callback) => {
+    try {
+      const conversations = await ConversationController.getAllOldConversations(visitorId);
+      callback?.({ success: true, conversations: conversations });
+    } catch (error) {
+      console.error("get-visitor-old-conversations error:", error.message);
+      callback?.({ success: false, error: error.message });
     }
-  );
+  });
 
-  socket.on(
-    "add-conversation-tag",
-    async ({ name, conversationId }, callback) => {
-      try {
-        const updatedTags = await ConversationTagController.createTag({
-          name,
-          conversationId,
-          userId,
-          agentId,
-        });
-        callback({ success: true, tags: updatedTags });
-      } catch (error) {
-        callback({ success: false, error: error.message });
-      }
+  socket.on("add-conversation-tag", async ({ name, conversationId }, callback) => {
+    try {
+      const updatedTags = await ConversationTagController.createTag({
+        name,
+        conversationId,
+        userId,
+        agentId,
+      });
+      callback({ success: true, tags: updatedTags });
+    } catch (error) {
+      callback({ success: false, error: error.message });
     }
-  );
+  });
 
   socket.on("get-conversation-tags", async ({ conversationId }, callback) => {
     try {
-      const tags = await ConversationTagController.getAllTagsOfConversation({
-        conversationId,
-      });
+      const tags = await ConversationTagController.getAllTagsOfConversation({ conversationId });
       io.to(`conversation-${conversationId}`).emit("get-tags-response", { tags });
-       // Also send response via callback if provided
-      if (typeof callback === 'function') {
+      if (typeof callback === "function") {
         callback({ success: true, tags });
       }
     } catch (error) {
-       console.error("get-conversation-tags error:", error.message);
-      if (typeof callback === 'function') {
+      console.error("get-conversation-tags error:", error.message);
+      if (typeof callback === "function") {
         callback({ success: false, error: error.message });
       }
     }
   });
 
-
-  socket.on(
-    "remove-conversation-tag",
-    async ({ id, conversationId }, callback) => {
-      try {
-        const updatedTags = await ConversationTagController.deleteTagById({
-          id,
-        });
-        callback({ success: true, tags: updatedTags });
-      } catch (error) {
-        callback({ success: false, error: error.message });
-      }
+  socket.on("remove-conversation-tag", async ({ id, conversationId }, callback) => {
+    try {
+      const updatedTags = await ConversationTagController.deleteTagById({ id });
+      callback({ success: true, tags: updatedTags });
+    } catch (error) {
+      callback({ success: false, error: error.message });
     }
-  );
+  });
 
-  socket.on(
-    "close-conversation",
-    async ({ conversationId, status }, callback) => {
-      try {
-        let conversation = await Conversation.findOne({
-          _id: conversationId,
-          conversationOpenStatus: "open",
-        });
+  socket.on("close-conversation", async ({ conversationId, status }, callback) => {
+    try {
+      let conversation = await Conversation.findOne({
+        _id: conversationId,
+        conversationOpenStatus: "open",
+      });
 
-         if (!conversation) {
-        if (typeof callback === 'function') {
+      if (!conversation) {
+        if (typeof callback === "function") {
           callback({ success: false, error: "Conversation not found or already closed" });
         }
         return;
       }
-      
+
       let visitorId = conversation?.visitor;
 
-        await ConversationController.UpdateConversationStatusOpenClose(
-          conversationId,
-          status
-        );
+      await ConversationController.UpdateConversationStatusOpenClose(conversationId, status);
 
-           // Notify all relevant rooms about the conversation closure
-      io.to(`conversation-${conversationId}`).emit("conversation-close-triggered", { 
-        conversationStatus: "close" 
+      // Emit only to userAgentRoom — client socket is also in conversation-{id} room
+      // (joined via set-conversation-id) so emitting to both would deliver it twice.
+      io.to(userAgentRoom).emit("conversation-close-triggered", {
+        conversationStatus: "close",
       });
-      
-      io.to(clientRoom).emit("conversation-close-triggered", { 
-        conversationStatus: "close" 
-      });
-      
-      io.to(agentRoom).emit("conversation-close-triggered", { 
-        conversationStatus: "close" 
-      });
-      
+
       io.to(`conversation-${visitorId}`).emit("visitor-conversation-close", {
         conversationStatus: "close",
       });
 
-      if (typeof callback === 'function') {
+      if (typeof callback === "function") {
         callback({ success: true });
       }
-
-        // callback({ success: true });
-        // io.to(clientRoom).emit("conversation-close-triggered", {});
-        // io.to(agentRoom).emit("conversation-close-triggered", {});
-        // io.to(`conversation-${visitorId}`).emit("visitor-conversation-close", {
-        //   conversationStatus: "close",
-        // });
-      } catch (error) {
-        // callback({ success: false, error: error.message });
-         console.error("close-conversation error:", error.message);
-      if (typeof callback === 'function') {
+    } catch (error) {
+      console.error("close-conversation error:", error.message);
+      if (typeof callback === "function") {
         callback({ success: false, error: error.message });
       }
-      }
     }
-  );
+  });
 
-  socket.on(
-    "block-visitor",
-    async ({ visitorId, conversationId }, callback) => {
-      try {
-        await VisitorController.blockVisitor({ visitorId });
+  socket.on("block-visitor", async ({ visitorId, conversationId }, callback) => {
+    try {
+      await VisitorController.blockVisitor({ visitorId });
 
-        await ConversationController.UpdateConversationStatusOpenClose(
-          conversationId,
-          "close"
-        );
+      await ConversationController.UpdateConversationStatusOpenClose(conversationId, "close");
 
-           // Notify all relevant rooms about the visitor block
-      io.to(`conversation-${conversationId}`).emit("visitor-blocked", {
+      // Emit only to userAgentRoom to avoid double delivery (client is in both rooms)
+      io.to(userAgentRoom).emit("conversation-close-triggered", {
         conversationStatus: "close",
       });
-      
-      io.to(clientRoom).emit("conversation-close-triggered", {
-        conversationStatus: "close"
-      });
-      
-      io.to(agentRoom).emit("conversation-close-triggered", {
-        conversationStatus: "close"
-      });
-      
+
       io.to(`conversation-${visitorId}`).emit("visitor-blocked", {
         conversationStatus: "close",
       });
 
-      if (typeof callback === 'function') {
+      if (typeof callback === "function") {
         callback({ success: true });
       }
-
-        // callback({ success: true });
-        // io.to(clientRoom).emit("conversation-close-triggered", {});
-        // io.to(agentRoom).emit("conversation-close-triggered", {});
-        // io.to(`conversation-${visitorId}`).emit("visitor-blocked", {
-        //   conversationStatus: "close",
-        // });
-      } catch (error) {
-        // callback({ success: false, error: error.message });
-          console.error("block-visitor error:", error.message);
-      if (typeof callback === 'function') {
+    } catch (error) {
+      console.error("block-visitor error:", error.message);
+      if (typeof callback === "function") {
         callback({ success: false, error: error.message });
       }
-      }
     }
-  );
+  });
 
-  socket.on("agent-deleted",async ({}, callback) => {
+  socket.on("agent-deleted", async ({}, callback) => {
     try {
-      // await AgentController.deleteAgent(humanAgentId);
-      io.to(agentRoom).emit("agent-deleted-success");
-      // callback({ success: true });
+      io.to(userRoom).emit("agent-deleted-success");
     } catch (error) {
-      // callback({ success: false, error: error.message });
       console.error("agent-deleted error:", error.message);
     }
   });
 
   socket.on("close-ai-response", async ({ conversationId }, callback) => {
     try {
-      // Get conversation first to check current aiChat status
       const conversation = await Conversation.findOne({ _id: conversationId });
       if (!conversation) {
         callback?.({ success: false, error: "Conversation not found" });
         return;
       }
 
-      // Only proceed if aiChat is currently true (to avoid duplicate messages)
       if (!conversation.aiChat) {
         callback?.({ success: true, message: "AI chat already disabled" });
         return;
       }
 
       const visitorId = conversation?.visitor;
-      
-      // Get agent/client information who is toggling
-      let transferName = "Agent";
-      let humanAgentIdForMessage = undefined;
-      
-      if (socket.type === "agent") {
-        // If it's an agent, get the agent details
-        humanAgentIdForMessage = socket.humanAgentId;
-        const humanAgent = await HumanAgent.findById(humanAgentIdForMessage);
-        if (humanAgent) {
-          transferName = humanAgent.isClient ? "Client" : humanAgent.name;
-        }
-      } else if (socket.type === "client") {
-        // If it's a client, find the client's agent record
-        const clientAgent = await HumanAgent.findOne({ userId: userId, isClient: true });
-        if (clientAgent) {
-          transferName = "Client";
-          humanAgentIdForMessage = clientAgent._id;
-        }
-      }
 
-      // Disable AI chat and update humanAgentId and transferredAt
-      await Conversation.updateOne(
-        { _id: conversationId },
-        { 
-          $set: { 
-            aiChat: false,
-            humanAgentId: humanAgentIdForMessage || null,
-            transferredAt: new Date()
-          } 
-        }
-      );
-      
-      // Create a system message for the transfer
-      const transferMessage = `The chat is transferred to ${transferName}`;
-      const systemMessage = await ChatMessageController.createChatMessage(
+      const { id: humanAgentIdForMessage, name: transferName } = await resolveHumanAgent(socket, userId);
+
+      await transferChatToHuman(io, {
         conversationId,
-        visitorId || "system",
-        "system",
-        transferMessage,
+        visitorId,
+        humanAgentIdForMessage,
+        transferName,
         userId,
         agentId,
-        undefined,
-        humanAgentIdForMessage
-      );
-
-      // Populate agent info if available
-      if (humanAgentIdForMessage) {
-        await systemMessage.populate('humanAgentId', 'name avatar isClient');
-      }
-
-      // Convert to plain object
-      const systemMessageObj = systemMessage.toObject ? systemMessage.toObject() : systemMessage;
-
-      // Broadcast the transfer message to all participants
-      io.to([
-        `conversation-${conversationId}`,
-        `conversation-${visitorId}`,
-      ]).emit("conversation-append-message", { chatMessage: systemMessageObj });
-
-      // Broadcast transfer event
-      io.to([
-        `conversation-${conversationId}`,
-        `conversation-${visitorId}`,
-      ]).emit("chat-transferred", {
-        conversationId,
-        transferredTo: transferName,
-        humanAgentId: humanAgentIdForMessage
+        systemMessageText: `The chat is transferred to ${transferName}`,
       });
-      
-      // Emit to both client and visitor rooms
-      io.to(`conversation-${conversationId}`).emit('ai-response-update');
-      
-      // Emit aiChat status update to visitor
-      if (visitorId) {
-        console.log('🔄 Emitting ai-chat-status-update to visitor:', { conversationId, visitorId, aiChat: false });
-        io.to([
-          `conversation-${conversationId}`,
-          `conversation-${visitorId}`,
-        ]).emit('ai-chat-status-update', {
-          aiChat: false,
-          conversationId
-        });
-      }
-      
+
       callback?.({ success: true });
     } catch (error) {
       console.error("close-ai-response error:", error.message);
@@ -688,11 +568,7 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("search-conversations", async ({ query }, callback) => {
     try {
-      const visitors = await ConversationController.searchByTagOrName(
-        query,
-        userId,
-        agentId,
-      );
+      const visitors = await ConversationController.searchByTagOrName(query, userId, agentId);
       callback({ success: true, data: visitors });
     } catch (error) {
       console.error("Error during search:", error);
@@ -701,12 +577,12 @@ const initializeClientEvents = (io, socket) => {
   });
 
   ///////dashboard////////////
-  socket.on("fetch-dashboard-data", async ({ dateRange }, callback) => {
+  socket.on("fetch-dashboard-data", async ({ dateRange,agentId }, callback) => {
     try {
-      // Fetch data from the database based on date range
-      const data = await DashboardController.getDashboardData(
+      const data = await DashboardController.getDashboardDataForAgent(
         dateRange,
-        socket.userId
+        socket.userId,
+        agentId
       );
       const analytics = await DashboardController.getUsageAnalytics(socket.userId);
       const plan = await PlanService.getUserPlan(socket.userId);
@@ -716,15 +592,8 @@ const initializeClientEvents = (io, socket) => {
       callback({ success: false, error: "Failed to fetch data" });
     }
   });
-
-  // Emit real-time updates to all clients
-  // setInterval(async () => {
-  //   const realTimeData = await getRealTimeUpdates(); // Replace with actual DB logic
-  //   io.emit('update-dashboard-data', realTimeData);
-  // }, 5000);
   ////////////////dash end///////////
 
-  // Handle agent connection accept
   socket.on("accept-agent-connection", async ({ conversationId }, callback) => {
     try {
       const conversation = await Conversation.findOne({ _id: conversationId });
@@ -733,94 +602,38 @@ const initializeClientEvents = (io, socket) => {
         return;
       }
 
-      // Check if already accepted
       if (!conversation.aiChat) {
         callback?.({ success: true, message: "Already connected to agent" });
         return;
       }
 
       const visitorId = conversation?.visitor;
-      
-      // Get agent/client information who is accepting
-      let transferName = "Agent";
-      let humanAgentIdForMessage = undefined;
-      
-      if (socket.type === "agent") {
-        humanAgentIdForMessage = socket.humanAgentId;
-        const agent = await HumanAgent.findById(humanAgentIdForMessage);
-        if (humanAgent) {
-          transferName = humanAgent.isClient ? "Client" : humanAgent.name;
-        }
-      } else if (socket.type === "client") {
-        const clientAgent = await HumanAgent.findOne({ userId: userId, isClient: true });
-        if (clientAgent) {
-          transferName = "Client";
-          humanAgentIdForMessage = clientAgent._id;
-        }
-      }
 
-      // Disable AI chat and assign to agent
-      await Conversation.updateOne(
-        { _id: conversationId },
-        { 
-          $set: { 
-            aiChat: false,
-            humanAgentId: humanAgentIdForMessage || null,
-            transferredAt: new Date()
-          } 
-        }
-      );
-      
-      // Create a system message for the transfer
-      const transferMessage = `Connected to ${transferName}`;
-      const systemMessage = await ChatMessageController.createChatMessage(
+      const { id: humanAgentIdForMessage, name: transferName } = await resolveHumanAgent(socket, userId);
+
+      await transferChatToHuman(io, {
         conversationId,
-        visitorId || "system",
-        "system",
-        transferMessage,
+        visitorId,
+        humanAgentIdForMessage,
+        transferName,
         userId,
         agentId,
-        undefined,
-        humanAgentIdForMessage
-      );
-
-      // Populate agent info if available
-      if (humanAgentIdForMessage) {
-        await systemMessage.populate('humanAgentId', 'name avatar isClient');
-      }
-
-      const systemMessageObj = systemMessage.toObject ? systemMessage.toObject() : systemMessage;
-
-      // Broadcast the transfer message
-      io.to([
-        `conversation-${conversationId}`,
-        `conversation-${visitorId}`,
-      ]).emit("conversation-append-message", { chatMessage: systemMessageObj });
-
-      // Emit aiChat status update
-      io.to([
-        `conversation-${conversationId}`,
-        `conversation-${visitorId}`,
-      ]).emit('ai-chat-status-update', {
-        aiChat: false,
-        conversationId
+        systemMessageText: `Connected to ${transferName}`,
       });
 
-      // Notify visitor that agent accepted
-      io.to(`conversation-${visitorId}`).emit("agent-connection-accepted", {
+      // Notify visitor that agent accepted.
+      // Visitor sockets join visitor-${agentId}-${visitorId}, NOT conversation rooms.
+      io.to(`visitor-${agentId}-${visitorId}`).emit("agent-connection-accepted", {
         conversationId,
         agentName: transferName,
       });
 
-      // Cancel any pending notifications for other agents/clients
-      io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });
-      const agents = await Agent.find({ userId, status: 'approved' }).lean();
-      agents.forEach(agent => {
-        io.to(`user-${agent._id}`).emit("agent-connection-cancelled", { conversationId });
-      });
-
-      // Clear timeout if exists
-      io.to(`conversation-${conversationId}`).emit("agent-connection-accepted-clear-timeout", { conversationId });
+      // Clear the pending timeout.
+      const timeoutId = agentConnectionTimeouts.get(conversationId.toString());
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        agentConnectionTimeouts.delete(conversationId.toString());
+      }
 
       callback?.({ success: true });
     } catch (error) {
@@ -829,19 +642,11 @@ const initializeClientEvents = (io, socket) => {
     }
   });
 
-  // Handle agent connection decline
   socket.on("decline-agent-connection", async ({ conversationId }, callback) => {
     try {
-      // Only cancel the notification for the specific agent/client that declined
-      // Don't broadcast to all agents - keep request active for others
-      if (socket.type === "agent") {
-        // Agent declined - only cancel for this specific agent
-        io.to(`user-${agentId}-${socket.humanAgentId}`).emit("agent-connection-cancelled", { conversationId });
-      } else {
-        // Client declined - only cancel for this client
-        io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });
-      }
-
+      // Emit only to THIS socket so only the declining agent dismisses the request.
+      // Other agents should continue seeing the request until it times out or is accepted.
+      socket.emit("agent-connection-cancelled", { conversationId });
       callback?.({ success: true });
     } catch (error) {
       console.error("decline-agent-connection error:", error.message);
@@ -850,8 +655,8 @@ const initializeClientEvents = (io, socket) => {
   });
 
   socket.on("disconnect", () => {
-      if (clientRoom) socket.leave(clientRoom);
-    if (agentRoom) socket.leave(agentRoom);
+    if (userAgentRoom) socket.leave(userAgentRoom);
+    if (userRoom) socket.leave(userRoom);
     if (conversationRoom) socket.leave(conversationRoom);
     console.log("User disconnected from client socket");
   });

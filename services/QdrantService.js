@@ -411,6 +411,58 @@ class QdrantVectorStoreManager {
   }
 
   /**
+   * Delete vectors for training entries. Each entry should have userId, agentId, type, and identifier (url for webpages, title for files/snippets/faqs).
+   * @param {string} collectionName - Qdrant collection name
+   * @param {Array<{userId: string, agentId: string, type: number, url?: string, title?: string}>} entries - Training entries to delete vectors for
+   * @returns {Promise<{success: boolean, deletedCount: number, errors: string[]}>}
+   */
+  static async deleteVectorsByTrainingEntries(collectionName, entries) {
+    if (!entries || entries.length === 0) {
+      return { success: true, deletedCount: 0, errors: [] };
+    }
+
+    const manager = new QdrantVectorStoreManager(collectionName);
+    const errors = [];
+    let deletedCount = 0;
+
+    for (const entry of entries) {
+      try {
+        const { userId, agentId, type } = entry;
+        const filterFields = {
+          user_id: userId?.toString(),
+          agent_id: agentId?.toString(),
+        };
+
+        // Add identifier based on type: 0=WebPage (url), 1=File, 2=Snippet, 3=FAQ (title)
+        if (type === 0 && entry.url) {
+          filterFields.url = entry.url;
+        } else if ((type === 1 || type === 2 || type === 3) && entry.title) {
+          filterFields.title = entry.title;
+        } else {
+          errors.push(`Missing identifier for type ${type}, entry: ${JSON.stringify(entry)}`);
+          continue;
+        }
+
+        const result = await manager.deleteByFields(filterFields);
+        if (result.success) {
+          deletedCount++;
+        } else {
+          errors.push(result.error || "Unknown delete error");
+        }
+      } catch (err) {
+        console.error("Error deleting vectors for entry:", entry, err);
+        errors.push(err.message || err.toString());
+      }
+    }
+
+    return {
+      success: errors.length === 0,
+      deletedCount,
+      errors,
+    };
+  }
+
+  /**
    * Delete points from the collection matching the given filter fields.
    * @param {Object} filterFields - Key-value pairs to match (e.g., { url, user_id, type }).
    * @returns {Promise<{success: boolean, deleted?: number, error?: string}>}

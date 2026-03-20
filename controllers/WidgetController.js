@@ -103,6 +103,7 @@ WidgetController.getThemeSettings = async (req, res) => {
       res.status(200).json({ 
         status_code: 200, 
         data: {
+          widgetId: widget._id,
           logo: widget.logo,
           titleBar: widget.titleBar,
           welcomeMessage: widget.welcomeMessage,

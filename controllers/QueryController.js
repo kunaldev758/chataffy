@@ -6,8 +6,9 @@ const ChatMessageController = require("../controllers/ChatMessageController");
 const ChatMessage = require("../models/ChatMessage");
 const Client = require("../models/Client");
 const Widget = require("../models/Widget");
+const Agent = require("../models/Agent");
 const WebsiteData = require("../models/WebsiteData");
-
+const HumanAgent = require("../models/HumanAgent");
 const { logOpenAIUsage } = require("../services/UsageTrackingService");
 
 // --- Configuration ---
@@ -74,20 +75,22 @@ class QuestionAnsweringSystem {
     }
 
     // Format messages in a clear conversational flow
+    // Canonical sender types: visitor, client, ai, system, humanAgent
     const formattedMessages = filteredMessages.map((msg, index) => {
       const senderType = msg.sender_type || "unknown";
       const message = msg.message || "";
-      
-      // Normalize sender types for clarity
+
       let role = "User";
-      if (senderType === "bot" || senderType === "ai" || senderType === "assistant") {
+      if (senderType === "ai" || senderType === "bot" || senderType === "assistant") {
         role = "Assistant";
       } else if (senderType === "visitor" || senderType === "user") {
         role = "User";
-      } else if (senderType === "agent") {
+      } else if (senderType === "humanAgent" || senderType === "client" || senderType === "agent") {
         role = "Agent";
+      } else if (senderType === "system") {
+        role = "System";
       }
-      
+
       return `${role}: ${message}`;
     });
 
@@ -794,7 +797,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       // 3. Get Client, Widget, and WebsiteData
       const clientData = await Client.findOne({ userId }).lean();
-      const agentData = await Agent.findOne({ agentId }).lean();
+      const agentData = await Agent.findOne({ _id: agentId }).lean();
       const widgetData = await Widget.findOne({ agentId }).lean();
       const websiteData = await WebsiteData.findOne({ agentId }).lean();
 
@@ -828,7 +831,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         const structuralPoints = await this.structuralFetchByKeywords(
           collectionName,
           keywords,
-          agentIdString,
+          userIdString,
           Math.max(500, requestedCount * 5)
         );
 
@@ -870,17 +873,18 @@ Keep responses short, direct, friendly, and professional. Only use information e
       }
 
       // 6. Query Qdrant (semantic)
+      // Filter by user_id (owner) - Qdrant payload stores user_id, not agent_id, for filtering
       const queryResponse = await this.queryQdrant(
         collectionName,
         questionEmbedding,
         requestedTopK,
-        agentIdString
+        userIdString
       );
 
       // Log if no results found at all
       if (queryResponse.length === 0) {
         console.warn(
-          `[QueryController] WARNING: No results found in collection "${collectionName}" for user "${agentIdString}". This could mean:\n` +
+          `[QueryController] WARNING: No results found in collection "${collectionName}" for user "${userIdString}". This could mean:\n` +
             `  1. Collection is empty or has no data for this user\n` +
             `  2. Data hasn't been indexed yet\n` +
             `  3. Collection name is incorrect\n` +
@@ -1081,19 +1085,30 @@ Keep responses short, direct, friendly, and professional. Only use information e
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       }
 
-      // 10. Prepare Sources
-      // const sources = relevantMatches.map((match) => ({
-      //   id: match.id,
-      //   score: match.score,
-      //   title: match.metadata?.title || match.payload?.title || "Source",
-      //   url: match.metadata?.url || match.payload?.url,
-      //   type: match.metadata?.type || match.payload?.type || "unknown",
-      //   domain: match.metadata?.domain || match.payload?.domain,
-      // }));
+      // 10. Prepare Sources from Qdrant matched payloads
+      const seenSourceKeys = new Set();
+      const sources = relevantMatches
+        .map((match) => {
+          const payload = match.payload || {};
+          const sourceType = payload.type !== undefined ? payload.type : null;
+          const title = payload.title || payload.url || null;
+          const url = payload.url || null;
+          return { type: sourceType, title, url };
+        })
+        .filter(({ type, title, url }) => {
+          // Keep only entries with some identifier
+          if (type === null && !title && !url) return false;
+          // Deduplicate by url (for webpages) or title (for others)
+          const key = url || title;
+          if (!key || seenSourceKeys.has(key)) return false;
+          seenSourceKeys.add(key);
+          return true;
+        });
 
       return {
         success: true,
         answer: finalAnswer,
+        sources: sources.length > 0 ? sources : undefined,
         conversationId,
         isAgentRequest: isAgentRequest || false,
       };

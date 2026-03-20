@@ -1,6 +1,7 @@
 require("dotenv").config();
 const Agent = require("../models/Agent");
 const Client = require("../models/Client");
+const HumanAgent = require("../models/HumanAgent");
 const { sendAgentApprovalEmail } = require("../services/emailService");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
@@ -75,7 +76,7 @@ async function generateRandomPassword(length = 10) {
 // Create a new agent
 exports.createHumanAgent = async (req, res) => {
   try {
-    const { name, email, userId, agentId } = req.body;
+    const { name, email, userId, agentId, assignedAgents } = req.body;
 
     const checkLimit = await checkPlanLimits(userId, 'add_agent');
 
@@ -85,6 +86,14 @@ exports.createHumanAgent = async (req, res) => {
         message: "Agent limit reached. Please upgrade your plan to add more agents.",
         upgradeSuggested: true
       });
+    }
+
+    // assignedAgents (AI agent/website IDs) - required; human agent can only take chats for these agents
+    const agentIds = Array.isArray(assignedAgents) && assignedAgents.length > 0
+      ? assignedAgents
+      : (agentId ? [agentId] : []);
+    if (agentIds.length === 0) {
+      return res.status(400).json({ message: "At least one agent (website) must be assigned" });
     }
 
     // Check if agent already exists
@@ -106,20 +115,20 @@ exports.createHumanAgent = async (req, res) => {
 
     // Create new agent
     const humanAgent = new HumanAgent({
-      userId:userId,
-      name:name,
-      email:email,
-      password:hashedPassword,
-      status:'approved',
-      isClient:false,
-      avatar:'/uploads/default-avatar.png',
-      assignedAgents:[agentId]
+      userId: userId,
+      name: name,
+      email: email,
+      password: hashedPassword,
+      status: 'approved',
+      isClient: false,
+      avatar: '/uploads/default-avatar.png',
+      assignedAgents: agentIds
     });
 
     await humanAgent.save();
 
     const acceptUrl = `${process.env.CLIENT_URL}agent-accept-invite/?token=${inviteToken}`;
-    await sendAgentApprovalEmail({ ...agent.toObject()}, acceptUrl, password );
+    // await sendAgentApprovalEmail({ ...humanAgent.toObject() }, acceptUrl, password);
 
     res.status(201).json({
       message: "Human agent created successfully",
@@ -146,7 +155,7 @@ exports.createHumanAgent = async (req, res) => {
 exports.getAllHumanAgents = async (req, res) => {
   try {
     const userId = req.body.userId;
-    const humanAgents = await HumanAgent.find({userId:userId, isClient: { $ne: true }}, "-password");
+    const humanAgents = await HumanAgent.find({userId:userId}, "-password");
     res.json(humanAgents);
   } catch (error) {
     console.error("Error fetching human agents:", error);
@@ -359,7 +368,23 @@ exports.uploadHumanAgentAvatar = async (req, res) => {
     }
     
     const humanAgent = await HumanAgent.findById(humanAgentId);
-    
+    const requestUserId = req.body?.userId;
+    if (
+      requestUserId &&
+      humanAgent &&
+      String(humanAgent.userId) !== String(requestUserId)
+    ) {
+      if (req.file?.path) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (_e) {}
+      }
+      return res.status(403).json({
+        status_code: 403,
+        message: "Not allowed to update this profile photo",
+      });
+    }
+
     if (!humanAgent) {
       // Delete uploaded file if agent not found
       if (req.file.path) {

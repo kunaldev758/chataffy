@@ -6,14 +6,16 @@ const NotificationController = {};
  * Create a notification for agent connection request
  */
 NotificationController.createAgentConnectionNotification = async (
-  agentId,
+  humanAgentId,
   conversationId,
   visitorId,
   userId,
-  message = "Visitor requested to connect to an agent"
+  message = "Visitor requested to connect to an agent",
+  agentId = null
 ) => {
   try {
     const notification = new Notification({
+      humanAgentId,
       agentId,
       conversationId,
       visitorId,
@@ -35,7 +37,8 @@ NotificationController.createAgentConnectionNotification = async (
 NotificationController.getByAgentId = async (req, res) => {
   try {
     const { agentId } = req.params;
-    const notifications = await Notification.find({ agentId })
+    // agentId param carries the humanAgentId value for per-agent notification lookup
+    const notifications = await Notification.find({ humanAgentId: agentId })
       .populate("conversationId", "visitor aiChat conversationOpenStatus")
       .populate("visitorId", "visitorDetails")
       .sort({ createdAt: -1 })
@@ -73,7 +76,7 @@ NotificationController.markAllAsSeenByAgentId = async (req, res) => {
   try {
     const { agentId } = req.params;
     const result = await Notification.updateMany(
-      { agentId, isSeen: false },
+      { humanAgentId: agentId, isSeen: false },
       { isSeen: true }
     );
     res.json({ modifiedCount: result.modifiedCount });

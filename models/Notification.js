@@ -2,9 +2,13 @@ const mongoose = require("mongoose");
 
 const notificationSchema = new mongoose.Schema(
   {
-    agentId: {
+    humanAgentId: {
       type: mongoose.Schema.Types.ObjectId,
       required: true,
+      ref: "HumanAgent",
+    },
+    agentId: {
+      type: mongoose.Schema.Types.ObjectId,
       ref: "Agent",
     },
     conversationId: {

@@ -16,9 +16,11 @@ const initializeSocketController = (server) => {
   });
 
   // Listen for events from your controllers
-  appEvents.on("userEvent", (userId, eventName, data) => {
+  appEvents.on("userEvent", (userId, agentId, eventName, data) => {
     const userRoom = `user-${userId}`;
     io.to(userRoom).emit(eventName, data);
+    const agentRoom = `user-${agentId}`;
+    io.to(agentRoom).emit(eventName, data);
   });
 
   io.use(myMiddleware);
@@ -26,7 +28,7 @@ const initializeSocketController = (server) => {
   io.on("connection", (socket) => {
     console.log("A user connected:", socket.id, "Type:", socket.type);
 
-    if (socket.type === "client" ||socket.type === "agent") {
+    if (socket.type === "client" || socket.type === "human-agent") {
       initializeClientEvents(io, socket);
     } else if (socket.type === "visitor") {
       initializeVisitorEvents(io, socket);

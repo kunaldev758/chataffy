@@ -67,6 +67,7 @@ const PlanAdminController = require('../controllers/PlanAdminController');
 const PlanController = require('../controllers/PlanController');
 const ConversationController = require('../controllers/ConversationController');
 const NotificationController = require('../controllers/NotificationController');
+const { reviseAnswer } = require('../controllers/ReviseAnswerController');
 const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
 
@@ -96,7 +97,8 @@ router.post('/create', superAdminController.createSuperAdmin); // For initial se
 // Protected routes
 router.get('/superadmin/dashboard', verifySuperAdminToken, superAdminController.getDashboardData);
 router.get('/superadmin/clients', verifySuperAdminToken, superAdminController.getAllClients);
-router.get('/superadmin/agent/:clientId', verifySuperAdminToken, superAdminController.getAgent);
+router.get('/superadmin/clients/:clientId/agents', verifySuperAdminToken, superAdminController.getClientAgents);
+router.get('/superadmin/agent/:clientId', verifySuperAdminToken, superAdminController.getClientAgents);
 router.get('/superadmin/cancel/sunscription/:clientId', verifySuperAdminToken, superAdminController.cancelClientSubscription);
 router.get('/superadmin/delete/:userId',verifySuperAdminToken, UserController.deleteUser);
 
@@ -119,6 +121,9 @@ router.post('/logout',middleware, UserController.logoutUser);
 
 //Get Client
 router.post('/client',middleware,UserController.getClient);
+router.post('/client/profile', middleware, UserController.getClientProfile);
+router.post('/client/profile/general', middleware, UserController.updateClientProfileGeneral);
+router.post('/client/profile/password', middleware, UserController.updateClientPassword);
 
 //Update Client Status (updates client's agent record)
 router.post('/clients/status',middleware,UserController.updateClientStatus);
@@ -135,6 +140,10 @@ router.post('/openaiCreateFaq',middleware, scrapingController.createFaq);
 // // Get training list with filtering
 router.get('/getOpenaiTrainingListDetail/:userId',middleware, scrapingController.getScrapingHistory);
 router.get('/getDataField/:id',middleware,scrapingController.getFiledData)
+// Delete training data (runs in background)
+router.post('/deleteTrainingData', middleware, scrapingController.deleteTrainingData);
+// Retrain training data - webpages only (runs in background)
+router.post('/retrainTrainingData', middleware, scrapingController.retrainTrainingData);
 
 
 
@@ -167,11 +176,15 @@ router.post('/agents/:id/avatar',middleware, upload.single('avatar'), agentContr
 // AI Agent (website) management routes
 router.get('/ai-agents', middleware, AIAgentController.getAgents);
 router.post('/ai-agents', middleware, AIAgentController.createAgent);
+router.post('/ai-agents/delete/:agentId', middleware, AIAgentController.deleteAgent);
 router.post('/complete-onboarding', middleware, AIAgentController.completeOnboarding);
 router.get('/agent-settings/:agentId', middleware, AIAgentController.getAgentSettings);
 router.post('/updateAgentSettings', middleware, AIAgentController.updateAgentSettings);
 
 router.post('/sendEmailForOfflineChat', ConversationController.sendEmailForOfflineChatController);
+
+// Revise Answer - store human-corrected Q&A pair as Qdrant vector
+router.post('/revise-answer', middleware, reviseAnswer);
 
 // Notification routes
 router.get('/notifications/agent/:agentId', middleware, NotificationController.getByAgentId);

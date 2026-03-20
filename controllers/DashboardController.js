@@ -4,6 +4,7 @@ const Conversation = require("../models/Conversation.js");
 const ChatMessage = require("../models/ChatMessage.js");
 const Visitor = require("../models/Visitor.js")
 const Agent = require("../models/Agent.js");
+const HumanAgent = require("../models/HumanAgent.js");
 
 const DashboardController = {};
 DashboardController.getDashboardDataForAgent = async (dateRange, userId, agentId) => {
@@ -227,8 +228,8 @@ DashboardController.getUsageAnalytics = async (userId) => {
   try {
     const data = await Client.findOne({userId});
     return data;
-  } catch (error) {
     return error;
+  } catch (error) {
   }
 };
 

@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Agent = require('../models/Agent');
+const HumanAgent = require('../models/HumanAgent');
 module.exports = async (req, res, next) => {
   // Get the token from the request headers
   const token = req.header('Authorization');
@@ -23,17 +24,18 @@ module.exports = async (req, res, next) => {
     if(user?.isDeleted){
       return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
     }
-    const agentId = decoded.id;
-    const agent = await Agent.findById(agentId);
+    // const agentId = decoded.id;
+    // const agent = await Agent.findById(agentId);
+    const humanAgent = await HumanAgent.findById(decoded.id);
     console.log("testing here", user);
     if(user && user.auth_token == token)
     {
       req.body.userId = userId;
       console.log(userId,req.body);
     }
-    else if(agent)
+    else if(humanAgent)
     {
-      req.body.userId = agent.userId;
+      req.body.userId = humanAgent.userId;
       console.log(userId,req.body);
     }
     else {

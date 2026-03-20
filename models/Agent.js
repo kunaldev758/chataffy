@@ -64,13 +64,6 @@ const agentSchema = new mongoose.Schema({
 
   faqsAdded: { type: Number, default: 0 },
 
-  currentDataSize: { type: Number, default: 0 },
-
-  upgradePlanStatus: {
-    storageLimitExceeded: { type: Boolean, default: false },
-    agentLimitExceeded: { type: Boolean, default: false },
-    chatLimitExceeded: { type: Boolean, default: false },
-  },
 
   qdrantIndexName: { type: String, required: true, unique: true },
   qdrantIndexNamePaid: { type: String, required: true, unique: true },

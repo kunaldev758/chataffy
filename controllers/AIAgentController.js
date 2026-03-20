@@ -16,7 +16,7 @@ AIAgentController.getAgents = async (req, res) => {
       return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
     }
 
-    const agents = await Agent.find({ userId, isDeleted: false }).select('_id website_name isActive lastTrained dataTrainingStatus pagesAdded filesAdded faqsAdded currentDataSize');
+    const agents = await Agent.find({ userId, isDeleted: false }).select('_id website_name agentName isActive lastTrained dataTrainingStatus pagesAdded filesAdded faqsAdded currentDataSize');
     return res.status(200).json({ status_code: 200, status: true, agents });
   } catch (error) {
     commonHelper.logErrorToFile(error);
@@ -28,7 +28,7 @@ AIAgentController.getAgents = async (req, res) => {
 AIAgentController.createAgent = async (req, res) => {
   try {
     const userId = req.body.userId;
-    const { website_name } = req.body;
+    const { agentName } = req.body;
 
     if (!userId) {
       return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
@@ -38,7 +38,7 @@ AIAgentController.createAgent = async (req, res) => {
     const agent = new Agent({
       _id: agentId,
       userId,
-      website_name: website_name || '',
+      agentName: agentName || '',
       qdrantIndexName: `${userId}-${agentId}`,
       qdrantIndexNamePaid: `${crypto.randomBytes(16).toString('hex')}-${agentId}`,
     });
@@ -126,6 +126,24 @@ AIAgentController.updateAgentSettings = async (req, res) => {
   } catch (error) {
     commonHelper.logErrorToFile(error);
     return res.status(500).json({ status_code: 500, status: false, message: 'Failed to update agent settings' });
+  }
+};
+
+// POST /ai-agents/delete/:agentId — soft-delete an AI agent
+AIAgentController.deleteAgent = async (req, res) => {
+  try {
+    const agentId = req.params.agentId;
+    if (!agentId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'Agent ID is required' });
+    }
+    const agent = await Agent.findByIdAndUpdate(agentId, { isDeleted: true }, { new: true });
+    if (!agent) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'Agent not found' });
+    }
+    return res.status(200).json({ status_code: 200, status: true, message: 'Agent deleted successfully' });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to delete agent' });
   }
 };
 
