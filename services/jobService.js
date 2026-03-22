@@ -337,7 +337,7 @@ new Worker(
       const scrapingStartTime = startTime ? new Date(startTime) : new Date();
       const totalUrlsCount = totalUrls || urls.length;
       let lastProgressEmitTime = Date.now();
-      const PROGRESS_EMIT_INTERVAL = 5000; // Emit progress every 5 seconds
+      const PROGRESS_EMIT_INTERVAL = 2000; // Emit progress every 2 seconds
 
       // Helper function to calculate and emit progress
       const emitProgress = async (currentIndex, totalCount, isProcessing = true) => {
@@ -362,8 +362,8 @@ new Worker(
         };
 
         // Emit progress update
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
           scrapingProgress: {
             percentage,
             processed: currentIndex,
@@ -431,7 +431,10 @@ new Worker(
             
             if (shouldStore) {
               try {
-                let websiteData = await WebsiteData.getOrCreate({ userId: mongoose.Types.ObjectId(userId), agentId: agentId ? mongoose.Types.ObjectId(agentId) : null });
+                let websiteData = await WebsiteData.getOrCreate({
+                  userId,
+                  ...(agentId ? { agentId } : {}),
+                });
                 // Remove internal flag before storing
                 const { _isHomepage, ...cleanMetadata } = websiteMetadata;
                 await websiteData.updateData({
@@ -468,7 +471,8 @@ new Worker(
               return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
             };
             
-            appEvents.emit("userEvent", userId, "training-event", {
+            appEvents.emit("userEvent", agentId, "training-event", {
+              agent: await Agent.findOne({ _id: agentId }),
               client: await Client.findOne({ userId }),
               message:
                 "Storage limit exceede scrapping Stopped Upgrage Plan to continue",
@@ -543,7 +547,6 @@ new Worker(
       // Emit update indicating training phase is starting
       if (scrapedDocs.length > 0) {
         appEvents.emit("userEvent", agentId, "training-event", {
-          client: await Client.findOne({ userId }),
           agent: await Agent.findOne({ _id: agentId }),
           scrapingProgress: {
             percentage: 100,
@@ -572,7 +575,6 @@ new Worker(
         // Mark all documents as failed if training failed
         await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
         appEvents.emit("userEvent", agentId, "training-event", {
-          client: await Client.findOne({ userId }),
           agent: await Agent.findOne({ _id: agentId }),
           message: error?.message,
         });
@@ -630,7 +632,7 @@ new Worker(
         }
       }
 
-      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0, scrapingStartTime: null } });
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0, scrapingStartTime: null,lastTrained: new Date() } });
       
       // Emit final progress (100%)
       const finalElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
@@ -642,7 +644,6 @@ new Worker(
       };
       
       appEvents.emit("userEvent", agentId, "training-event", {
-        client: await Client.findOne({ userId }),
         agent: await Agent.findOne({ _id: agentId }),
         scrapingProgress: {
           percentage: 100,
@@ -671,7 +672,6 @@ new Worker(
       const processedCount = await Url.countDocuments({ userId, agentId:agentId, trainStatus: { $in: [1, 2] } });
       
       appEvents.emit("userEvent", agentId, "training-event", {
-        client: await Client.findOne({ userId }),
         agent: await Agent.findOne({ _id: agentId }),
         message: error?.message,
         scrapingProgress: {
@@ -774,7 +774,7 @@ new Worker(
         await Agent.updateOne({ _id: agentId }, { $inc: updateFields });
       }
 
-      await appEvents.emit("userEvent", userId, "training-event", {
+      appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
       });
 
@@ -815,7 +815,7 @@ new Worker(
 
     try {
       await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 1 } });
-      appEvents.emit("userEvent", userId, "training-event", {
+      appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
       });
 
@@ -940,7 +940,7 @@ new Worker(
       }
 
       await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
-      appEvents.emit("userEvent", userId, "training-event", {
+      appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
       });
 
@@ -948,7 +948,7 @@ new Worker(
     } catch (error) {
       console.error("[retrainTrainingData] Job failed:", error);
       await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
-      appEvents.emit("userEvent", userId, "training-event", {
+      appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
         message: error?.message,
       });

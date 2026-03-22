@@ -23,7 +23,7 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // Initialize Qdrant client
 const qdrantClient = new QdrantClient({
-  url: "https://8659fcda-ff81-4896-8786-55418a544b55.eu-central-1-0.aws.cloud.qdrant.io",
+  url: process.env.QDRANT_URL || "https://8659fcda-ff81-4896-8786-55418a544b55.eu-central-1-0.aws.cloud.qdrant.io",
   apiKey:
     process.env.QDRANT_API_KEY ||
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.HRXxjdjkAjB3phjpoI9inwpfxo8Bv8DjQ11EMdiUrGk",

@@ -333,6 +333,47 @@ ConversationController.getConversationStats = async (timeframe = 'today') => {
   }
 };
 
+ConversationController.getFilteredConversations = async (req, res) => {
+  try {
+    const { status, rating, handledBy } = req.body;
+    const userId = req.userId;
+    const agentId = req.body.agentId || req.agentId;
+
+    const query = { userId };
+    if (agentId) query.agentId = agentId;
+
+    if (status && status !== "all") {
+      query.conversationOpenStatus = status;
+    }
+    if (rating === "good") {
+      query.feedback = true;
+    } else if (rating === "bad") {
+      query.feedback = false;
+    }
+    if (handledBy === "ai") {
+      query.aiChat = true;
+    }
+
+    const conv = await Conversation.find(query)
+      .populate("humanAgentId", "name avatar isClient")
+      .sort({ createdAt: -1 });
+
+    const updatedVisitors = await Promise.all(
+      conv.map(async (conv) => {
+        const conversation = conv.toObject();
+        const visitor = await Visitor.findOne({ _id: conv.visitor });
+        conversation["visitor"] = visitor;
+        return conversation;
+      })
+    );
+
+    res.json({ success: true, conversations: updatedVisitors });
+  } catch (error) {
+    console.error("Error fetching filtered conversations:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 ConversationController.sendEmailForOfflineChatController = async (req, res) => {
   try {
     const visitorDetails = req.body.visitorDetails;

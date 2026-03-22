@@ -29,6 +29,7 @@ const conversationSchema = new mongoose.Schema(
       required: true,
     },
     newMessage: { type: Number, default: 0 },
+    lastMessage: { type: String, default: "" },
     createdAt: {
       type: Date,
       default: Date.now,

@@ -64,6 +64,16 @@ const agentSchema = new mongoose.Schema({
 
   faqsAdded: { type: Number, default: 0 },
 
+  // Onboarding step persistence — tracks which step the user reached so
+  // a page refresh restores the correct screen instead of resetting to 'source'
+  onboardingStep: {
+    type: String,
+    enum: ['source', 'train', 'widget'],
+    default: 'source',
+  },
+  onboardingWebsiteUrl: { type: String, default: '' },
+  onboardingExtractedUrls: { type: [String], default: [] },
+
 
   qdrantIndexName: { type: String, required: true, unique: true },
   qdrantIndexNamePaid: { type: String, required: true, unique: true },
@@ -73,10 +83,6 @@ const agentSchema = new mongoose.Schema({
     default: false,
   },
 
-  isDeleted: {
-    type: Boolean,
-    default: false,
-  },
 });
 
 // Update the updatedAt timestamp before saving

@@ -84,25 +84,21 @@ const widgetSchema = new Schema(
         value: { type: String, required: true },
       }
     ],
-    // Widget positioning settings
-    position: {
-      align: {
-        type: String,
-        enum: ['left', 'right'],
-        default: 'right'
-      },
-      sideSpacing: {
-        type: Number,
-        default: 20,
-        min: 0,
-        max: 200
-      },
-      bottomSpacing: {
-        type: Number,
-        default: 20,
-        min: 0,
-        max: 200
-      }
+    // Launcher: bubble (floating) vs bar (bottom strip)
+    widgetType: {
+      type: String,
+      enum: ['bubble', 'bar'],
+      default: 'bubble',
+    },
+    displayBarMessage: {
+      type: String,
+      default: "We're Online! Chat Now!",
+      maxlength: 200,
+    },
+    align: {
+      type: String,
+      enum: ['left', 'right'],
+      default: 'right',
     },
     // Advanced settings
     settings: {
@@ -230,14 +226,8 @@ widgetSchema.pre('save', function(next) {
     ];
   }
 
-  // Ensure position defaults exist
-  if (!this.position) {
-    this.position = {
-      align: 'right',
-      sideSpacing: 20,
-      bottomSpacing: 20
-    };
-  }
+  if (!this.align) this.align = 'right';
+  if (!this.widgetType) this.widgetType = 'bubble';
 
   next();
 });
@@ -328,7 +318,7 @@ widgetSchema.methods.validatePreChatData = function(formData) {
 // Static methods
 widgetSchema.statics.getPublicSettings = function(widgetId) {
   return this.findById(widgetId).select(
-    'titleBar welcomeMessage showLogo logo fields colorFields position showWhiteLabel isPreChatFormEnabled settings.allowFileUpload settings.maxFileSize settings.allowedFileTypes'
+    'titleBar welcomeMessage showLogo logo fields colorFields align widgetType displayBarMessage showWhiteLabel isPreChatFormEnabled settings.allowFileUpload settings.maxFileSize settings.allowedFileTypes'
   );
 };
 

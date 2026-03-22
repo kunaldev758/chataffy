@@ -4,6 +4,9 @@ const mongoose = require('mongoose');
 const Agent = require('../models/Agent');
 const Widget = require('../models/Widget');
 const User = require('../models/User');
+const TrainingListFreeUsers = require('../models/TrainingListFreeUsers');
+const Url = require('../models/Url');
+const WebsiteData = require('../models/WebsiteData');
 const commonHelper = require('../helpers/commonHelper');
 
 const AIAgentController = {};
@@ -17,7 +20,19 @@ AIAgentController.getAgents = async (req, res) => {
     }
 
     const agents = await Agent.find({ userId, isDeleted: false }).select('_id website_name agentName isActive lastTrained dataTrainingStatus pagesAdded filesAdded faqsAdded currentDataSize');
-    return res.status(200).json({ status_code: 200, status: true, agents });
+
+    // Fetch widget isActive for each agent
+    const agentIds = agents.map(a => a._id);
+    const widgets = await Widget.find({ agentId: { $in: agentIds } }).select('agentId isActive');
+    const widgetMap = {};
+    widgets.forEach(w => { widgetMap[w.agentId.toString()] = w.isActive; });
+
+    const agentsWithWidget = agents.map(a => ({
+      ...a.toObject(),
+      widgetIsActive: widgetMap[a._id.toString()] ?? 1,
+    }));
+
+    return res.status(200).json({ status_code: 200, status: true, agents: agentsWithWidget });
   } catch (error) {
     commonHelper.logErrorToFile(error);
     return res.status(500).json({ status_code: 500, status: false, message: 'Failed to retrieve agents' });
@@ -72,7 +87,7 @@ AIAgentController.getAgentSettings = async (req, res) => {
     if (!agentId) {
       return res.status(400).json({ status_code: 400, status: false, message: 'Agent ID is required' });
     }
-    const agent = await Agent.findById(agentId).select('agentName email phone fallbackMessage liveAgentSupport website_name');
+    const agent = await Agent.findById(agentId).select('agentName email phone fallbackMessage liveAgentSupport website_name onboardingStep onboardingWebsiteUrl onboardingExtractedUrls');
     if (!agent) {
       return res.status(404).json({ status_code: 404, status: false, message: 'Agent not found' });
     }
@@ -80,11 +95,14 @@ AIAgentController.getAgentSettings = async (req, res) => {
       status_code: 200,
       status: true,
       data: {
-        agentName:       agent.agentName || agent.website_name || '',
-        email:           agent.email || '',
-        phone:           agent.phone || '',
-        fallbackMessage: agent.fallbackMessage || '',
-        liveAgentSupport: agent.liveAgentSupport ?? false,
+        agentName:                agent.agentName || agent.website_name || '',
+        email:                    agent.email || '',
+        phone:                    agent.phone || '',
+        fallbackMessage:          agent.fallbackMessage || '',
+        liveAgentSupport:         agent.liveAgentSupport ?? false,
+        onboardingStep:           agent.onboardingStep || 'source',
+        onboardingWebsiteUrl:     agent.onboardingWebsiteUrl || '',
+        onboardingExtractedUrls:  agent.onboardingExtractedUrls || [],
       }
     });
   } catch (error) {
@@ -96,16 +114,19 @@ AIAgentController.getAgentSettings = async (req, res) => {
 // POST /updateAgentSettings — update agent profile settings
 AIAgentController.updateAgentSettings = async (req, res) => {
   try {
-    const { agentId, agentName, email, phone, fallbackMessage, liveAgentSupport } = req.body;
+    const { agentId, agentName, email, phone, fallbackMessage, liveAgentSupport, onboardingStep, onboardingWebsiteUrl, onboardingExtractedUrls } = req.body;
     if (!agentId) {
       return res.status(400).json({ status_code: 400, status: false, message: 'Agent ID is required' });
     }
     const updateData = {};
-    if (agentName           !== undefined) updateData.agentName        = agentName;
-    if (email               !== undefined) updateData.email             = email;
-    if (phone               !== undefined) updateData.phone             = phone;
-    if (fallbackMessage     !== undefined) updateData.fallbackMessage   = fallbackMessage;
-    if (liveAgentSupport    !== undefined) updateData.liveAgentSupport  = liveAgentSupport;
+    if (agentName                !== undefined) updateData.agentName               = agentName;
+    if (email                    !== undefined) updateData.email                   = email;
+    if (phone                    !== undefined) updateData.phone                   = phone;
+    if (fallbackMessage          !== undefined) updateData.fallbackMessage         = fallbackMessage;
+    if (liveAgentSupport         !== undefined) updateData.liveAgentSupport        = liveAgentSupport;
+    if (onboardingStep           !== undefined) updateData.onboardingStep          = onboardingStep;
+    if (onboardingWebsiteUrl     !== undefined) updateData.onboardingWebsiteUrl    = onboardingWebsiteUrl;
+    if (onboardingExtractedUrls  !== undefined) updateData.onboardingExtractedUrls = onboardingExtractedUrls;
 
     const agent = await Agent.findByIdAndUpdate(agentId, { $set: updateData }, { new: true });
     if (!agent) {
@@ -129,17 +150,28 @@ AIAgentController.updateAgentSettings = async (req, res) => {
   }
 };
 
-// POST /ai-agents/delete/:agentId — soft-delete an AI agent
+// POST /ai-agents/delete/:agentId — hard-delete an AI agent and all related data
 AIAgentController.deleteAgent = async (req, res) => {
   try {
     const agentId = req.params.agentId;
     if (!agentId) {
       return res.status(400).json({ status_code: 400, status: false, message: 'Agent ID is required' });
     }
-    const agent = await Agent.findByIdAndUpdate(agentId, { isDeleted: true }, { new: true });
+
+    const agent = await Agent.findById(agentId);
     if (!agent) {
       return res.status(404).json({ status_code: 404, status: false, message: 'Agent not found' });
     }
+
+    // Hard delete from all related collections in parallel
+    await Promise.all([
+      Agent.findByIdAndDelete(agentId),
+      Widget.deleteMany({ agentId }),
+      TrainingListFreeUsers.deleteMany({ agentId }),
+      Url.deleteMany({ agentId }),
+      WebsiteData.deleteMany({ agentId }),
+    ]);
+
     return res.status(200).json({ status_code: 200, status: true, message: 'Agent deleted successfully' });
   } catch (error) {
     commonHelper.logErrorToFile(error);

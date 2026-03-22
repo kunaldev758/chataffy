@@ -163,6 +163,7 @@ router.post('/updateThemeSettings',middleware, WidgetController.updateThemeSetti
 
 // New enhanced widget routes
 router.post('/updateWidgetPosition',middleware, WidgetController.updateWidgetPosition);
+router.post('/widget/toggle-status', middleware, WidgetController.toggleWidgetStatus);
 
 // Agent management routes
 router.post('/agents',middleware, agentController.createHumanAgent);
@@ -182,6 +183,7 @@ router.get('/agent-settings/:agentId', middleware, AIAgentController.getAgentSet
 router.post('/updateAgentSettings', middleware, AIAgentController.updateAgentSettings);
 
 router.post('/sendEmailForOfflineChat', ConversationController.sendEmailForOfflineChatController);
+router.post('/conversations/filter', middleware, ConversationController.getFilteredConversations);
 
 // Revise Answer - store human-corrected Q&A pair as Qdrant vector
 router.post('/revise-answer', middleware, reviseAnswer);

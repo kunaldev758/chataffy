@@ -12,6 +12,8 @@ const cheerio = require("cheerio");
 const { urlProcessingQueue, deleteTrainingDataQueue, retrainTrainingDataQueue } = require("../services/jobService.js");
 const Agent = require("../models/Agent.js");
 const Widget = require("../models/Widget.js");
+const fs = require("fs");
+const path = require("path");
 
 class ScrapingController {
   constructor() {
@@ -104,7 +106,7 @@ async bulkInsertUrls(userId,agentId, urls) {
               try {
                 const found = await this.extractUrlsFromSitemap(smUrl);
                 urls.push(...found);
-                if (urls.length >= 10000) break;
+                if (urls.length >= 1500) break;
               } catch (e) {
                 console.warn(`Failed to extract from robots sitemap ${smUrl}: ${e.message}`);
               }
@@ -119,7 +121,7 @@ async bulkInsertUrls(userId,agentId, urls) {
                 .map((url) => url.trim())
                 .filter((url, index, self) => self.indexOf(url) === index);
               console.log(`(robots.txt) Cleaned URLs: ${originalCount} -> ${urls.length}`);
-              if (urls.length > 10000) urls = urls.slice(0, 10000);
+              if (urls.length > 1500) urls = urls.slice(0, 1500);
               return urls;
             }
           }
@@ -137,7 +139,7 @@ async bulkInsertUrls(userId,agentId, urls) {
           "/sitemap/news.xml",
         ];
         for (const path of commonSitemapPaths) {
-          if (urls.length >= 10000) break;
+          if (urls.length >= 1500) break;
           const candidate = `${origin}${path}`;
           try {
             const found = await this.extractUrlsFromSitemap(candidate);
@@ -154,7 +156,7 @@ async bulkInsertUrls(userId,agentId, urls) {
             .map((url) => url.trim())
             .filter((url, index, self) => self.indexOf(url) === index);
           console.log(`(common paths) Cleaned URLs: ${originalCount} -> ${urls.length}`);
-          if (urls.length > 10000) urls = urls.slice(0, 10000);
+          if (urls.length > 1500) urls = urls.slice(0, 1500);
           return urls;
         }
 
@@ -188,7 +190,7 @@ async bulkInsertUrls(userId,agentId, urls) {
                 .map((url) => url.trim())
                 .filter((url, index, self) => self.indexOf(url) === index);
               console.log(`(homepage) Cleaned URLs: ${originalCount} -> ${urls.length}`);
-              if (urls.length > 10000) urls = urls.slice(0, 10000);
+              if (urls.length > 1500) urls = urls.slice(0, 1500);
               return urls;
             }
           }
@@ -239,8 +241,8 @@ async bulkInsertUrls(userId,agentId, urls) {
       if (result.urlset && result.urlset.url) {
         urls = result.urlset.url.map((urlObj) => urlObj.loc[0]);
         console.log(`Found ${urls.length} URLs in regular sitemap: ${sitemapUrl}`);
-        if (urls.length >= 10000) {
-          urls = urls.slice(0, 10000); // Take only first 5000 URLs
+        if (urls.length >= 1500) {
+          urls = urls.slice(0, 1500); // Take only first 5000 URLs
           console.log(`URL limit reached. Returning first 5000 URLs from sitemap: ${sitemapUrl}`);
           return urls;
         }
@@ -255,7 +257,7 @@ async bulkInsertUrls(userId,agentId, urls) {
   
         // Recursively fetch URLs from each sitemap with better error handling
         for (const nestedSitemapUrl of sitemapUrls) {
-          if (urls.length >= 10000) {
+          if (urls.length >= 1500) {
             console.log(`URL limit of 5000 reached. Stopping sitemap processing.`);
             break;
           }
@@ -263,8 +265,8 @@ async bulkInsertUrls(userId,agentId, urls) {
             const nestedUrls = await this.extractUrlsFromSitemap(nestedSitemapUrl);
             urls.push(...nestedUrls);
             console.log(`Successfully extracted ${nestedUrls.length} URLs from nested sitemap: ${nestedSitemapUrl}`);
-            if (urls.length >= 10000) {
-              urls = urls.slice(0, 10000); // Trim to exactly 5000 URLs
+            if (urls.length >= 1500) {
+              urls = urls.slice(0, 1500); // Trim to exactly 5000 URLs
               console.log(`URL limit of 5000 reached after processing nested sitemap. Stopping and returning 5000 URLs.`);
               return urls;
             }
@@ -289,8 +291,8 @@ async bulkInsertUrls(userId,agentId, urls) {
   
       console.log(`Cleaned URLs: ${originalCount} -> ${urls.length} (removed ${originalCount - urls.length} invalid/duplicate URLs)`);
 
-      if (urls.length > 10000) {
-        urls = urls.slice(0, 10000);
+      if (urls.length > 1500) {
+        urls = urls.slice(0, 1500);
         console.log(`Final URL count exceeded 5000 after cleaning. Trimmed to exactly 5000 URLs.`);
       }
       
@@ -329,68 +331,154 @@ async bulkInsertUrls(userId,agentId, urls) {
 
       const response = await axios.get(origin, {
         timeout: 15000,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
-        },
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
       });
 
       if (response.status !== 200 || typeof response.data !== "string") {
         return [];
       }
 
-      const html = response.data;
-      const hexMatches = html.match(/#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b/g) || [];
-      const rgbMatches =
-        html.match(/rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)/g) || [];
+      const $ = cheerio.load(response.data);
 
-      const normalizeHex = (value) => {
-        if (!value) return null;
-        const color = value.trim().toLowerCase();
-        if (!color.startsWith("#")) return null;
-        if (color.length === 4) {
-          return (
-            "#" +
-            color[1] +
-            color[1] +
-            color[2] +
-            color[2] +
-            color[3] +
-            color[3]
-          );
-        }
-        if (color.length === 7) return color;
+      // ── Color conversion helpers ──────────────────────────────────────────
+
+      const normalizeHex = (v) => {
+        if (!v) return null;
+        const c = v.trim().toLowerCase();
+        if (!c.startsWith("#")) return null;
+        if (c.length === 4)
+          return "#" + c[1] + c[1] + c[2] + c[2] + c[3] + c[3];
+        if (c.length === 7) return c;
         return null;
       };
 
       const rgbToHex = (rgb) => {
-        const nums = rgb.match(/\d{1,3}/g);
+        if (!rgb) return null;
+        const nums = rgb.match(/\d+/g);
         if (!nums || nums.length < 3) return null;
-        const [r, g, b] = nums.slice(0, 3).map((n) => Math.max(0, Math.min(255, Number(n))));
+        const [r, g, b] = nums.slice(0, 3).map((n) => Math.max(0, Math.min(255, +n)));
+        return "#" + [r, g, b].map((n) => n.toString(16).padStart(2, "0")).join("");
+      };
+
+      const hslToHex = (hsl) => {
+        if (!hsl) return null;
+        const nums = hsl.match(/[\d.]+/g);
+        if (!nums || nums.length < 3) return null;
+        const h = +nums[0] / 360, s = +nums[1] / 100, l = +nums[2] / 100;
+        if (s === 0) {
+          const v = Math.round(l * 255).toString(16).padStart(2, "0");
+          return `#${v}${v}${v}`;
+        }
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        const hue2rgb = (t) => {
+          if (t < 0) t += 1;
+          if (t > 1) t -= 1;
+          if (t < 1 / 6) return p + (q - p) * 6 * t;
+          if (t < 1 / 2) return q;
+          if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+          return p;
+        };
         return (
           "#" +
-          [r, g, b]
-            .map((n) => n.toString(16).padStart(2, "0"))
+          [h + 1 / 3, h, h - 1 / 3]
+            .map((t) => Math.round(hue2rgb(t) * 255).toString(16).padStart(2, "0"))
             .join("")
-            .toLowerCase()
         );
       };
 
-      const allColors = [
-        ...hexMatches.map(normalizeHex).filter(Boolean),
-        ...rgbMatches.map(rgbToHex).filter(Boolean),
-      ];
+      const toHex = (str) => {
+        if (!str) return null;
+        const s = str.trim();
+        if (s.startsWith("#"))   return normalizeHex(s);
+        if (s.startsWith("rgb")) return rgbToHex(s);
+        if (s.startsWith("hsl")) return hslToHex(s);
+        return null;
+      };
 
-      const ignored = new Set(["#fff", "#ffffff", "#000", "#000000", "#f5f5f5", "#fafafa"]);
-      const unique = [];
-      for (const color of allColors) {
-        if (!color || ignored.has(color)) continue;
-        if (!unique.includes(color)) {
-          unique.push(color);
+      // ── Usefulness filter ─────────────────────────────────────────────────
+      // Reject near-whites, near-blacks, and near-grays (low chroma)
+
+      const isUsefulBrandColor = (hex) => {
+        if (!hex || hex.length !== 7) return false;
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        if (r > 210 && g > 210 && b > 210) return false; // near-white
+        if (r < 40  && g < 40  && b < 40)  return false; // near-black
+        // Chroma: max minus min across R/G/B channels
+        if (Math.max(r, g, b) - Math.min(r, g, b) < 30) return false; // near-gray
+        return true;
+      };
+
+      // ── Frequency map ─────────────────────────────────────────────────────
+      const freq = {};
+      const addColor = (hex, weight = 1) => {
+        if (hex && isUsefulBrandColor(hex)) {
+          freq[hex] = (freq[hex] || 0) + weight;
         }
-        if (unique.length >= 6) break;
+      };
+
+      // ── 1. Meta theme-color — the most reliable explicit brand signal ─────
+      const themeColorRaw =
+        $('meta[name="theme-color"]').attr("content") ||
+        $('meta[name="msapplication-TileColor"]').attr("content");
+      addColor(toHex(themeColorRaw), 30);
+
+      // ── 2. Collect CSS text (inline <style> blocks) ───────────────────────
+      let cssText = "";
+      $("style").each((_, el) => {
+        cssText += $(el).html() + "\n";
+      });
+
+      // ── 3. Fetch external CSS files (skip known font/icon CDNs) ──────────
+      const skipPatterns = [
+        "fonts.google", "font-awesome", "fontawesome",
+        "ionicons", "bootstrap.min", "normalize", "reset",
+      ];
+      const cssUrls = [];
+      $('link[rel="stylesheet"]').each((_, el) => {
+        const href = $(el).attr("href");
+        if (!href) return;
+        if (skipPatterns.some((p) => href.includes(p))) return;
+        try { cssUrls.push(new URL(href, origin).toString()); } catch (_) {}
+      });
+
+      // Fetch up to 3 CSS files in parallel
+      await Promise.all(
+        cssUrls.slice(0, 3).map(async (url) => {
+          try {
+            const r = await axios.get(url, {
+              timeout: 8000,
+              responseType: "text",
+              headers: { "User-Agent": "Mozilla/5.0" },
+            });
+            if (typeof r.data === "string") cssText += r.data + "\n";
+          } catch (_) {}
+        })
+      );
+
+      // ── 4. Extract colors from CSS property declarations only ─────────────
+      // Match: background-color: #xxx | color: rgb(...) | border: 1px solid hsl(...)
+      // This avoids picking up colors from string literals, JS, SVG path data, etc.
+      const propColorRe =
+        /(?:background(?:-color)?|(?:^|[\s;{,])color|border(?:-color)?|fill|stroke|outline(?:-color)?)\s*:\s*(#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b|rgba?\s*\([^)]+\)|hsla?\s*\([^)]+\))/gi;
+
+      let m;
+      while ((m = propColorRe.exec(cssText)) !== null) {
+        const hex = toHex(m[1]);
+        const prop = m[0].split(":")[0].trim().toLowerCase();
+        // Background/fill colors carry 3× more weight — they dominate brand impression
+        const weight = prop.includes("background") || prop === "fill" ? 3 : 1;
+        addColor(hex, weight);
       }
 
-      return unique;
+      // ── 5. Sort by frequency and return top 6 ────────────────────────────
+      return Object.entries(freq)
+        .sort((a, b) => b[1] - a[1])
+        .map(([color]) => color)
+        .slice(0, 6);
+
     } catch (error) {
       console.warn("Failed to fetch brand colors:", error.message);
       return [];
@@ -450,6 +538,50 @@ async bulkInsertUrls(userId,agentId, urls) {
     }
   }
 
+  // Downloads a remote logo URL, saves it inside /uploads, and returns the
+  // local path (e.g. "/uploads/logo-<agentId>-<timestamp>.png") that can be
+  // stored directly in the Widget collection.  Returns null on any failure.
+  async downloadAndSaveLogo(logoUrl, agentId) {
+    try {
+      const response = await axios.get(logoUrl, {
+        responseType: "arraybuffer",
+        timeout: 15000,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
+      });
+
+      // Derive extension from URL path first, then fall back to Content-Type
+      let ext = path.extname(new URL(logoUrl).pathname).toLowerCase().replace(".", "") || "";
+      if (!ext) {
+        const contentType = (response.headers["content-type"] || "").split(";")[0].trim();
+        const mimeToExt = {
+          "image/png": "png",
+          "image/jpeg": "jpg",
+          "image/jpg": "jpg",
+          "image/gif": "gif",
+          "image/webp": "webp",
+          "image/svg+xml": "svg",
+          "image/x-icon": "ico",
+          "image/vnd.microsoft.icon": "ico",
+        };
+        ext = mimeToExt[contentType] || "png";
+      }
+
+      const filename = `logo-${agentId}-${Date.now()}.${ext}`;
+      const uploadsDir = path.join(__dirname, "..", "uploads");
+
+      // Ensure the directory exists (it is created by app.js on startup, but be safe)
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+
+      fs.writeFileSync(path.join(uploadsDir, filename), response.data);
+      return `/uploads/${filename}`;
+    } catch (error) {
+      console.warn("Failed to download logo:", error.message);
+      return null;
+    }
+  }
+
   async getSitemapUrls(req, res) {
     try {
       const { userId, sitemapUrl, agentId, skipBulkInsert } = req.body;
@@ -484,6 +616,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       let urls = [];
       if (sitemapUrl) {
         urls = await this.extractUrlsFromSitemap(sitemapUrl);
+        await Agent.updateOne({ _id: agentId }, { $set: {isSitemapAdded: true} });
         console.log(`Found ${urls.length} URLs in sitemap`);
       }
 
@@ -494,10 +627,42 @@ async bulkInsertUrls(userId,agentId, urls) {
 
       const widgetUpdateData = {};
       if (logo) {
-        widgetUpdateData.logo = logo;
+        const savedLogoPath = await this.downloadAndSaveLogo(logo, agentId);
+        if (savedLogoPath) {
+          widgetUpdateData.logo = savedLogoPath;
+        }
       }
 
       if (brandColors.length > 0) {
+        // Derive a readable text colour for any background
+        const contrastText = (hex) => {
+          const r = parseInt(hex.slice(1, 3), 16);
+          const g = parseInt(hex.slice(3, 5), 16);
+          const b = parseInt(hex.slice(5, 7), 16);
+          // Perceived luminance (WCAG formula)
+          const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+          return lum > 0.55 ? "#1F2937" : "#FFFFFF";
+        };
+
+        const primary   = brandColors[0];
+        const secondary = brandColors[1] || primary;
+
+        // Build 6 widget-ready colours from whatever brand colours were found:
+        //  title_bar bg       → primary brand colour
+        //  title_bar text     → white or dark depending on primary luminance
+        //  visitor_bubble bg  → primary (or secondary if available)
+        //  visitor_bubble txt → contrast text for visitor bubble
+        //  ai_bubble bg       → neutral light (messages from the bot look clean)
+        //  ai_bubble text     → dark neutral
+        const widgetColorValues = [
+          primary,                    // title_bar
+          contrastText(primary),      // title_bar_text
+          secondary,                  // visitor_bubble
+          contrastText(secondary),    // visitor_bubble_text
+          "#F1F5F9",                  // ai_bubble  (neutral light)
+          "#1F2937",                  // ai_bubble_text (dark neutral)
+        ];
+
         const colorFieldNames = [
           "title_bar",
           "title_bar_text",
@@ -510,7 +675,7 @@ async bulkInsertUrls(userId,agentId, urls) {
         widgetUpdateData.colorFields = colorFieldNames.map((name, index) => ({
           id: index + 1,
           name,
-          value: brandColors[index] || brandColors[0],
+          value: widgetColorValues[index],
         }));
       }
 
@@ -646,7 +811,7 @@ async bulkInsertUrls(userId,agentId, urls) {
         appEvents.emit("userEvent", agentId, "training-event", {
           message: "No urls found",
           agent: await Agent.findOne({ _id: agentId }),
-          client: await Client.findOne({ userId }),
+          // client: await Client.findOne({ userId }),
         });
         return res.json({
           success: false,
@@ -666,19 +831,10 @@ async bulkInsertUrls(userId,agentId, urls) {
           scrapingStartTime: scrapingStartTime
         } 
       });
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
+      });
       
-      // if (sitemapUrl) {
-      //   appEvents.emit("userEvent", userId, "training-event", {
-      //     client: await Client.findOne({ userId }),
-      //   });
-      // }
-
-      // Add the fetched URLs to the Url model
-      // for (const url of urls) {
-        // await Url.create({ userId: userId, url: url, trainStatus: 0 });
-        // await this.bulkInsertUrls(userId, urls);
-      // }
-
       await Agent.updateOne(
         { _id: agentId },
         { $set: { "pagesAdded.total": urls.length || 0 } }
@@ -689,6 +845,7 @@ async bulkInsertUrls(userId,agentId, urls) {
         userId,
         qdrantIndexName,
         plan,
+        sitemapUrl:true,
         agentId,
         startTime: scrapingStartTime.getTime(),
         totalUrls: urls.length,
@@ -754,7 +911,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       });
       if (remainingUrls.length <= 0) {
         await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
-        appEvents.emit("userEvent", userId, "training-event", {
+        appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
           message: "No URL found to scrape",
         });
@@ -768,7 +925,7 @@ async bulkInsertUrls(userId,agentId, urls) {
             scrapingStartTime: scrapingStartTime
           } 
         });
-        appEvents.emit("userEvent", userId, "training-event", {
+        appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
         });
 
@@ -789,7 +946,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       });
     } catch (error) {
       await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
-      appEvents.emit("userEvent", userId, "training-event", {
+      appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
         message: error.message,
       });
@@ -1021,7 +1178,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       let documentsToProcess = [];
       await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 1 } });
 
-      appEvents.emit("userEvent", userId, "training-event", {
+      appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
       });
 
@@ -1040,7 +1197,7 @@ async bulkInsertUrls(userId,agentId, urls) {
             { _id: agentId },
             { $set: { dataTrainingStatus: 0 } }
           );
-          appEvents.emit("userEvent", userId, "training-event", {
+          appEvents.emit("userEvent", agentId, "training-event", {
             agent: await Agent.findOne({ _id: agentId }),
             message: snippetValidation.error,
           });
@@ -1100,7 +1257,7 @@ async bulkInsertUrls(userId,agentId, urls) {
               { _id: agentId },
               { $set: { dataTrainingStatus: 0 } }
             );
-            appEvents.emit("userEvent", userId, "training-event", {
+            appEvents.emit("userEvent", agentId, "training-event", {
               agent: await Agent.findOne({ _id: agentId }),
               message: fileValidation.error,
             });
@@ -1152,7 +1309,7 @@ async bulkInsertUrls(userId,agentId, urls) {
             { _id: agentId },
             { $set: { dataTrainingStatus: 0 } }
           );
-          appEvents.emit("userEvent", userId, "training-event", {
+          appEvents.emit("userEvent", agentId, "training-event", {
             agent: await Agent.findOne({ _id: agentId }),
             message: fileError.message,
           });
@@ -1168,7 +1325,7 @@ async bulkInsertUrls(userId,agentId, urls) {
 
       if (!documentsToProcess.length) {
         await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
-        appEvents.emit("userEvent", userId, "training-event", {
+        appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
           message: "No document found to process ",
         });
@@ -1201,7 +1358,7 @@ async bulkInsertUrls(userId,agentId, urls) {
 
         // Update client flags
         await Agent.updateOne({ _id: agentId }, { dataTrainingStatus: 0 });
-        appEvents.emit("userEvent", userId, "training-event", {
+        appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
         });
       } else {
@@ -1215,7 +1372,7 @@ async bulkInsertUrls(userId,agentId, urls) {
         );
         // Update client flags
         await Agent.updateOne({ _id: agentId }, { dataTrainingStatus: 0 });
-        appEvents.emit("userEvent", userId, "training-event", {
+        appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
           message: "Data training failed",
         });
@@ -1229,7 +1386,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       const userId = req.body.userId;
       const agentId = req.body.agentId;
       await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
-      appEvents.emit("userEvent", userId, "training-event", {
+      appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
         message: error.message,
       });
@@ -1279,7 +1436,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       const TrainingModel = await PlanService.getTrainingModel(userId);
       await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 1 } });
 
-      appEvents.emit("userEvent", userId, "training-event", {
+      appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
       });
 
@@ -1357,7 +1514,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       // If no valid FAQs after validation, return error
       if (documentsToProcess.length === 0) {
         await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
-        appEvents.emit("userEvent", userId, "training-event", {
+        appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
           message: "No valid FAQs to process",
         });
@@ -1409,7 +1566,7 @@ async bulkInsertUrls(userId,agentId, urls) {
           }
         );
 
-        appEvents.emit("userEvent", userId, "training-event", {
+        appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
         });
 
@@ -1436,7 +1593,7 @@ async bulkInsertUrls(userId,agentId, urls) {
         // Update client flags
         await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
 
-        appEvents.emit("userEvent", userId, "training-event", {
+        appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
           message: "failed to train data",
         });
@@ -1451,7 +1608,7 @@ async bulkInsertUrls(userId,agentId, urls) {
     } catch (error) {
       await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
 
-      appEvents.emit("userEvent", userId, "training-event", {
+      appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
         message: error.message,
       });

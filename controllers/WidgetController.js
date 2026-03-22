@@ -8,6 +8,19 @@ const fs = require('fs');
 
 const WidgetController = {};
 
+/** Load widget doc + raw Mongo doc (for legacy `position` migration on read). */
+async function getWidgetAndRawByQuery(query) {
+  const widget = await Widget.findOne(query);
+  if (!widget) return { widget: null, raw: null };
+  const raw = await Widget.collection.findOne({ _id: widget._id });
+  return { widget, raw };
+}
+
+function legacyAlignFromRaw(raw) {
+  const a = raw?.position?.align;
+  return a === 'left' || a === 'right' ? a : null;
+}
+
 // File validation helper
 const validateFile = (file, allowedTypes = ['jpg', 'jpeg', 'png'], maxSize = 5 * 1024 * 1024) => {
   const errors = [];
@@ -86,11 +99,16 @@ WidgetController.getThemeSettings = async (req, res) => {
     const agentId = req.body.agentId || req.params.agentId;
     
     let widget;
-    
+    let raw = null;
+
     if (agentId) {
-      widget = await Widget.findOne({ agentId: agentId });
+      const pair = await getWidgetAndRawByQuery({ agentId: agentId });
+      widget = pair.widget;
+      raw = pair.raw;
     } else if (widgetId) {
-      widget = await Widget.findOne({ _id: widgetId });
+      const pair = await getWidgetAndRawByQuery({ _id: widgetId });
+      widget = pair.widget;
+      raw = pair.raw;
     } else {
       return res.status(400).json({ 
         status_code: 400, 
@@ -99,6 +117,16 @@ WidgetController.getThemeSettings = async (req, res) => {
     }
     
     if (widget) {
+      const align =
+        widget.align || legacyAlignFromRaw(raw) || 'right';
+      const widgetType =
+        widget.widgetType === 'bar' || widget.widgetType === 'bubble'
+          ? widget.widgetType
+          : 'bubble';
+      const displayBarMessage =
+        widget.displayBarMessage != null && String(widget.displayBarMessage).trim() !== ''
+          ? widget.displayBarMessage
+          : "We're Online! Chat Now!";
 
       res.status(200).json({ 
         status_code: 200, 
@@ -112,7 +140,9 @@ WidgetController.getThemeSettings = async (req, res) => {
           isPreChatFormEnabled: widget.isPreChatFormEnabled,
           fields: widget.fields,
           colorFields: widget.colorFields,
-          position: widget.position,
+          align,
+          widgetType,
+          displayBarMessage,
           settings: widget.settings,
           widgetToken: widget.widgetToken,
           // website: widget.website,
@@ -208,13 +238,26 @@ WidgetController.updateThemeSettings = async (req, res) => {
       updateData.colorFields = themeSettings.colorFields;
     }
     
-    // Update position settings
-    if (themeSettings.position) {
-      updateData.position = {
-        align: ['left', 'right'].includes(themeSettings.position.align) ? themeSettings.position.align : 'right',
-        sideSpacing: Math.max(0, Math.min(200, themeSettings.position.sideSpacing || 20)),
-        bottomSpacing: Math.max(0, Math.min(200, themeSettings.position.bottomSpacing || 20))
-      };
+    // Horizontal alignment (replaces legacy `position.align`)
+    if (themeSettings.align !== undefined) {
+      updateData.align = ['left', 'right'].includes(themeSettings.align)
+        ? themeSettings.align
+        : 'right';
+    } else if (themeSettings.position && themeSettings.position.align !== undefined) {
+      updateData.align = ['left', 'right'].includes(themeSettings.position.align)
+        ? themeSettings.position.align
+        : 'right';
+    }
+
+    if (themeSettings.widgetType !== undefined) {
+      updateData.widgetType = ['bubble', 'bar'].includes(themeSettings.widgetType)
+        ? themeSettings.widgetType
+        : 'bubble';
+    }
+
+    if (themeSettings.displayBarMessage !== undefined) {
+      const msg = String(themeSettings.displayBarMessage).trim();
+      updateData.displayBarMessage = msg.slice(0, 200) || "We're Online! Chat Now!";
     }
     
     // Update advanced settings
@@ -222,9 +265,14 @@ WidgetController.updateThemeSettings = async (req, res) => {
       updateData.settings = { ...widget.settings.toObject(), ...themeSettings.settings };
     }
     
+    const mongoUpdate = { $unset: { position: 1 } };
+    if (Object.keys(updateData).length > 0) {
+      mongoUpdate.$set = updateData;
+    }
+
     const updatedWidget = await Widget.findOneAndUpdate(
       { agentId },
-      { $set: updateData },
+      mongoUpdate,
       { new: true }
     );
     
@@ -240,7 +288,9 @@ WidgetController.updateThemeSettings = async (req, res) => {
         isPreChatFormEnabled: updatedWidget.isPreChatFormEnabled,
         fields: updatedWidget.fields,
         colorFields: updatedWidget.colorFields,
-        position: updatedWidget.position,
+        align: updatedWidget.align,
+        widgetType: updatedWidget.widgetType,
+        displayBarMessage: updatedWidget.displayBarMessage,
         settings: updatedWidget.settings,
         website: updatedWidget.website,
         organisation: updatedWidget.organisation,
@@ -436,42 +486,39 @@ WidgetController.getPublicWidgetSettings = async (req, res) => {
   }
 };
 
-// Update widget position
+// Update widget horizontal alignment (legacy body: { position: { align } } still accepted)
 WidgetController.updateWidgetPosition = async (req, res) => {
   try {
-    const { agentId, position } = req.body;
-    
+    const { agentId, position, align: alignBody } = req.body;
+    const alignRaw = alignBody ?? position?.align;
+
     if (!agentId) {
       return res.status(400).json({ 
         status_code: 400, 
         message: "AgentId is required" 
       });
     }
-    
-    if (!position) {
+
+    if (alignRaw === undefined && !position) {
       return res.status(400).json({ 
         status_code: 400, 
-        message: "Position data is required" 
+        message: "align or position.align is required" 
       });
     }
-    
-    const updateData = {
-      'position.align': ['left', 'right'].includes(position.align) ? position.align : 'right',
-      'position.sideSpacing': Math.max(0, Math.min(200, position.sideSpacing || 20)),
-      'position.bottomSpacing': Math.max(0, Math.min(200, position.bottomSpacing || 20))
-    };
-    
+
+    const align = ['left', 'right'].includes(alignRaw) ? alignRaw : 'right';
+
     const updatedWidget = await Widget.findOneAndUpdate(
       { agentId },
-      { $set: updateData },
+      { $set: { align }, $unset: { position: 1 } },
       { new: true }
     );
     
     if (updatedWidget) {
       res.status(200).json({ 
         status_code: 200, 
-        message: "Widget position updated successfully",
-        data: { position: updatedWidget.position }
+        message: "Widget alignment updated successfully",
+        data: { align: updatedWidget.align }
       });
     } else {
       res.status(404).json({ 
@@ -485,6 +532,34 @@ WidgetController.updateWidgetPosition = async (req, res) => {
       status: false, 
       message: "Something went wrong please try again!" 
     });
+  }
+};
+
+// POST /widget/toggle-status — toggle isActive (1/0) for a widget by agentId
+WidgetController.toggleWidgetStatus = async (req, res) => {
+  try {
+    const { agentId, isActive } = req.body;
+    if (!agentId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'agentId is required' });
+    }
+    if (isActive === undefined) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'isActive is required' });
+    }
+
+    const widget = await Widget.findOneAndUpdate(
+      { agentId },
+      { $set: { isActive: isActive ? 1 : 0 } },
+      { new: true }
+    );
+
+    if (!widget) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'Widget not found for this agent' });
+    }
+
+    return res.status(200).json({ status_code: 200, status: true, message: 'Widget status updated', isActive: widget.isActive });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to update widget status' });
   }
 };
 

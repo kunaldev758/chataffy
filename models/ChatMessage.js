@@ -9,7 +9,7 @@ const chatMessageSchema = new Schema({
   },
   sender_type: {
     type: String,
-    enum: ['visitor', 'client','ai', 'system', 'humanAgent'],
+    enum: ['visitor', 'client','ai', 'system', 'humanAgent', 'agent-connect'],
     required: true,
   },
   is_note:{

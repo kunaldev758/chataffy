@@ -72,13 +72,49 @@ const websiteDataSchema = new Schema(
 // Index for faster lookups
 websiteDataSchema.index({ userId: 1 });
 
-// Static method to get or create website data
-websiteDataSchema.statics.getOrCreate = async function (userId) {
+function toObjectId(value) {
+  if (value == null || value === "") return null;
+  if (value instanceof mongoose.Types.ObjectId) return value;
+  return new mongoose.Types.ObjectId(value);
+}
+
+// Static method: getOrCreate(userId) or getOrCreate({ userId, agentId? })
+websiteDataSchema.statics.getOrCreate = async function (input) {
+  const isOptsObject =
+    input != null &&
+    typeof input === "object" &&
+    !(input instanceof mongoose.Types.ObjectId);
+
+  const rawUserId = isOptsObject ? input.userId : input;
+  const rawAgentId = isOptsObject && Object.prototype.hasOwnProperty.call(input, "agentId")
+    ? input.agentId
+    : undefined;
+
+  const userId = toObjectId(rawUserId);
+  if (!userId) {
+    throw new Error("WebsiteData.getOrCreate: userId is required");
+  }
+
   let websiteData = await this.findOne({ userId });
   if (!websiteData) {
-    websiteData = new this({ userId });
+    const doc = { userId };
+    if (rawAgentId != null && rawAgentId !== "") {
+      const aid = toObjectId(rawAgentId);
+      if (aid) doc.agentId = aid;
+    }
+    websiteData = new this(doc);
     await websiteData.save();
+    return websiteData;
   }
+
+  if (rawAgentId != null && rawAgentId !== "") {
+    const aid = toObjectId(rawAgentId);
+    if (aid && (!websiteData.agentId || !websiteData.agentId.equals(aid))) {
+      websiteData.agentId = aid;
+      await websiteData.save();
+    }
+  }
+
   return websiteData;
 };
 

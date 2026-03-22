@@ -13,6 +13,8 @@ const HumanAgent = require("../models/HumanAgent");
 const PlanService = require("../services/PlanService");
 const { agentConnectionTimeouts } = require("./visitorHandlers");
 
+const stripHtml = (html) => (html || "").replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
+
 /**
  * Resolves the human agent id and display name from a socket.
  * Avoids repeated HumanAgent.findOne calls across multiple handlers.
@@ -51,7 +53,7 @@ async function transferChatToHuman(io, { conversationId, visitorId, humanAgentId
   const systemMessage = await ChatMessageController.createChatMessage(
     conversationId,
     visitorId || "system",
-    "system",
+    "agent-connect",
     systemMessageText,
     userId,
     agentId,
@@ -343,6 +345,11 @@ const initializeClientEvents = (io, socket) => {
 
       const chatMessageObj = chatMessage.toObject ? chatMessage.toObject() : chatMessage;
 
+      await Conversation.updateOne(
+        { _id: conversationId },
+        { $set: { lastMessage: stripHtml(message) } }
+      );
+
       // Use the conversation already fetched above — no second DB call needed
       if (conversation && !conversation.aiChat) {
         io.to([
@@ -573,6 +580,47 @@ const initializeClientEvents = (io, socket) => {
     } catch (error) {
       console.error("Error during search:", error);
       callback({ success: false, error: error.message });
+    }
+  });
+
+  socket.on("get-filtered-conversations-list", async ({ status, rating, handledBy }, callback) => {
+    try {
+      const query = {
+        userId: userId,
+        agentId: agentId,
+      };
+
+      if (status && status !== "all") {
+        query.conversationOpenStatus = status;
+      }
+
+      if (rating === "good") {
+        query.feedback = true;
+      } else if (rating === "bad") {
+        query.feedback = false;
+      }
+
+      if (handledBy === "ai") {
+        query.aiChat = true;
+      }
+
+      const conv = await Conversation.find(query)
+        .populate("humanAgentId", "name avatar isClient")
+        .sort({ createdAt: -1 });
+
+      const updatedVisitors = await Promise.all(
+        conv.map(async (conv) => {
+          const conversation = conv.toObject();
+          const visitor = await Visitor.findOne({ _id: conv.visitor });
+          conversation["visitor"] = visitor;
+          return conversation;
+        })
+      );
+
+      callback?.({ success: true, conversations: updatedVisitors });
+    } catch (error) {
+      console.error("Error fetching filtered conversations list:", error);
+      callback?.({ success: false, error: error.message });
     }
   });
 

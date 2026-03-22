@@ -18,6 +18,8 @@ const { checkPlanLimits } = require("../services/PlanService");
 // Store active timeouts for agent connection requests
 const agentConnectionTimeouts = new Map();
 
+const stripHtml = (html) => (html || "").replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
+
 // Export for use in other handlers
 module.exports.agentConnectionTimeouts = agentConnectionTimeouts;
 
@@ -194,12 +196,11 @@ const initializeVisitorEvents = (io, socket) => {
           chatMessage: chatMessageObj,
         }
       );
-      io.to([userAgentRoom, agentRoom]).emit("new-message-count", { conversationId });
-
       await Conversation.updateOne(
         { _id: conversationId },
-        { $inc: { newMessage: 1 } }
+        { $inc: { newMessage: 1 }, $set: { lastMessage: message } }
       );
+      io.to([userAgentRoom, agentRoom]).emit("new-message-count", { conversationId, lastMessage: message });
       callback?.({ success: true, chatMessage: chatMessageObj, id });
       if (conversation.aiChat) {
         const response_data = await QueryController.handleQuestionAnswer(
@@ -309,6 +310,10 @@ const initializeVisitorEvents = (io, socket) => {
               agentId,
               response_data?.sources
             );
+          await Conversation.updateOne(
+            { _id: conversationId },
+            { $set: { lastMessage: stripHtml(response_data.answer) } }
+          );
           io.to([visitorRoom, userAgentRoom, agentRoom]).emit(
             "conversation-append-message",
             {
@@ -326,6 +331,10 @@ const initializeVisitorEvents = (io, socket) => {
               userId,
               agentId
             );
+          await Conversation.updateOne(
+            { _id: conversationId },
+            { $set: { lastMessage: "error in generating Response" } }
+          );
           io.to([visitorRoom, userAgentRoom, agentRoom]).emit(
             "conversation-append-message",
             { chatMessage: chatMessageResponse }
