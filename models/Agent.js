@@ -74,6 +74,10 @@ const agentSchema = new mongoose.Schema({
   onboardingWebsiteUrl: { type: String, default: '' },
   onboardingExtractedUrls: { type: [String], default: [] },
 
+  isDeleted: {
+    type: Boolean,
+    default: false,
+  },
 
   qdrantIndexName: { type: String, required: true, unique: true },
   qdrantIndexNamePaid: { type: String, required: true, unique: true },
