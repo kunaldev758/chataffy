@@ -1,6 +1,7 @@
 require("dotenv").config();
 const { Queue, Worker } = require("bullmq");
 const Client = require("../models/Client.js");
+const Agent = require("../models/Agent");
 const Url = require("../models/Url.js");
 const WebsiteData = require("../models/WebsiteData.js");
 const batchTrainingService = require("./BatchTrainingService.js");
@@ -13,7 +14,7 @@ const QdrantVectorStoreManager = require("./QdrantService");
 
 const redisConfig =
   process.env.ENVIRONMENT === "local"
-    ? { url: process.env.REDIS_URL, maxRetriesPerRequest: null }
+    ? { host: "127.0.0.1", port: 6379, maxRetriesPerRequest: null }
     : {
         host: "127.0.0.1",
         port: 6379,
@@ -314,7 +315,7 @@ const urlProcessingQueue = new Queue("urlProcessingQueue", {
 new Worker(
   "urlProcessingQueue",
   async (job) => {
-    const { urls, userId, qdrantIndexName, plan, sitemapUrl, startTime, totalUrls } = job.data;
+    const { urls, userId,agentId, qdrantIndexName, plan, sitemapUrl, startTime, totalUrls } = job.data;
     try {
       const batchService = new batchTrainingService();
 
@@ -361,8 +362,8 @@ new Worker(
         };
 
         // Emit progress update
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
           scrapingProgress: {
             percentage,
             processed: currentIndex,
@@ -406,8 +407,20 @@ new Worker(
 
           const processResult = await processWebPage(url, sourceCode,footerCache);
           if (!processResult.content) {
+            await TrainingModel.create({
+              userId,
+              agentId,
+              type: 0,
+              content: "",
+              dataSize: 0,
+              trainingStatus: 2,
+              error: "No data found",
+              "webPage.url": url,
+              chunkCount: 0,
+              lastEdit: Date.now(),
+            });
             await Url.updateOne(
-              { url },
+              { url:url, agentId:agentId },
               {
                 $set: {
                   trainStatus: 2,
@@ -430,7 +443,10 @@ new Worker(
             
             if (shouldStore) {
               try {
-                let websiteData = await WebsiteData.getOrCreate(userId);
+                let websiteData = await WebsiteData.getOrCreate({
+                  userId,
+                  ...(agentId ? { agentId } : {}),
+                });
                 // Remove internal flag before storing
                 const { _isHomepage, ...cleanMetadata } = websiteMetadata;
                 await websiteData.updateData({
@@ -467,7 +483,8 @@ new Worker(
               return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
             };
             
-            appEvents.emit("userEvent", userId, "training-event", {
+            appEvents.emit("userEvent", agentId, "training-event", {
+              agent: await Agent.findOne({ _id: agentId }),
               client: await Client.findOne({ userId }),
               message:
                 "Storage limit exceede scrapping Stopped Upgrage Plan to continue",
@@ -505,19 +522,19 @@ new Worker(
           }
         } catch (error) {
           await TrainingModel.findByIdAndUpdate(
-            { userId: userId, "webPage.url": url },
+            { userId: userId,agentId:agentId, "webPage.url": url },
             {
               trainingStatus: 2, // Error
               lastEdit: Date.now(),
               error: error?.message,
             }
           );
-          await Client.updateOne(
-            { userId },
+          await Agent.updateOne(
+            { _id: agentId },
             { $inc: { "pagesAdded.failed": 1 } }
           );
           await Url.updateOne(
-            { url },
+            { url:url, agentId:agentId },
             {
               $set: {
                 trainStatus: 2,
@@ -541,8 +558,8 @@ new Worker(
       
       // Emit update indicating training phase is starting
       if (scrapedDocs.length > 0) {
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
           scrapingProgress: {
             percentage: 100,
             processed: urls.length,
@@ -561,23 +578,26 @@ new Worker(
       let result = await batchService.processDocumentAndTrain(
         scrapedDocs,
         userId,
+        agentId,
         qdrantIndexName
       );
    
       // Handle training failure
       if (!result.success) {
         // Mark all documents as failed if training failed
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
           message: error?.message,
         });
       } else {
         // 3️⃣ Update training status in DB
         for (const doc of scrapedDocs) {
           const status = result?.failedUrls?.includes(doc.originalUrl) ? 2 : 1;
+          if(status == 1){
           await TrainingModel.create({
             userId,
+            agentId,
             type: 0,
             content: doc.content,
             dataSize: doc.dataSize,
@@ -586,9 +606,21 @@ new Worker(
             chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
             lastEdit: Date.now(),
           });
-          if(status == 2){
+        }else if(status == 2){
+          await TrainingModel.create({
+            userId,
+            agentId,
+            type: 0,
+            content: doc.content,
+            dataSize: doc.dataSize,
+            trainingStatus: status,
+            error: "Failed to process/minify web page content",
+            "webPage.url": doc.originalUrl,
+            chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
+            lastEdit: Date.now(),
+          });
           await Url.updateOne(
-            { url:doc.originalUrl },
+            { url:doc.originalUrl, agentId:agentId },
             {
               $set: {
                 trainStatus: status,
@@ -598,7 +630,7 @@ new Worker(
           );
         }else{
           await Url.updateOne(
-            { url:doc.originalUrl },
+            { url:doc.originalUrl, agentId:agentId },
             {
               $set: {
                 trainStatus: status,
@@ -608,8 +640,8 @@ new Worker(
           );
         }
 
-          await Client.updateOne(
-            { userId },
+          await Agent.updateOne(
+            { _id: agentId },
             {
               $inc: {
                 ...(status === 1
@@ -621,11 +653,11 @@ new Worker(
         }
 
         if (sitemapUrl) {
-          await Client.updateOne({ userId }, { $set: { isSitemapAdded: 1 } });
+          await Agent.updateOne({ _id: agentId }, { $set: { isSitemapAdded: 1 } });
         }
       }
 
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0, scrapingStartTime: null } });
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0, scrapingStartTime: null,lastTrained: new Date() } });
       
       // Emit final progress (100%)
       const finalElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
@@ -636,8 +668,8 @@ new Worker(
         return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
       };
       
-      appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
         scrapingProgress: {
           percentage: 100,
           processed: totalUrlsCount,
@@ -650,7 +682,7 @@ new Worker(
         },
       });
     } catch (error) {
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0, scrapingStartTime: null } });
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0, scrapingStartTime: null } });
       
       // Calculate progress even on error
       const errorElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
@@ -662,10 +694,10 @@ new Worker(
       };
       
       // Try to get current progress from URL count
-      const processedCount = await Url.countDocuments({ userId, trainStatus: { $in: [1, 2] } });
+      const processedCount = await Url.countDocuments({ userId, agentId:agentId, trainStatus: { $in: [1, 2] } });
       
-      appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
         message: error?.message,
         scrapingProgress: {
           percentage: totalUrlsCount > 0 ? Math.round((processedCount / totalUrlsCount) * 100) : 0,
@@ -685,4 +717,270 @@ new Worker(
   { connection: redisConfig, concurrency: 1 }
 );
 
-module.exports = { planUpgradeQueue, urlProcessingQueue };
+// Delete training data queue - runs in background
+const deleteTrainingDataQueue = new Queue("deleteTrainingDataQueue", {
+  connection: redisConfig,
+  defaultJobOptions: {
+    removeOnComplete: 10,
+    removeOnFail: 20,
+    attempts: 2,
+    backoff: {
+      type: "exponential",
+      delay: 2000,
+    },
+  },
+});
+
+new Worker(
+  "deleteTrainingDataQueue",
+  async (job) => {
+    const { entries, userId, agentId, qdrantIndexName, TrainingModelName } = job.data;
+    const QdrantVectorStoreManager = require("./QdrantService");
+    const PlanService = require("./PlanService");
+    const Client = require("../models/Client");
+    const Agent = require("../models/Agent");
+    const appEvents = require("../events");
+
+    try {
+      const TrainingModel =
+        TrainingModelName === "TrainingListFreeUsers"
+          ? require("../models/TrainingListFreeUsers")
+          : require("../models/OpenaiTrainingList");
+
+      let totalDataSizeRemoved = 0;
+      let pagesSuccessDeleted = 0;
+      let pagesFailedDeleted = 0;
+      let filesDeleted = 0;
+      let faqsDeleted = 0;
+
+      // Delete vectors from Qdrant
+      const qdrantResult = await QdrantVectorStoreManager.deleteVectorsByTrainingEntries(
+        qdrantIndexName,
+        entries.map((e) => ({
+          userId: e.userId?.toString(),
+          agentId: e.agentId?.toString(),
+          type: e.type,
+          url: e.webPage?.url,
+          title: e.title,
+        }))
+      );
+
+      if (qdrantResult.errors?.length > 0) {
+        console.warn("[deleteTrainingData] Qdrant delete warnings:", qdrantResult.errors);
+      }
+
+      // Delete from MongoDB and aggregate stats
+      for (const entry of entries) {
+        await TrainingModel.deleteOne({ _id: entry._id });
+        totalDataSizeRemoved += entry.dataSize || 0;
+        if (entry.type === 0) {
+          if (entry.trainingStatus === 1) pagesSuccessDeleted++;
+          else pagesFailedDeleted++;
+        } else if (entry.type === 1) filesDeleted++;
+        else if (entry.type === 3) faqsDeleted++;
+      }
+
+      // Update Client currentDataSize
+      // await Client.updateOne(
+      //   { userId },
+      //   { $inc: { currentDataSize: -Math.max(0, totalDataSizeRemoved) } }
+      // );
+
+      // Update Agent counters
+      const updateFields = {};
+      if (pagesSuccessDeleted > 0) updateFields["pagesAdded.success"] = -pagesSuccessDeleted;
+      if (pagesFailedDeleted > 0) updateFields["pagesAdded.failed"] = -pagesFailedDeleted;
+      if (pagesSuccessDeleted > 0 || pagesFailedDeleted > 0) {
+        updateFields["pagesAdded.total"] = -(pagesSuccessDeleted + pagesFailedDeleted);
+      }
+      if (filesDeleted > 0) updateFields.filesAdded = -filesDeleted;
+      if (faqsDeleted > 0) updateFields.faqsAdded = -faqsDeleted;
+      if (Object.keys(updateFields).length > 0) {
+        await Agent.updateOne({ _id: agentId }, { $inc: updateFields });
+      }
+
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
+      });
+
+      console.log(`[deleteTrainingData] Deleted ${entries.length} training entries for user ${userId}`);
+    } catch (error) {
+      console.error("[deleteTrainingData] Job failed:", error);
+      throw error;
+    }
+  },
+  { connection: redisConfig, concurrency: 2 }
+);
+
+// Retrain training data queue - only webpages (type 0)
+const retrainTrainingDataQueue = new Queue("retrainTrainingDataQueue", {
+  connection: redisConfig,
+  defaultJobOptions: {
+    removeOnComplete: 10,
+    removeOnFail: 20,
+    attempts: 2,
+    backoff: {
+      type: "exponential",
+      delay: 2000,
+    },
+  },
+});
+
+new Worker(
+  "retrainTrainingDataQueue",
+  async (job) => {
+    const { entries, userId, agentId, qdrantIndexName, TrainingModelName } = job.data;
+    const batchService = new batchTrainingService();
+    const Agent = require("../models/Agent");
+
+    const TrainingModel =
+      TrainingModelName === "TrainingListFreeUsers"
+        ? require("../models/TrainingListFreeUsers")
+        : require("../models/OpenaiTrainingList");
+
+    try {
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 1 } });
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
+      });
+
+      const footerCache = {};
+      let successCount = 0;
+      let failCount = 0;
+
+      for (const entry of entries) {
+        const url = entry.webPage?.url;
+        if (!url) continue;
+
+        try {
+          // 1. Delete old vectors from Qdrant
+          const qdrantManager = new QdrantVectorStoreManager(qdrantIndexName);
+          await qdrantManager.deleteByFields({
+            user_id: userId,
+            agent_id: agentId,
+            url,
+          });
+
+          // 2. Scrape webpage
+          const response = await axios.get(url, {
+            timeout: 30000,
+            maxContentLength: 50 * 1024 * 1024,
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
+          });
+          const processResult = await processWebPage(url, response?.data, footerCache);
+
+          if (!processResult?.content) {
+            await TrainingModel.updateOne(
+              { _id: entry._id },
+              {
+                $set: {
+                  trainingStatus: 2,
+                  error: "Failed to process/minify web page content",
+                  lastEdit: new Date(),
+                },
+              }
+            );
+            failCount++;
+            continue;
+          }
+
+          const { content, title, metaDescription, webPageURL } = processResult;
+          const contentSize = Buffer.byteLength(content, "utf8");
+          const oldDataSize = entry.dataSize || 0;
+          const dataSizeDelta = contentSize - oldDataSize;
+
+          // 3. Update MongoDB
+          const scrapedDoc = {
+            type: 0,
+            content,
+            dataSize: contentSize,
+            metadata: {
+              url: webPageURL,
+              title,
+              metaDescription,
+              type: "webpage",
+            },
+            originalUrl: url,
+          };
+
+          // 4. Upsert vectors to Qdrant
+          const result = await batchService.processDocumentAndTrain(
+            [scrapedDoc],
+            userId,
+            agentId,
+            qdrantIndexName
+          );
+
+          if (!result.success) {
+            await TrainingModel.updateOne(
+              { _id: entry._id },
+              {
+                $set: {
+                  trainingStatus: 2,
+                  error: result.error || "Failed to upsert vectors",
+                  lastEdit: new Date(),
+                },
+              }
+            );
+            failCount++;
+            continue;
+          }
+
+          // 5. Update MongoDB with new content and status
+          await TrainingModel.updateOne(
+            { _id: entry._id },
+            {
+              $set: {
+                content,
+                dataSize: contentSize,
+                trainingStatus: 1,
+                lastEdit: new Date(),
+                chunkCount: result.totalChunks || 0,
+                "webPage.url": url,
+              },
+            }
+          );
+
+          // 6. Increment currentDataSize (delta: new - old)
+          await Client.updateOne(
+            { userId },
+            { $inc: { currentDataSize: dataSizeDelta } }
+          );
+
+          successCount++;
+        } catch (err) {
+          console.error(`[retrainTrainingData] Error retraining ${url}:`, err);
+          await TrainingModel.updateOne(
+            { _id: entry._id },
+            {
+              $set: {
+                trainingStatus: 2,
+                error: err?.message || "Scraping failed",
+                lastEdit: new Date(),
+              },
+            }
+          );
+          failCount++;
+        }
+      }
+
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
+      });
+
+      console.log(`[retrainTrainingData] Completed: ${successCount} success, ${failCount} failed for user ${userId}`);
+    } catch (error) {
+      console.error("[retrainTrainingData] Job failed:", error);
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
+        message: error?.message,
+      });
+      throw error;
+    }
+  },
+  { connection: redisConfig, concurrency: 1 }
+);
+
+module.exports = { planUpgradeQueue, urlProcessingQueue, deleteTrainingDataQueue, retrainTrainingDataQueue };

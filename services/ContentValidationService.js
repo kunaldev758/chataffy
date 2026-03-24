@@ -25,7 +25,7 @@ class ContentValidationService {
    * @param {string} userId - User ID
    * @returns {Object} Validation result
    */
-  static async validateContent(content, type, userId) {
+  static async validateContent(content, type, userId,agentId) {
     try {
       // Check if content exists
       if (!content || typeof content !== 'string') {
@@ -73,7 +73,7 @@ class ContentValidationService {
 
       // Check plan limits
       const contentSize = Buffer.byteLength(trimmedContent, 'utf8');
-      const sizeCheck = await PlanService.checkDataSizeLimit(userId, contentSize);
+      const sizeCheck = await PlanService.checkDataSizeLimit(userId,agentId, contentSize);
       
       if (!sizeCheck) {
         return {
@@ -221,7 +221,7 @@ class ContentValidationService {
    * @param {string} userId - User ID
    * @returns {Object} Validation result
    */
-  static async validateFAQ(question, answer, userId) {
+  static async validateFAQ(question, answer, userId,agentId) {
     if (!question || !answer) {
       return {
         isValid: false,
@@ -230,7 +230,7 @@ class ContentValidationService {
       };
     }
 
-    const questionValidation = await this.validateContent(question, 'faq', userId);
+    const questionValidation = await this.validateContent(question, 'faq', userId,agentId);
     if (!questionValidation.isValid) {
       return {
         ...questionValidation,
@@ -238,7 +238,7 @@ class ContentValidationService {
       };
     }
 
-    const answerValidation = await this.validateContent(answer, 'faq', userId);
+    const answerValidation = await this.validateContent(answer, 'faq', userId,agentId);
     if (!answerValidation.isValid) {
       return {
         ...answerValidation,
@@ -247,7 +247,7 @@ class ContentValidationService {
     }
 
     const combinedContent = `Question: ${question}\nAnswer: ${answer}`;
-    const combinedValidation = await this.validateContent(combinedContent, 'faq', userId);
+    const combinedValidation = await this.validateContent(combinedContent, 'faq', userId,agentId);
     
     return {
       ...combinedValidation,
@@ -263,8 +263,8 @@ class ContentValidationService {
    * @param {string} userId - User ID
    * @returns {Object} Validation result
    */
-  static async validateFile(content, filename, userId) {
-    const validation = await this.validateContent(content, 'file', userId);
+  static async validateFile(content, filename, userId,agentId) {
+    const validation = await this.validateContent(content, 'file', userId,agentId);
     
     if (!validation.isValid) {
       return validation;

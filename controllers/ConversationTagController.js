@@ -31,12 +31,12 @@ ConversationTagController.getTagById = async (req, res) => {
 // Create a new tag
 ConversationTagController.createTag = async (data) => {
     try {
-      const {name,conversationId, userId} = data;
+      const {name,conversationId, userId, agentId} = data;
       if(!name || !conversationId) {
         throw error;
       }
       const conversation = await Conversation.findById(conversationId)
-      const tag = new ConversationTag({  name,conversation ,userId });
+      const tag = new ConversationTag({  name,conversation ,userId, agentId });
       await tag.save();
       const tags = await ConversationTag.find({ conversation:{_id:conversation._id} });
     return tags;

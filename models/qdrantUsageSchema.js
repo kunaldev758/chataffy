@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const qdrantUsageSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  agentId: { type: mongoose.Schema.Types.ObjectId, ref: "Agent", required: false },
   date: { type: Date, default: Date.now },
   vectorsAdded: { type: Number, default: 0 },
   vectorsDeleted: { type: Number, default: 0 },

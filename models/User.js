@@ -16,6 +16,10 @@ const userSchema = new Schema(
       type: String,
       required: true,
     },
+    phone: {
+      type: String,
+      required: false,
+    },
     email_verified: {
       type: Boolean,
       default: false,
@@ -42,6 +46,10 @@ const userSchema = new Schema(
       type: String,
       enum: ["admin", "client", "agent"],
       default: "client",
+    },
+    isOnboarded: {
+      type: Boolean,
+      default: false,
     },
   },
   { timestamps: true }

@@ -59,12 +59,15 @@ const preserveBody = (req, res, next) => {
 const ChatMessageController = require('../controllers/ChatMessageController');
 const UserController = require('../controllers/UserController');
 const WidgetController = require('../controllers/WidgetController');
-const agentController = require('../controllers/agentController');
+const agentController = require('../controllers/HumanAgentController');
+const AIAgentController = require('../controllers/AIAgentController');
 const superAdminController = require('../controllers/superAdminController');
 const scrapingController = require('../controllers/ScrapingController');
 const PlanAdminController = require('../controllers/PlanAdminController');
 const PlanController = require('../controllers/PlanController');
 const ConversationController = require('../controllers/ConversationController');
+const NotificationController = require('../controllers/NotificationController');
+const { reviseAnswer } = require('../controllers/ReviseAnswerController');
 const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
 
@@ -74,7 +77,7 @@ router.get('/test', (req, res) => {
 });
 
 // Agent invitation acceptance (public)
-router.post('/agents/accept-invite/:token', agentController.acceptInvite);
+router.post('/agents/accept-invite/:token', agentController.acceptInviteHumanAgent);
 
 // Authentication routes (public)
 router.post('/login', UserController.loginUser);
@@ -94,7 +97,8 @@ router.post('/create', superAdminController.createSuperAdmin); // For initial se
 // Protected routes
 router.get('/superadmin/dashboard', verifySuperAdminToken, superAdminController.getDashboardData);
 router.get('/superadmin/clients', verifySuperAdminToken, superAdminController.getAllClients);
-router.get('/superadmin/agent/:clientId', verifySuperAdminToken, superAdminController.getAgent);
+router.get('/superadmin/clients/:clientId/agents', verifySuperAdminToken, superAdminController.getClientAgents);
+router.get('/superadmin/agent/:clientId', verifySuperAdminToken, superAdminController.getClientAgents);
 router.get('/superadmin/cancel/sunscription/:clientId', verifySuperAdminToken, superAdminController.cancelClientSubscription);
 router.get('/superadmin/delete/:userId',verifySuperAdminToken, UserController.deleteUser);
 
@@ -117,12 +121,16 @@ router.post('/logout',middleware, UserController.logoutUser);
 
 //Get Client
 router.post('/client',middleware,UserController.getClient);
+router.post('/client/profile', middleware, UserController.getClientProfile);
+router.post('/client/profile/general', middleware, UserController.updateClientProfileGeneral);
+router.post('/client/profile/password', middleware, UserController.updateClientPassword);
 
 //Update Client Status (updates client's agent record)
 router.post('/clients/status',middleware,UserController.updateClientStatus);
 
 // Scraping management
-router.post('/openaiScrape',middleware, scrapingController.startSitemapScraping);
+router.post('/getSitemapUrls', middleware, scrapingController.getSitemapUrls);
+router.post('/openaiScrape', middleware, scrapingController.startSitemapScraping);
 router.post('/continueAfterUpgrade',middleware, scrapingController.ContinueScrappingAfterUpgrade);
 router.post('/upgradePlan',middleware,scrapingController.upgradePlan); //->check this if in use or not
 // // Create snippet/document
@@ -132,6 +140,10 @@ router.post('/openaiCreateFaq',middleware, scrapingController.createFaq);
 // // Get training list with filtering
 router.get('/getOpenaiTrainingListDetail/:userId',middleware, scrapingController.getScrapingHistory);
 router.get('/getDataField/:id',middleware,scrapingController.getFiledData)
+// Delete training data (runs in background)
+router.post('/deleteTrainingData', middleware, scrapingController.deleteTrainingData);
+// Retrain training data - webpages only (runs in background)
+router.post('/retrainTrainingData', middleware, scrapingController.retrainTrainingData);
 
 
 
@@ -141,30 +153,45 @@ router.post('/getOldConversationMessages',middleware, ChatMessageController.getA
 
 // Enhanced Widget routes
 router.post('/getWidgetToken',middleware, WidgetController.getWidgetToken);
-router.post('/getBasicInfo',middleware, WidgetController.getBasicInfo);
-router.post('/setBasicInfo',middleware, WidgetController.setBasicInfo);
-
 // Logo upload with enhanced validation
-router.post('/uploadLogo/:userId',middleware, upload.single('logo'), WidgetController.uploadLogo);
+router.post('/uploadLogo/:agentId',middleware, upload.single('logo'), WidgetController.uploadLogo);
 
 // Theme settings routes
-router.get('/getThemeSettings/:userId',middleware, WidgetController.getThemeSettings);
+router.get('/getThemeSettings/:agentId',middleware, WidgetController.getThemeSettings);
 router.post('/getThemeSettings',middleware, WidgetController.getThemeSettings); // Alternative POST method
 router.post('/updateThemeSettings',middleware, WidgetController.updateThemeSettings);
 
 // New enhanced widget routes
 router.post('/updateWidgetPosition',middleware, WidgetController.updateWidgetPosition);
+router.post('/widget/toggle-status', middleware, WidgetController.toggleWidgetStatus);
 
 // Agent management routes
-router.post('/agents',middleware, agentController.createAgent);
-router.get('/agents',middleware, agentController.getAllAgents);
-router.get('/agents/:id',middleware, agentController.getAgent);
-router.post('/agents/:id',middleware, agentController.updateAgent);
-router.post('/agents/delete/:id',middleware, agentController.deleteAgent);
-router.post('/agents/:id/status',middleware, agentController.updateAgentStatus);
-router.post('/agents/:id/avatar',middleware, upload.single('avatar'), agentController.uploadAgentAvatar);
+router.post('/agents',middleware, agentController.createHumanAgent);
+router.get('/agents',middleware, agentController.getAllHumanAgents);
+router.get('/agents/:id',middleware, agentController.getHumanAgent);
+router.post('/agents/:id',middleware, agentController.updateHumanAgent);
+router.post('/agents/delete/:id',middleware, agentController.deleteHumanAgent);
+router.post('/agents/:id/status',middleware, agentController.updateHumanAgentStatus);
+router.post('/agents/:id/avatar',middleware, upload.single('avatar'), agentController.uploadHumanAgentAvatar);
+
+// AI Agent (website) management routes
+router.get('/ai-agents', middleware, AIAgentController.getAgents);
+router.post('/ai-agents', middleware, AIAgentController.createAgent);
+router.post('/ai-agents/delete/:agentId', middleware, AIAgentController.deleteAgent);
+router.post('/complete-onboarding', middleware, AIAgentController.completeOnboarding);
+router.get('/agent-settings/:agentId', middleware, AIAgentController.getAgentSettings);
+router.post('/updateAgentSettings', middleware, AIAgentController.updateAgentSettings);
 
 router.post('/sendEmailForOfflineChat', ConversationController.sendEmailForOfflineChatController);
+router.post('/conversations/filter', middleware, ConversationController.getFilteredConversations);
+
+// Revise Answer - store human-corrected Q&A pair as Qdrant vector
+router.post('/revise-answer', middleware, reviseAnswer);
+
+// Notification routes
+router.get('/notifications/agent/:agentId', middleware, NotificationController.getByAgentId);
+router.put('/notifications/:id/seen', middleware, NotificationController.markAsSeen);
+router.put('/notifications/agent/:agentId/seen-all', middleware, NotificationController.markAllAsSeenByAgentId);
 
 // Error handling middleware for multer errors
 router.use((error, req, res, next) => {

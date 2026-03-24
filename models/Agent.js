@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const agentSchema = new mongoose.Schema({
   userId: {
@@ -6,59 +6,93 @@ const agentSchema = new mongoose.Schema({
     required: true,
     ref: "User",
   },
-  name: {
+  website_name: {
     type: String,
-    required: true,
-    trim: true
+    default: '',
+    trim: true,
+  },
+  agentName: {
+    type: String,
+    default: '',
+    trim: true,
   },
   email: {
     type: String,
-    required: true,
-    unique: true,
+    default: '',
     trim: true,
-    lowercase: true
   },
-  password: {
+  phone: {
     type: String,
-    required: true
+    default: '',
+    trim: true,
   },
-  status: {
+  fallbackMessage: {
     type: String,
-    enum: ['pending', 'approved'],
-    default: 'pending'
+    default: '',
+    trim: true,
   },
-  inviteToken: String,
-  inviteTokenExpires: Date,
   isActive: {
     type: Boolean,
-    default: false
+    default: true,
   },
-  lastActive: {
+  lastTrained: {
     type: Date,
-    default: null
+    default: null,
   },
   createdAt: {
     type: Date,
-    default: Date.now
+    default: Date.now,
   },
   updatedAt: {
     type: Date,
-    default: Date.now
+    default: Date.now,
   },
-  avatar: {
+
+  dataTrainingStatus: { type: Number, default: 0 }, // 0-NoCurrentScrapping, 1-RunningScrapping
+
+  scrapingStartTime: { type: Date, default: null }, // Timestamp when scraping started
+
+  pagesAdded: {
+    success: { type: Number, default: 0 },
+    failed: { type: Number, default: 0 },
+    total: { type: Number, default: 0 },
+  },
+
+  isSitemapAdded: { type: Boolean, default: false },
+
+  filesAdded: { type: Number, default: 0 },
+
+  faqsAdded: { type: Number, default: 0 },
+
+  // Onboarding step persistence — tracks which step the user reached so
+  // a page refresh restores the correct screen instead of resetting to 'source'
+  onboardingStep: {
     type: String,
-    default: null
+    enum: ['source', 'train', 'widget'],
+    default: 'source',
   },
-  isClient: {
+  onboardingWebsiteUrl: { type: String, default: '' },
+  onboardingExtractedUrls: { type: [String], default: [] },
+
+  isDeleted: {
     type: Boolean,
-    default: false
-  }
+    default: false,
+  },
+
+  qdrantIndexName: { type: String, required: true, unique: true },
+  qdrantIndexNamePaid: { type: String, required: true, unique: true },
+
+  liveAgentSupport: {
+    type: Boolean,
+    default: false,
+  },
+
 });
 
 // Update the updatedAt timestamp before saving
-agentSchema.pre('save', function(next) {
+agentSchema.pre("save", function (next) {
   this.updatedAt = Date.now();
   next();
 });
 
-module.exports = mongoose.model('Agent', agentSchema); 
+module.exports = mongoose.model("Agent", agentSchema);

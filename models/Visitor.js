@@ -7,6 +7,11 @@ let visitorSchema = new mongoose.Schema(
       required: true,
       ref: "User",
     }, // client
+    agentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: false,
+      ref: "Agent",
+    },
     name: { type: String, required: true },
     visitorId:{type:String},
     visitorDetails: [
@@ -23,7 +28,7 @@ let visitorSchema = new mongoose.Schema(
     ],
     ip: { type: String },
     location: { type: String },
-    is_blocked: { type: Boolean, default: false },
+    // is_blocked: { type: Boolean, default: false },
     lastMessage: { type: String },
   },
   { timestamps: true }

@@ -1,6 +1,7 @@
 const SuperAdmin = require("../models/SuperAdmin");
 const Client = require("../models/Client");
 const Agent = require("../models/Agent");
+const HumanAgent = require("../models/HumanAgent");
 const Conversation = require("../models/Conversation");
 const ChatMessage = require("../models/ChatMessage");
 const PlanService = require("../services/PlanService")
@@ -107,8 +108,9 @@ module.exports.getDashboardData = async (req, res) => {
     // 1. Total Clients
     const totalClients = await Client.countDocuments();
 
-    // 2. Total Agents
-    const totalAgents = await Agent.countDocuments();
+    // 2. AI chatbots (Agent) vs human team (HumanAgent)
+    const totalAiAgents = await Agent.countDocuments({ isDeleted: { $ne: true } });
+    const totalHumanAgents = await HumanAgent.countDocuments();
 
     // 3. Total Active Visitors (open conversations)
     const activeVisitors = await Conversation.countDocuments({
@@ -128,22 +130,34 @@ module.exports.getDashboardData = async (req, res) => {
       createdAt: { $gte: startOfMonth }
     });
 
-    // 5. AI vs Human Chat Ratio
+    // 5. AI vs human-handled chats (humanAgentId = assigned human team member)
     const totalConversations = await Conversation.countDocuments();
-    const aiChats = await Conversation.countDocuments({ aiChat: true });
-    const humanChats = totalConversations - aiChats;
-    
-    const aiChatPercentage = totalConversations > 0 ? ((aiChats / totalConversations) * 100).toFixed(2) : 0;
-    const humanChatPercentage = totalConversations > 0 ? ((humanChats / totalConversations) * 100).toFixed(2) : 0;
+    const humanHandledChats = await Conversation.countDocuments({
+      humanAgentId: { $exists: true, $ne: null },
+    });
+    const aiOnlyChats = totalConversations - humanHandledChats;
 
-    // 7. Additional metrics
-    const approvedAgents = await Agent.countDocuments({ status: "approved" });
-    const activeAgents = await Agent.countDocuments({ isActive: true });
+    const aiChatPercentage =
+      totalConversations > 0 ? ((aiOnlyChats / totalConversations) * 100).toFixed(2) : 0;
+    const humanChatPercentage =
+      totalConversations > 0 ? ((humanHandledChats / totalConversations) * 100).toFixed(2) : 0;
 
-    // 8. Message statistics
+    // 7. Human team + AI chatbot activity
+    const approvedHumanAgents = await HumanAgent.countDocuments({ status: "approved" });
+    const activeHumanAgents = await HumanAgent.countDocuments({ isActive: true });
+    const activeAiAgents = await Agent.countDocuments({ isActive: true, isDeleted: { $ne: true } });
+
+    // 8. Message statistics (align with ChatMessage schema: ai / humanAgent / visitor; legacy bot/agent)
     const totalMessages = await ChatMessage.countDocuments();
-    const botMessages = await ChatMessage.countDocuments({ sender_type: "bot" });
-    const agentMessages = await ChatMessage.countDocuments({ sender_type: "agent" });
+    const aiMessages = await ChatMessage.countDocuments({
+      sender_type: { $in: ["ai", "bot"] },
+    });
+    const humanAgentMessages = await ChatMessage.countDocuments({
+      $or: [
+        { humanAgentId: { $exists: true, $ne: null } },
+        { sender_type: { $in: ["humanAgent", "client", "agent"] } },
+      ],
+    });
     const visitorMessages = await ChatMessage.countDocuments({ sender_type: "visitor" });
 
     // 9. Recent chat activity (last 7 days)
@@ -196,9 +210,10 @@ module.exports.getDashboardData = async (req, res) => {
     const dashboardData = {
       overview: {
         totalClients,
-        totalAgents,
+        totalAiAgents,
+        totalHumanAgents,
         activeVisitors,
-        totalConversations
+        totalConversations,
       },
       chats: {
         today: chatsToday,
@@ -207,24 +222,30 @@ module.exports.getDashboardData = async (req, res) => {
       },
       chatRatio: {
         ai: {
-          count: aiChats,
-          percentage: parseFloat(aiChatPercentage)
+          count: aiOnlyChats,
+          percentage: parseFloat(aiChatPercentage),
         },
         human: {
-          count: humanChats,
-          percentage: parseFloat(humanChatPercentage)
-        }
+          count: humanHandledChats,
+          percentage: parseFloat(humanChatPercentage),
+        },
       },
       agents: {
-        total: totalAgents,
-        approved: approvedAgents,
-        active: activeAgents
+        ai: {
+          total: totalAiAgents,
+          active: activeAiAgents,
+        },
+        human: {
+          total: totalHumanAgents,
+          approved: approvedHumanAgents,
+          active: activeHumanAgents,
+        },
       },
       messages: {
         total: totalMessages,
-        bot: botMessages,
-        agent: agentMessages,
-        visitor: visitorMessages
+        ai: aiMessages,
+        humanAgent: humanAgentMessages,
+        visitor: visitorMessages,
       },
       chartData: {
         last7Days
@@ -264,22 +285,25 @@ module.exports.getAllClients = async (req, res) => {
         return client; // Return client as is if no plan details
       }
 
-      // Fetch total agents
-      const totalAgents = await Agent.find({ userId: client.userId }).countDocuments();
+      const totalAiAgents = await Agent.countDocuments({
+        userId: client.userId,
+        isDeleted: { $ne: true },
+      });
+      const totalHumanAgents = await HumanAgent.countDocuments({ userId: client.userId });
 
-      // Fetch total conversations
-      const totalConversations = await Conversation.find({ userId: client.userId }).countDocuments();
+      const totalConversations = await Conversation.countDocuments({ userId: client.userId });
 
       const currentDataUsed = client.currentDataSize;
 
-      // Add usageDetails to client
       client.usageDetails = {
         maxAgents: planDetails.limits.maxAgentsPerAccount,
-        totalAgents,
+        totalAgents: totalAiAgents,
+        totalAiAgents,
+        totalHumanAgents,
         maxStorage: planDetails.limits.maxStorage,
         currentDataUsed,
         maxQueries: planDetails.limits.maxQueries,
-        totalConversations
+        totalConversations,
       };
 
       return client;
@@ -295,28 +319,41 @@ module.exports.getAllClients = async (req, res) => {
   }
 };
 
-module.exports.getAgent = async (req,res) => {
-  try{
+/** AI chatbots (Agent) + human team (HumanAgent) for a client account */
+module.exports.getClientAgents = async (req, res) => {
+  try {
     const { clientId } = req.params;
     const client = await Client.findById(clientId);
-            if (!client) {
-              return res.status(404).json({ message: "Client not found" });
-            }
-    const agents = await Agent.find({ userId: client.userId })
-      .select('-password')
-      .sort({ createdAt: -1 });
+    if (!client) {
+      return res.status(404).json({ message: "Client not found" });
+    }
 
-      res.status(200).json({
-        success: true,
-        data: {
-          agents
-        }
-      });
-  }catch(err){
-    console.error("Error fetching agent:", error);
-    res.status(500).json({ message: "Error fetching agent" });
+    const [aiAgents, humanAgents] = await Promise.all([
+      Agent.find({ userId: client.userId, isDeleted: { $ne: true } })
+        .select(
+          "agentName website_name email phone isActive liveAgentSupport lastTrained createdAt qdrantIndexName"
+        )
+        .sort({ createdAt: -1 })
+        .lean(),
+      HumanAgent.find({ userId: client.userId })
+        .select("-password")
+        .populate("assignedAgents", "agentName website_name _id")
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        aiAgents,
+        humanAgents,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching client agents:", error);
+    res.status(500).json({ message: "Error fetching client agents" });
   }
-}
+};
 
 
 module.exports.cancelClientSubscription = async (req, res) => {

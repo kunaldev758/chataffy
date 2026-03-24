@@ -1,8 +1,10 @@
 require("dotenv").config();
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const Client = require('../models/Client');
 const Widget = require('../models/Widget');
-const Agent = require('../models/Agent');
+const Agent = require('../models/Agent.js');
+const HumanAgent = require('../models/HumanAgent.js');
 const path = require('path');
 const fs = require('fs');
 const nodemailer = require('nodemailer');
@@ -49,55 +51,52 @@ UserController.createUser = async (req, res) => {
     user.verification_token = emailVerificationToken; // Store the token in the user document    
     const userId = user.id;
     await user.save();
+    //create agent — set qdrant fields before first save (they are required)
+    const agentId = new mongoose.Types.ObjectId();
+    const agent = new Agent({
+      _id: agentId,
+      userId: userId,
+      qdrantIndexName: `${userId}-${agentId}`,
+      qdrantIndexNamePaid: `${crypto.randomBytes(16).toString('hex')}-${agentId}`,
+    });
+    await agent.save();
     // Generate client specific details
     const client = new Client({userId});
-    client.qdrantIndexName = `${userId}`;
-    client.qdrantIndexNamePaid = crypto.randomBytes(16).toString('hex');
     client.email = email;
     await client.save();
     // Generate widget token and insert in widget table
-    const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
-    const widget = new Widget({userId,widgetToken});
+    const widgetToken = crypto.randomBytes(8).toString('hex') + userId + agent._id;
+    const widget = new Widget({userId,widgetToken,agentId:agent._id});
     await widget.save();
 
     // Create agent for client
     try {
       // Check if agent already exists with this email (email is unique)
-      const existingAgent = await Agent.findOne({ email });
+      const existingAgent = await HumanAgent.findOne({ email });
       if (!existingAgent) {
-        const agentPassword = crypto.randomBytes(16).toString('hex');
-        const hashedPassword = await bcrypt.hash(agentPassword, 10);
-        const agent = new Agent({
+        const humanAgentPassword = crypto.randomBytes(16).toString('hex');
+        const hashedPassword = await bcrypt.hash(humanAgentPassword, 10);
+        const humanAgent = new HumanAgent({
           name: 'client',
           email: email,
           password: hashedPassword,
           userId: userId,
           status: 'approved',
           isClient: true,
-          avatar: '/uploads/default-avatar.png' // Default avatar path
+          avatar: '/uploads/default-avatar.png',
+          assignedAgents: [agent._id] // Default avatar path
         });
-        await agent.save();
-      } else {
-        // If agent exists, update it to be a client agent if needed
-        if (!existingAgent.isClient || existingAgent.userId.toString() !== userId.toString()) {
-          existingAgent.isClient = true;
-          existingAgent.userId = userId;
-          existingAgent.status = 'approved';
-          if (!existingAgent.avatar) {
-            existingAgent.avatar = '/uploads/default-avatar.png';
-          }
-          await existingAgent.save();
-        }
-      }
-    } catch (agentError) {
+        await humanAgent.save();
+      } 
+    } catch (humanAgentError) {
       // Log error but don't fail client creation if agent creation fails
-      console.error('Error creating/updating client agent:', agentError);
-      console.error('Agent error details:', {
-        message: agentError.message,
-        code: agentError.code,
-        keyPattern: agentError.keyPattern,
-        keyValue: agentError.keyValue,
-        stack: agentError.stack
+      console.error('Error creating/updating client agent:', humanAgentError);
+      console.error('HumanAgent error details:', {
+        message: humanAgentError.message,
+        code: humanAgentError.code,
+        keyPattern: humanAgentError.keyPattern,
+        keyValue: humanAgentError.keyValue,
+        stack: humanAgentError.stack
       });
     }
 
@@ -117,6 +116,7 @@ UserController.createUser = async (req, res) => {
       return res.status(200).json({ status_code: 200, status: true, message: 'User registered. Check your email for verification.' });
     });
   } catch (error) {
+    console.error("Error creating user:", error);
     commonHelper.logErrorToFile(error);
     res.status(500).json({ status_code: 500, status: false, message: 'User creation failed' });
   }
@@ -157,11 +157,22 @@ UserController.loginUser = async (req, res) => {
     user.auth_token = token;
     await user.save();
 
+    // Fetch all AI agents for this user
+    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id agentName isActive');
+
     if (req.io) {
       req.io.emit('user-logged-in', { userId: user._id });
     }
     
-    res.json({ status_code: 200, status: true, token,userId:user?._id, message: 'Login successful' });
+    res.json({
+      status_code: 200,
+      status: true,
+      token,
+      userId: user?._id,
+      isOnboarded: user.isOnboarded,
+      agents,
+      message: 'Login successful'
+    });
   } catch (error) {
     commonHelper.logErrorToFile(error);
     res.status(500).json({ status_code: 500, status: false, message: 'Login failed' });
@@ -223,7 +234,7 @@ UserController.getClient = async (req,res) => {
     }
 
     // Also get the client's agent record (where isClient: true)
-    const Agent = require('../models/Agent');
+    const Agent = require('../models/HumanAgent.js');
     const clientAgent = await Agent.findOne({ userId: userId, isClient: true }).select('-password');
     
     // Include agent data in response if found
@@ -254,7 +265,7 @@ UserController.updateClientStatus = async (req, res) => {
     }
 
     // Find the client's agent record (where isClient: true)
-    const Agent = require('../models/Agent');
+    const Agent = require('../models/HumanAgent.js');
     const clientAgent = await Agent.findOne({ userId: userId, isClient: true });
 
     if (!clientAgent) {
@@ -268,6 +279,7 @@ UserController.updateClientStatus = async (req, res) => {
     // Emit socket event to notify about client status change
     const appEvents = require("../events");
     const updatedClientData = {
+      id: clientAgent._id,
       _id: clientAgent._id,
       userId: clientAgent.userId,
       email: clientAgent.email,
@@ -275,6 +287,7 @@ UserController.updateClientStatus = async (req, res) => {
       isActive: clientAgent.isActive,
       lastActive: clientAgent.lastActive,
       isClient: true,
+      assignedAgents: clientAgent.assignedAgents,
     };
 
     // Emit to the client's room (userId) so inbox can update
@@ -356,35 +369,43 @@ UserController.googleOAuth = async (req, res) => {
 
       const userId = user.id;
       await user.save();
+      const agentId = new mongoose.Types.ObjectId();
+      const agent = new Agent({
+        _id: agentId,
+        userId: userId,
+        qdrantIndexName: `${userId}-${agentId}`,
+        qdrantIndexNamePaid: `${crypto.randomBytes(16).toString('hex')}-${agentId}`,
+      });
+      await agent.save();
 
       // Create related Client and Widget like in createUser
       const client = new Client({ userId });
-      client.qdrantIndexName = `${userId}`;
-      client.qdrantIndexNamePaid = crypto.randomBytes(16).toString('hex');
+      
       client.email = email;
       await client.save();
 
-      const widgetToken = crypto.randomBytes(8).toString('hex') + userId;
-      const widget = new Widget({ userId, widgetToken });
+      const widgetToken = crypto.randomBytes(8).toString('hex') + userId + agent._id;
+      const widget = new Widget({ userId, widgetToken, agentId: agent._id });
       await widget.save();
 
       // Create agent for client
       try {
         const agentPassword = crypto.randomBytes(16).toString('hex');
         const hashedPassword = await bcrypt.hash(agentPassword, 10);
-        const agent = new Agent({
+        const humanAgent = new HumanAgent({
           name: 'client',
           email: email,
           password: hashedPassword,
           userId: userId,
           status: 'approved',
           isClient: true,
-          avatar: '/uploads/default-avatar.png' // Default avatar path
+          avatar: '/uploads/default-avatar.png', // Default avatar path
+          assignedAgents: [agent._id] // Default avatar path
         });
-        await agent.save();
-      } catch (agentError) {
+        await humanAgent.save();
+      } catch (humanAgentError) {
         // Log error but don't fail client creation if agent creation fails
-        console.error('Error creating client agent:', agentError);
+        console.error('Error creating client agent:', humanAgentError);
         console.error('Agent error details:', {
           message: agentError.message,
           code: agentError.code,
@@ -402,6 +423,9 @@ UserController.googleOAuth = async (req, res) => {
     user.auth_token = appToken;
     await user.save();
 
+    // Fetch all AI agents for this user
+    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id agentName isActive');
+
     if (req.io) {
       req.io.emit('user-logged-in', { userId: user._id });
     }
@@ -412,6 +436,8 @@ UserController.googleOAuth = async (req, res) => {
       token: appToken,
       role: user.role,
       userId: user?._id,
+      isOnboarded: user.isOnboarded,
+      agents,
       isNewUser
     });
   } catch (error) {
@@ -457,4 +483,163 @@ function getJson(url, headers = {}) {
     }
   });
 }
+
+function isStrongPassword(pw) {
+  if (typeof pw !== 'string' || pw.length < 8) return false;
+  if (!/[A-Z]/.test(pw)) return false;
+  if (!/[0-9]/.test(pw)) return false;
+  if (!/[^A-Za-z0-9]/.test(pw)) return false;
+  return true;
+}
+
+/** Dashboard client profile: HumanAgent (isClient) display + User account fields */
+UserController.getClientProfile = async (req, res) => {
+  try {
+    const userId = req.body.userId;
+    if (!userId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+    }
+    const user = await User.findById(userId).select('-password -verification_token -auth_token');
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+    }
+    const clientAgent = await HumanAgent.findOne({ userId, isClient: true }).select('-password');
+    if (!clientAgent) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'Client profile not found' });
+    }
+    return res.json({
+      status_code: 200,
+      status: true,
+      clientAgent: {
+        _id: clientAgent._id,
+        name: clientAgent.name,
+        avatar: clientAgent.avatar,
+        email: clientAgent.email,
+      },
+      user: {
+        email: user.email,
+        phone: user.phone || '',
+        provider: user.provider || 'local',
+      },
+    });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to load profile' });
+  }
+};
+
+/** Name on HumanAgent (isClient); email + phone on User (sync HumanAgent + Client email) */
+UserController.updateClientProfileGeneral = async (req, res) => {
+  try {
+    const userId = req.body.userId;
+    const { name, email, phone } = req.body;
+    if (!userId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+    }
+    const user = await User.findById(userId);
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+    }
+    const clientAgent = await HumanAgent.findOne({ userId, isClient: true });
+    if (!clientAgent) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'Client profile not found' });
+    }
+
+    if (typeof name === 'string' && name.trim()) {
+      clientAgent.name = name.trim();
+    }
+
+    if (phone !== undefined) {
+      const p = phone === null || phone === '' ? undefined : String(phone).trim();
+      user.phone = p;
+    }
+
+    if (email !== undefined && String(email).trim()) {
+      const normalized = String(email).toLowerCase().trim();
+      const emailTaken = await User.findOne({ email: normalized, _id: { $ne: userId } });
+      if (emailTaken) {
+        return res.status(400).json({ status_code: 400, status: false, message: 'Email is already in use' });
+      }
+      user.email = normalized;
+      clientAgent.email = normalized;
+      await Client.updateOne({ userId }, { $set: { email: normalized } });
+    }
+
+    await user.save();
+    await clientAgent.save();
+
+    const appEvents = require("../events");
+    const profileSocketPayload = {
+      _id: clientAgent._id,
+      userId: clientAgent.userId,
+      name: clientAgent.name,
+      email: clientAgent.email,
+      avatar: clientAgent.avatar,
+      isClient: true,
+      phone: user.phone || '',
+    };
+    if (clientAgent.userId) {
+      appEvents.emit("userEvent", clientAgent.userId.toString(), "client-profile-updated", profileSocketPayload);
+    }
+    appEvents.emit("userEvent", clientAgent._id.toString(), "client-profile-updated", profileSocketPayload);
+
+    return res.json({
+      status_code: 200,
+      status: true,
+      message: 'Profile updated',
+      clientAgent: {
+        _id: clientAgent._id,
+        name: clientAgent.name,
+        avatar: clientAgent.avatar,
+        email: clientAgent.email,
+      },
+      user: {
+        email: user.email,
+        phone: user.phone || '',
+      },
+    });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to update profile' });
+  }
+};
+
+/** Password change on User only */
+UserController.updateClientPassword = async (req, res) => {
+  try {
+    const userId = req.body.userId;
+    const { currentPassword, newPassword } = req.body;
+    if (!userId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+    }
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'Current and new password are required' });
+    }
+    if (newPassword !== req.body.confirmPassword && req.body.confirmPassword !== undefined) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'New passwords do not match' });
+    }
+    if (!isStrongPassword(newPassword)) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: 'Password must be at least 8 characters and include uppercase, number, and symbol',
+      });
+    }
+    const user = await User.findById(userId);
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+    }
+    const ok = await user.comparePassword(currentPassword);
+    if (!ok) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'Current password is incorrect' });
+    }
+    user.password = newPassword;
+    await user.save();
+    return res.json({ status_code: 200, status: true, message: 'Password updated successfully' });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to update password' });
+  }
+};
+
 module.exports = UserController;

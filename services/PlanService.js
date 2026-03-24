@@ -2,6 +2,7 @@
 const Client = require("../models/Client");
 const Plan = require("../models/Plan");
 const Agent = require("../models/Agent");
+const HumanAgent = require("../models/HumanAgent");
 // const Chats = require("../models/Conversation");
 const Conversation = require("../models/Conversation");
 // const QdrantVectorStoreManager = require("./QdrantService");
@@ -89,7 +90,7 @@ class PlanService {
     }
   }
 
-  static async checkDataSizeLimit(userId, contentSize) {
+  static async checkDataSizeLimit(userId,agentId, contentSize) {
     const client = await Client.findOne({userId});
     const plan = await PlanService.getUserPlan(userId);
 
@@ -102,6 +103,10 @@ class PlanService {
     } else {
       await Client.updateOne(
         { userId },
+        { $inc: { currentDataSize: contentSize } }
+      );
+      await Agent.updateOne(
+        { _id: agentId },
         { $inc: { currentDataSize: contentSize } }
       );
       return true;
@@ -141,11 +146,18 @@ class PlanService {
       // Migrate data from free users collection to main collection if upgrading from free
       if (oldPlan.name === 'free' && newPlanName !== 'free') {
 
-        await planUpgradeQueue.add("migrateUserData", {
-          userId,
-          sourceCollection: updatedClient.qdrantIndexName,
-          targetCollection: updatedClient.qdrantIndexNamePaid
-        });
+        // Migrate data for each agent of this user
+        const agents = await Agent.find({ userId });
+        for (const agent of agents) {
+          if (agent.qdrantIndexName && agent.qdrantIndexNamePaid) {
+            await planUpgradeQueue.add("migrateUserData", {
+              userId,
+              agentId: agent._id,
+              sourceCollection: agent.qdrantIndexName,
+              targetCollection: agent.qdrantIndexNamePaid
+            });
+          }
+        }
         // await this.migrateFreeUserData(userId);
         // // Qdrant migration
         // const sourceCollection = updatedClient.qdrantIndexName;
@@ -166,10 +178,13 @@ class PlanService {
     try {
       // --- AGENTS USAGE ---
       let totalAgents = 0;
+      let totalHumanAgents = 0;
       try {
-        totalAgents = await Agent.countDocuments({ userId , isClient: false });
+        totalAgents = await Agent.countDocuments({ userId, isDeleted: false });
+        totalHumanAgents = await HumanAgent.countDocuments({ userId, isDeleted: false, isClient: false });
       } catch (e) {
         totalAgents = 0;
+        totalHumanAgents = 0;
       }
 
       let totalChats = 0;
@@ -212,6 +227,7 @@ class PlanService {
       return {
           totalAgents,
           totalChats,
+          totalHumanAgents,
       };
     } catch (error) {
       console.error('Error getting plan usage:', error);
@@ -242,6 +258,15 @@ class PlanService {
           }
           break;
         }
+        case 'add_human_agent': {
+          const maxHumanAgents = plan.limits?.maxHumanAgentsPerAccount || 1;
+          checks.canAddHumanAgents = usage.totalHumanAgents < maxHumanAgents;
+          if (!checks.canAddHumanAgents) {
+            checks.message = `Cannot add human agent. Plan limit: ${maxHumanAgents}, Current: ${usage.totalHumanAgents}`;
+            checks.upgradeSuggested = true;
+          }
+          break;
+        }
         case 'query': {
           const maxQueries = plan.limits?.maxQueries || 1000;
           checks.canMakeQueries = usage.totalChats < maxQueries;
@@ -262,6 +287,7 @@ class PlanService {
       return {
         canMakeQueries: false,
         canAddAgents: false,
+        canAddHumanAgents: false,
         message: 'Error checking plan limits',
         upgradeSuggested: false
       };

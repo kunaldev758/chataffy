@@ -19,20 +19,21 @@ ChatMessageController.getRecentChatMessages = async (conversation_id) => {
     throw error;
   }
 };
-// Get all chat messages
-const getAllChatMessages = async (visitor_id) => {
+// Get all chat messages (optionally scoped by agentId for multi-agent support)
+const getAllChatMessages = async (visitor_id, agentId) => {
   try {
     let chatMessages;
     if (visitor_id) {
-      const conversation_id = await Conversation.findOne({
-        visitor: visitor_id,
-        conversationOpenStatus: "open",
-      });
+      const query = { visitor: visitor_id, conversationOpenStatus: "open" };
+      if (agentId != null) query.agentId = agentId;
+      const conversation = await Conversation.findOne(query);
+      const conversation_id = conversation?._id;
       chatMessages = await ChatMessage.find({ conversation_id })
-        .populate('agentId', 'name avatar isClient')
+        .populate('humanAgentId', 'name avatar isClient')
+        .populate({ path: 'replyTo', select: 'sender message createdAt sender_type humanAgentId', populate: { path: 'humanAgentId', select: 'name isClient' } })
         .lean();
     } else {
-      throw new error();
+      throw new Error("visitor_id is required");
     }
     return chatMessages;
   } catch (error) {
@@ -72,7 +73,8 @@ ChatMessageController.getAllOldChatMessages = async (req, res) => {
     let chatMessages;
     if (conversation_id) {
       chatMessages = await ChatMessage.find({ conversation_id })
-        .populate('agentId', 'name avatar isClient')
+        .populate('humanAgentId', 'name avatar isClient')
+        .populate({ path: 'replyTo', select: 'sender message createdAt sender_type humanAgentId', populate: { path: 'humanAgentId', select: 'name isClient' } })
         .lean();
       
       // Get conversation feedback data
@@ -106,8 +108,10 @@ ChatMessageController.createChatMessage = async (
   sender_type,
   message,
   userId,
+  agentId,
   sources = undefined,
-  agentId = undefined
+  humanAgentId = undefined,
+  replyTo = undefined
 ) => {
   try {
     const chatMessage = new ChatMessage({
@@ -117,7 +121,9 @@ ChatMessageController.createChatMessage = async (
       conversation_id,
       infoSources: sources,
       userId,
-      agentId: sender_type === 'agent' ? agentId : undefined,
+      agentId,
+      humanAgentId: (sender_type === 'humanAgent' || sender_type === 'client') ? humanAgentId : undefined,
+      replyTo: replyTo || undefined,
     });
     await chatMessage.save();
     return chatMessage;
@@ -152,7 +158,9 @@ ChatMessageController.addNoteToChat = async (
   message,
   conversation_id,
   userId,
-  agentId = undefined
+  agentId,
+  humanAgentId,
+  replyTo = undefined,
 ) => {
   try {
     const chatMessage = new ChatMessage({
@@ -163,7 +171,9 @@ ChatMessageController.addNoteToChat = async (
       infoSources: undefined,
       is_note: true,
       userId,
-      agentId: sender_type === 'agent' ? agentId : undefined,
+      agentId,
+      humanAgentId: (sender_type === 'humanAgent' || sender_type === 'client') ? humanAgentId : undefined,
+      replyTo: replyTo || undefined,
     });
     await chatMessage.save();
     return chatMessage;

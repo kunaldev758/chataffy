@@ -10,21 +10,21 @@ const clientSchema = new mongoose.Schema(
       lowercase: true,
     },
 
-    dataTrainingStatus: { type: Number, default: 0 }, // 0-NoCurrentScrapping, 1-RunningScrapping
+    // dataTrainingStatus: { type: Number, default: 0 }, // 0-NoCurrentScrapping, 1-RunningScrapping
 
-    scrapingStartTime: { type: Date, default: null }, // Timestamp when scraping started
+    // scrapingStartTime: { type: Date, default: null }, // Timestamp when scraping started
 
-    pagesAdded: {
-      success: { type: Number, default: 0 },
-      failed: { type: Number, default: 0 },
-      total: { type: Number, default: 0 },
-    },
+    // pagesAdded: {
+    //   success: { type: Number, default: 0 },
+    //   failed: { type: Number, default: 0 },
+    //   total: { type: Number, default: 0 },
+    // },
 
-    isSitemapAdded: { type: Boolean, default: false },
+    // isSitemapAdded: { type: Boolean, default: false },
 
-    filesAdded: { type: Number, default: 0 },
+    // filesAdded: { type: Number, default: 0 },
 
-    faqsAdded: { type: Number, default: 0 },
+    // faqsAdded: { type: Number, default: 0 },
 
     currentDataSize: { type: Number, default: 0 },
 
@@ -34,8 +34,8 @@ const clientSchema = new mongoose.Schema(
       chatLimitExceeded: { type: Boolean, default: false },
     },
 
-    qdrantIndexName: { type: String, required: true, unique: true },
-    qdrantIndexNamePaid: { type: String, required: true, unique: true },
+    // qdrantIndexName: { type: String, required: true, unique: true },
+    // qdrantIndexNamePaid: { type: String, required: true, unique: true },
 
     plan: {
       type: String,
@@ -69,10 +69,6 @@ const clientSchema = new mongoose.Schema(
       default: 0,
     },
     isDeleted: {
-      type: Boolean,
-      default: false,
-    },
-    liveAgentSupport: {
       type: Boolean,
       default: false,
     },

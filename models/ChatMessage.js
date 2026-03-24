@@ -9,7 +9,7 @@ const chatMessageSchema = new Schema({
   },
   sender_type: {
     type: String,
-    enum: ['visitor', 'agent', 'assistant', 'user','bot', 'system'],
+    enum: ['visitor', 'client','ai', 'system', 'humanAgent', 'agent-connect'],
     required: true,
   },
   is_note:{
@@ -21,18 +21,29 @@ const chatMessageSchema = new Schema({
     required: true,
   },
   infoSources: {
-    type: [String],
+    type: [mongoose.Schema.Types.Mixed],
+    default: undefined,
   },
   conversation_id: {
     type: Schema.Types.ObjectId,
     ref: 'Conversation',
     required: true,
   },
+  humanAgentId: {
+    type: Schema.Types.ObjectId,
+    ref: 'HumanAgent',
+    required: false,
+  },
   agentId: {
     type: Schema.Types.ObjectId,
     ref: 'Agent',
     required: false,
-  }
+  },
+  replyTo: {
+    type: Schema.Types.ObjectId,
+    ref: 'ChatMessage',
+    required: false,
+  },
 },
 { timestamps: true }
 );

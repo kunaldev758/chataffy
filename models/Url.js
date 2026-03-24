@@ -10,6 +10,11 @@ const urlSchema = new mongoose.Schema({
         ref: "User",
         required: true
     },
+    agentId: {
+        type: mongoose.Schema.Types.ObjectId,
+        required: false,
+        ref: "Agent",
+      },
     trainStatus: {
         type: Number,
         enum: [0, 1, 2], // 0-untrained, 1-trained, 2-error

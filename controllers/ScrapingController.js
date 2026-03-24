@@ -9,7 +9,11 @@ const appEvents = require("../events.js");
 const axios = require("axios");
 const xml2js = require("xml2js");
 const cheerio = require("cheerio");
-const { urlProcessingQueue } = require("../services/jobService.js");
+const { urlProcessingQueue, deleteTrainingDataQueue, retrainTrainingDataQueue } = require("../services/jobService.js");
+const Agent = require("../models/Agent.js");
+const Widget = require("../models/Widget.js");
+const fs = require("fs");
+const path = require("path");
 
 class ScrapingController {
   constructor() {
@@ -18,17 +22,19 @@ class ScrapingController {
       this.ContinueScrappingAfterUpgrade.bind(this);
     this.upgradePlan = this.upgradePlan.bind(this);
     this.getScrapingHistory = this.getScrapingHistory.bind(this);
+    this.getSitemapUrls = this.getSitemapUrls.bind(this);
   }
 
 
   // Method 1: Simple Bulk Insert (Recommended for most cases)
-async bulkInsertUrls(userId, urls) {
+async bulkInsertUrls(userId,agentId, urls) {
   try {
     console.log(`🚀 Bulk inserting ${urls.length} URLs...`);
     const startTime = Date.now();
 
     const urlDocuments = urls.map(url => ({
       userId: userId,
+      agentId: agentId,
       url: url,
       trainStatus: 0,
       createdAt: new Date(),
@@ -54,88 +60,6 @@ async bulkInsertUrls(userId, urls) {
     throw error;
   }
 }
-
-// Method 2: Chunked Insert (For very large datasets > 10k URLs)
-// async chunkedBulkInsert(userId, urls, chunkSize = 1000) {
-//   try {
-//     console.log(`🔄 Chunked insert: ${urls.length} URLs in ${chunkSize} chunks`);
-//     const startTime = Date.now();
-    
-//     let totalInserted = 0;
-//     const totalChunks = Math.ceil(urls.length / chunkSize);
-
-//     for (let i = 0; i < urls.length; i += chunkSize) {
-//       const chunk = urls.slice(i, i + chunkSize);
-//       const chunkNumber = Math.floor(i / chunkSize) + 1;
-      
-//       console.log(`📦 Chunk ${chunkNumber}/${totalChunks} (${chunk.length} URLs)`);
-      
-//       const urlDocuments = chunk.map(url => ({
-//         userId: userId,
-//         url: url,
-//         trainStatus: 0,
-//         createdAt: new Date(),
-//         updatedAt: new Date()
-//       }));
-
-//       try {
-//         const result = await Url.insertMany(urlDocuments, { 
-//           ordered: false,
-//           rawResult: true 
-//         });
-//         totalInserted += result.insertedCount;
-        
-//       } catch (chunkError) {
-//         if (chunkError.code === 11000) {
-//           totalInserted += chunkError.result?.nInserted || 0;
-//         }
-//         console.log(`⚠️ Chunk ${chunkNumber} partial success`);
-//       }
-//     }
-
-//     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-//     console.log(`🎯 Completed: ${totalInserted}/${urls.length} in ${duration}s`);
-//     return totalInserted;
-
-//   } catch (error) {
-//     console.error('❌ Chunked insert failed:', error.message);
-//     throw error;
-//   }
-// }
-
-// // Method 3: Upsert Approach (Update existing, insert new)
-// async upsertUrls(userId, urls) {
-//   try {
-//     console.log(`🔄 Upserting ${urls.length} URLs...`);
-//     const startTime = Date.now();
-
-//     const operations = urls.map(url => ({
-//       updateOne: {
-//         filter: { userId: userId, url: url },
-//         update: { 
-//           $set: { updatedAt: new Date() },
-//           $setOnInsert: { 
-//             userId: userId, 
-//             url: url, 
-//             trainStatus: 0, 
-//             createdAt: new Date() 
-//           }
-//         },
-//         upsert: true
-//       }
-//     }));
-
-//     const result = await Url.bulkWrite(operations, { ordered: false });
-    
-//     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-//     console.log(`✅ Upserted: ${result.upsertedCount} new, ${result.modifiedCount} updated in ${duration}s`);
-//     return result;
-
-//   } catch (error) {
-//     console.error('❌ Upsert failed:', error.message);
-//     throw error;
-//   }
-// }
 
   async extractUrlsFromSitemap(sitemapUrl) {
     try {
@@ -182,7 +106,7 @@ async bulkInsertUrls(userId, urls) {
               try {
                 const found = await this.extractUrlsFromSitemap(smUrl);
                 urls.push(...found);
-                if (urls.length >= 10000) break;
+                if (urls.length >= 1500) break;
               } catch (e) {
                 console.warn(`Failed to extract from robots sitemap ${smUrl}: ${e.message}`);
               }
@@ -197,7 +121,7 @@ async bulkInsertUrls(userId, urls) {
                 .map((url) => url.trim())
                 .filter((url, index, self) => self.indexOf(url) === index);
               console.log(`(robots.txt) Cleaned URLs: ${originalCount} -> ${urls.length}`);
-              if (urls.length > 10000) urls = urls.slice(0, 10000);
+              if (urls.length > 1500) urls = urls.slice(0, 1500);
               return urls;
             }
           }
@@ -215,7 +139,7 @@ async bulkInsertUrls(userId, urls) {
           "/sitemap/news.xml",
         ];
         for (const path of commonSitemapPaths) {
-          if (urls.length >= 10000) break;
+          if (urls.length >= 1500) break;
           const candidate = `${origin}${path}`;
           try {
             const found = await this.extractUrlsFromSitemap(candidate);
@@ -232,7 +156,7 @@ async bulkInsertUrls(userId, urls) {
             .map((url) => url.trim())
             .filter((url, index, self) => self.indexOf(url) === index);
           console.log(`(common paths) Cleaned URLs: ${originalCount} -> ${urls.length}`);
-          if (urls.length > 10000) urls = urls.slice(0, 10000);
+          if (urls.length > 1500) urls = urls.slice(0, 1500);
           return urls;
         }
 
@@ -266,7 +190,7 @@ async bulkInsertUrls(userId, urls) {
                 .map((url) => url.trim())
                 .filter((url, index, self) => self.indexOf(url) === index);
               console.log(`(homepage) Cleaned URLs: ${originalCount} -> ${urls.length}`);
-              if (urls.length > 10000) urls = urls.slice(0, 10000);
+              if (urls.length > 1500) urls = urls.slice(0, 1500);
               return urls;
             }
           }
@@ -317,8 +241,8 @@ async bulkInsertUrls(userId, urls) {
       if (result.urlset && result.urlset.url) {
         urls = result.urlset.url.map((urlObj) => urlObj.loc[0]);
         console.log(`Found ${urls.length} URLs in regular sitemap: ${sitemapUrl}`);
-        if (urls.length >= 10000) {
-          urls = urls.slice(0, 10000); // Take only first 5000 URLs
+        if (urls.length >= 1500) {
+          urls = urls.slice(0, 1500); // Take only first 5000 URLs
           console.log(`URL limit reached. Returning first 5000 URLs from sitemap: ${sitemapUrl}`);
           return urls;
         }
@@ -333,7 +257,7 @@ async bulkInsertUrls(userId, urls) {
   
         // Recursively fetch URLs from each sitemap with better error handling
         for (const nestedSitemapUrl of sitemapUrls) {
-          if (urls.length >= 10000) {
+          if (urls.length >= 1500) {
             console.log(`URL limit of 5000 reached. Stopping sitemap processing.`);
             break;
           }
@@ -341,8 +265,8 @@ async bulkInsertUrls(userId, urls) {
             const nestedUrls = await this.extractUrlsFromSitemap(nestedSitemapUrl);
             urls.push(...nestedUrls);
             console.log(`Successfully extracted ${nestedUrls.length} URLs from nested sitemap: ${nestedSitemapUrl}`);
-            if (urls.length >= 10000) {
-              urls = urls.slice(0, 10000); // Trim to exactly 5000 URLs
+            if (urls.length >= 1500) {
+              urls = urls.slice(0, 1500); // Trim to exactly 5000 URLs
               console.log(`URL limit of 5000 reached after processing nested sitemap. Stopping and returning 5000 URLs.`);
               return urls;
             }
@@ -367,8 +291,8 @@ async bulkInsertUrls(userId, urls) {
   
       console.log(`Cleaned URLs: ${originalCount} -> ${urls.length} (removed ${originalCount - urls.length} invalid/duplicate URLs)`);
 
-      if (urls.length > 10000) {
-        urls = urls.slice(0, 10000);
+      if (urls.length > 1500) {
+        urls = urls.slice(0, 1500);
         console.log(`Final URL count exceeded 5000 after cleaning. Trimmed to exactly 5000 URLs.`);
       }
       
@@ -390,26 +314,425 @@ async bulkInsertUrls(userId, urls) {
     }
   }
 
+  async fetchBrandColors(websiteUrl) {
+    try {
+      let normalizedUrl = websiteUrl;
+      if (
+        normalizedUrl &&
+        typeof normalizedUrl === "string" &&
+        !normalizedUrl.startsWith("http://") &&
+        !normalizedUrl.startsWith("https://")
+      ) {
+        normalizedUrl = `https://${normalizedUrl.trim()}`;
+      }
+
+      const parsed = new URL(normalizedUrl);
+      const origin = parsed.origin;
+
+      const response = await axios.get(origin, {
+        timeout: 15000,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
+      });
+
+      if (response.status !== 200 || typeof response.data !== "string") {
+        return [];
+      }
+
+      const $ = cheerio.load(response.data);
+
+      // ── Color conversion helpers ──────────────────────────────────────────
+
+      const normalizeHex = (v) => {
+        if (!v) return null;
+        const c = v.trim().toLowerCase();
+        if (!c.startsWith("#")) return null;
+        if (c.length === 4)
+          return "#" + c[1] + c[1] + c[2] + c[2] + c[3] + c[3];
+        if (c.length === 7) return c;
+        return null;
+      };
+
+      const rgbToHex = (rgb) => {
+        if (!rgb) return null;
+        const nums = rgb.match(/\d+/g);
+        if (!nums || nums.length < 3) return null;
+        const [r, g, b] = nums.slice(0, 3).map((n) => Math.max(0, Math.min(255, +n)));
+        return "#" + [r, g, b].map((n) => n.toString(16).padStart(2, "0")).join("");
+      };
+
+      const hslToHex = (hsl) => {
+        if (!hsl) return null;
+        const nums = hsl.match(/[\d.]+/g);
+        if (!nums || nums.length < 3) return null;
+        const h = +nums[0] / 360, s = +nums[1] / 100, l = +nums[2] / 100;
+        if (s === 0) {
+          const v = Math.round(l * 255).toString(16).padStart(2, "0");
+          return `#${v}${v}${v}`;
+        }
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        const hue2rgb = (t) => {
+          if (t < 0) t += 1;
+          if (t > 1) t -= 1;
+          if (t < 1 / 6) return p + (q - p) * 6 * t;
+          if (t < 1 / 2) return q;
+          if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+          return p;
+        };
+        return (
+          "#" +
+          [h + 1 / 3, h, h - 1 / 3]
+            .map((t) => Math.round(hue2rgb(t) * 255).toString(16).padStart(2, "0"))
+            .join("")
+        );
+      };
+
+      const toHex = (str) => {
+        if (!str) return null;
+        const s = str.trim();
+        if (s.startsWith("#"))   return normalizeHex(s);
+        if (s.startsWith("rgb")) return rgbToHex(s);
+        if (s.startsWith("hsl")) return hslToHex(s);
+        return null;
+      };
+
+      // ── Usefulness filter ─────────────────────────────────────────────────
+      // Reject near-whites, near-blacks, and near-grays (low chroma)
+
+      const isUsefulBrandColor = (hex) => {
+        if (!hex || hex.length !== 7) return false;
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        if (r > 210 && g > 210 && b > 210) return false; // near-white
+        if (r < 40  && g < 40  && b < 40)  return false; // near-black
+        // Chroma: max minus min across R/G/B channels
+        if (Math.max(r, g, b) - Math.min(r, g, b) < 30) return false; // near-gray
+        return true;
+      };
+
+      // ── Frequency map ─────────────────────────────────────────────────────
+      const freq = {};
+      const addColor = (hex, weight = 1) => {
+        if (hex && isUsefulBrandColor(hex)) {
+          freq[hex] = (freq[hex] || 0) + weight;
+        }
+      };
+
+      // ── 1. Meta theme-color — the most reliable explicit brand signal ─────
+      const themeColorRaw =
+        $('meta[name="theme-color"]').attr("content") ||
+        $('meta[name="msapplication-TileColor"]').attr("content");
+      addColor(toHex(themeColorRaw), 30);
+
+      // ── 2. Collect CSS text (inline <style> blocks) ───────────────────────
+      let cssText = "";
+      $("style").each((_, el) => {
+        cssText += $(el).html() + "\n";
+      });
+
+      // ── 3. Fetch external CSS files (skip known font/icon CDNs) ──────────
+      const skipPatterns = [
+        "fonts.google", "font-awesome", "fontawesome",
+        "ionicons", "bootstrap.min", "normalize", "reset",
+      ];
+      const cssUrls = [];
+      $('link[rel="stylesheet"]').each((_, el) => {
+        const href = $(el).attr("href");
+        if (!href) return;
+        if (skipPatterns.some((p) => href.includes(p))) return;
+        try { cssUrls.push(new URL(href, origin).toString()); } catch (_) {}
+      });
+
+      // Fetch up to 3 CSS files in parallel
+      await Promise.all(
+        cssUrls.slice(0, 3).map(async (url) => {
+          try {
+            const r = await axios.get(url, {
+              timeout: 8000,
+              responseType: "text",
+              headers: { "User-Agent": "Mozilla/5.0" },
+            });
+            if (typeof r.data === "string") cssText += r.data + "\n";
+          } catch (_) {}
+        })
+      );
+
+      // ── 4. Extract colors from CSS property declarations only ─────────────
+      // Match: background-color: #xxx | color: rgb(...) | border: 1px solid hsl(...)
+      // This avoids picking up colors from string literals, JS, SVG path data, etc.
+      const propColorRe =
+        /(?:background(?:-color)?|(?:^|[\s;{,])color|border(?:-color)?|fill|stroke|outline(?:-color)?)\s*:\s*(#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b|rgba?\s*\([^)]+\)|hsla?\s*\([^)]+\))/gi;
+
+      let m;
+      while ((m = propColorRe.exec(cssText)) !== null) {
+        const hex = toHex(m[1]);
+        const prop = m[0].split(":")[0].trim().toLowerCase();
+        // Background/fill colors carry 3× more weight — they dominate brand impression
+        const weight = prop.includes("background") || prop === "fill" ? 3 : 1;
+        addColor(hex, weight);
+      }
+
+      // ── 5. Sort by frequency and return top 6 ────────────────────────────
+      return Object.entries(freq)
+        .sort((a, b) => b[1] - a[1])
+        .map(([color]) => color)
+        .slice(0, 6);
+
+    } catch (error) {
+      console.warn("Failed to fetch brand colors:", error.message);
+      return [];
+    }
+  }
+
+  async fetchLogo(websiteUrl) {
+    try {
+      let normalizedUrl = websiteUrl;
+      if (
+        normalizedUrl &&
+        typeof normalizedUrl === "string" &&
+        !normalizedUrl.startsWith("http://") &&
+        !normalizedUrl.startsWith("https://")
+      ) {
+        normalizedUrl = `https://${normalizedUrl.trim()}`;
+      }
+
+      const parsed = new URL(normalizedUrl);
+      const origin = parsed.origin;
+
+      const response = await axios.get(origin, {
+        timeout: 15000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
+        },
+      });
+
+      if (response.status !== 200 || typeof response.data !== "string") {
+        return null;
+      }
+
+      const $ = cheerio.load(response.data);
+
+      const candidates = [
+        $('link[rel="apple-touch-icon"]').attr("href"),
+        $('link[rel="icon"]').attr("href"),
+        $('link[rel="shortcut icon"]').attr("href"),
+        $('meta[property="og:image"]').attr("content"),
+        $('img[alt*="logo" i]').first().attr("src"),
+        $('img[class*="logo" i]').first().attr("src"),
+        $('img[id*="logo" i]').first().attr("src"),
+      ].filter(Boolean);
+
+      for (const candidate of candidates) {
+        try {
+          return new URL(candidate, origin).toString();
+        } catch (_) {
+          // Skip invalid candidate URLs
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.warn("Failed to fetch logo:", error.message);
+      return null;
+    }
+  }
+
+  // Downloads a remote logo URL, saves it inside /uploads, and returns the
+  // local path (e.g. "/uploads/logo-<agentId>-<timestamp>.png") that can be
+  // stored directly in the Widget collection.  Returns null on any failure.
+  async downloadAndSaveLogo(logoUrl, agentId) {
+    try {
+      const response = await axios.get(logoUrl, {
+        responseType: "arraybuffer",
+        timeout: 15000,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
+      });
+
+      // Derive extension from URL path first, then fall back to Content-Type
+      let ext = path.extname(new URL(logoUrl).pathname).toLowerCase().replace(".", "") || "";
+      if (!ext) {
+        const contentType = (response.headers["content-type"] || "").split(";")[0].trim();
+        const mimeToExt = {
+          "image/png": "png",
+          "image/jpeg": "jpg",
+          "image/jpg": "jpg",
+          "image/gif": "gif",
+          "image/webp": "webp",
+          "image/svg+xml": "svg",
+          "image/x-icon": "ico",
+          "image/vnd.microsoft.icon": "ico",
+        };
+        ext = mimeToExt[contentType] || "png";
+      }
+
+      const filename = `logo-${agentId}-${Date.now()}.${ext}`;
+      const uploadsDir = path.join(__dirname, "..", "uploads");
+
+      // Ensure the directory exists (it is created by app.js on startup, but be safe)
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+
+      fs.writeFileSync(path.join(uploadsDir, filename), response.data);
+      return `/uploads/${filename}`;
+    } catch (error) {
+      console.warn("Failed to download logo:", error.message);
+      return null;
+    }
+  }
+
+  async getSitemapUrls(req, res) {
+    try {
+      const { userId, sitemapUrl, agentId, skipBulkInsert } = req.body;
+      if (!userId || !agentId) {
+        return res.status(400).json({
+          success: false,
+          error: "Missing required parameters: userId, agentId",
+        });
+      }
+
+      if (!sitemapUrl) {
+        return res.status(400).json({
+          success: false,
+          error: "sitemapUrl must be provided",
+        });
+      }
+
+      const agent = await Agent.findOne({ _id: agentId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
+      }
+      if (!skipBulkInsert && agent.isSitemapAdded == true && sitemapUrl) {
+        return res.status(400).json({
+          success: false,
+          error: "one sitemap already added",
+        });
+      }
+
+      let urls = [];
+      if (sitemapUrl) {
+        urls = await this.extractUrlsFromSitemap(sitemapUrl);
+        await Agent.updateOne({ _id: agentId }, { $set: {isSitemapAdded: true} });
+        console.log(`Found ${urls.length} URLs in sitemap`);
+      }
+
+      const [brandColors, logo] = await Promise.all([
+        this.fetchBrandColors(sitemapUrl),
+        this.fetchLogo(sitemapUrl),
+      ]);
+
+      const widgetUpdateData = {};
+      if (logo) {
+        const savedLogoPath = await this.downloadAndSaveLogo(logo, agentId);
+        if (savedLogoPath) {
+          widgetUpdateData.logo = savedLogoPath;
+        }
+      }
+
+      if (brandColors.length > 0) {
+        // Derive a readable text colour for any background
+        const contrastText = (hex) => {
+          const r = parseInt(hex.slice(1, 3), 16);
+          const g = parseInt(hex.slice(3, 5), 16);
+          const b = parseInt(hex.slice(5, 7), 16);
+          // Perceived luminance (WCAG formula)
+          const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+          return lum > 0.55 ? "#1F2937" : "#FFFFFF";
+        };
+
+        const primary   = brandColors[0];
+        const secondary = brandColors[1] || primary;
+
+        // Build 6 widget-ready colours from whatever brand colours were found:
+        //  title_bar bg       → primary brand colour
+        //  title_bar text     → white or dark depending on primary luminance
+        //  visitor_bubble bg  → primary (or secondary if available)
+        //  visitor_bubble txt → contrast text for visitor bubble
+        //  ai_bubble bg       → neutral light (messages from the bot look clean)
+        //  ai_bubble text     → dark neutral
+        const widgetColorValues = [
+          primary,                    // title_bar
+          contrastText(primary),      // title_bar_text
+          secondary,                  // visitor_bubble
+          contrastText(secondary),    // visitor_bubble_text
+          "#F1F5F9",                  // ai_bubble  (neutral light)
+          "#1F2937",                  // ai_bubble_text (dark neutral)
+        ];
+
+        const colorFieldNames = [
+          "title_bar",
+          "title_bar_text",
+          "visitor_bubble",
+          "visitor_bubble_text",
+          "ai_bubble",
+          "ai_bubble_text",
+        ];
+
+        widgetUpdateData.colorFields = colorFieldNames.map((name, index) => ({
+          id: index + 1,
+          name,
+          value: widgetColorValues[index],
+        }));
+      }
+
+      if (Object.keys(widgetUpdateData).length > 0) {
+        await Widget.updateOne(
+          { agentId },
+          {
+            $set: widgetUpdateData,
+          }
+        );
+      }
+
+      if (!skipBulkInsert) {
+        await Agent.updateOne({ 
+          _id: agentId 
+        }, { 
+          $set: { 
+            isSitemapAdded: true,
+          } 
+        });
+        await this.bulkInsertUrls(userId, agentId, urls);
+      }
+      
+      res.json({
+        success: true,
+        urls: urls,
+      });
+    } catch (error) {
+      console.error("Error starting sitemap urls:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message,
+        urls: [],
+      });
+    }
+  }
+
   // Start sitemap scraping
   async startSitemapScraping(req, res) {
     try {
-      const { userId, sitemapUrl, url } = req.body;
-      if (!userId) {
+      const { userId, urls, agentId } = req.body;
+      if (!userId || !agentId) {
         return res.status(400).json({
           success: false,
-          error: "Missing required parameters: userId",
+          error: "Missing required parameters: userId, agentId",
         });
       }
 
-      if (!sitemapUrl && !url) {
+      if (!urls) {
         return res.status(400).json({
           success: false,
-          error: "At least one of sitemapUrl or url must be provided",
+          error: "urls must be provided",
         });
       }
 
-      const TrainingModel = await PlanService.getTrainingModel(userId);
-      const plan = await PlanService.getUserPlan(userId);
+      const TrainingModel = await PlanService.getTrainingModel(userId,agentId);
+      const plan = await PlanService.getUserPlan(userId,agentId);
 
       const client = await Client.findOne({ userId });
       if (!client) {
@@ -418,100 +741,102 @@ async bulkInsertUrls(userId, urls) {
           error: "Client not found",
         });
       }
-      if (client.sitemapAdded == true && sitemapUrl) {
-        return res.status(400).json({
+      const agent = await Agent.findOne({ _id: agentId });
+      if (!agent) {
+        return res.status(404).json({
           success: false,
-          error: "one sitemap already added",
+          error: "Agent not found",
         });
       }
+      // if (client.sitemapAdded == true && sitemapUrl) {
+      //   return res.status(400).json({
+      //     success: false,
+      //     error: "one sitemap already added",
+      //   });
+      // }
       const qdrantIndexName =
         client?.plan == "free"
-          ? client?.qdrantIndexName
-          : client?.qdrantIndexNamePaid;
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
 
       // Check if user is already scraping
-      const scrapingStatus = await Client.findOne({ userId });
+      const scrapingStatus = await Agent.findOne({ _id: agentId });
       if (scrapingStatus.dataTrainingStatus == 1) {
         return res.status(409).json({
           success: false,
-          error: "Scraping already in progress for this user",
+          error: "Scraping already in progress for this agent",
         });
       }
       //here updte the mongodb that scrapping started
       const scrapingStartTime = new Date();
       
       // Fetch and parse sitemap
-      let urls = [];
-      if (sitemapUrl) {
-        urls = await this.extractUrlsFromSitemap(sitemapUrl);
-        console.log(`Found ${urls.length} URLs in sitemap`);
-      }
-      if (url) {
-        const batchService = new batchTrainingService();
-        const urlArray = url.split(",").map((u) => u.trim());
+      // let urls = [];
+      // if (sitemapUrl) {
+      //   urls = await this.extractUrlsFromSitemap(sitemapUrl);
+      //   console.log(`Found ${urls.length} URLs in sitemap`);
+      // }
+      // if (url) {
+      //   const batchService = new batchTrainingService();
+      //   const urlArray = url.split(",").map((u) => u.trim());
 
-        for (const singleUrl of urlArray) {
-          // Check if the url already exists in the TrainingModel
-          const existing = await TrainingModel.findOne({
-            userId: userId,
-            type: 0, // WebPage
-            trainingStatus: 1,
-            "webPage.url": singleUrl,
-          });
+      //   for (const singleUrl of urlArray) {
+      //     // Check if the url already exists in the TrainingModel
+      //     const existing = await TrainingModel.findOne({
+      //       userId: userId,
+      //       type: 0, // WebPage
+      //       trainingStatus: 1,
+      //       "webPage.url": singleUrl,
+      //     });
 
-          if (existing) {
-            try {
-              await batchService.deleteItemFromVectorStore(
-                userId,
-                singleUrl,
-                0
-              );
-            } catch (error) {
-              console.log(error);
-            }
-            await Url.deleteOne({ userId: userId, url: singleUrl });
-            await TrainingModel.deleteOne({ _id: existing._id });
-          }
-        }
-        urls.push(...urlArray);
-      }
+      //     if (existing) {
+      //       try {
+      //         await batchService.deleteItemFromVectorStore(
+      //           userId,
+      //           singleUrl,
+      //           0
+      //         );
+      //       } catch (error) {
+      //         console.log(error);
+      //       }
+      //       await Url.deleteOne({ userId: userId, url: singleUrl });
+      //       await TrainingModel.deleteOne({ _id: existing._id });
+      //     }
+      //   }
+      //   urls.push(...urlArray);
+      // }
 
       if (urls.length == 0) {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
-        appEvents.emit("userEvent", userId, "training-event", {
-          message: "Sitemap not found or no urls found in sitemap",
-          client: await Client.findOne({ userId }),
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+        appEvents.emit("userEvent", agentId, "training-event", {
+          message: "No urls found",
+          agent: await Agent.findOne({ _id: agentId }),
+          // client: await Client.findOne({ userId }),
         });
         return res.json({
           success: false,
-          error: "Sitemap not found or no urls found in sitemap",
+          error: "No urls found",
         });
       }
 
+      // Bulk insert URLs so the job can update them (job expects URLs in Url table)
+      await this.bulkInsertUrls(userId, agentId, urls);
+
       // Set scraping status and start time before starting the queue
-      await Client.updateOne({ 
-        userId 
+      await Agent.updateOne({ 
+        _id: agentId 
       }, { 
         $set: { 
           dataTrainingStatus: 1,
           scrapingStartTime: scrapingStartTime
         } 
       });
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
+      });
       
-      if (sitemapUrl) {
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
-        });
-      }
-
-      // Add the fetched URLs to the Url model
-      // for (const url of urls) {
-        // await Url.create({ userId: userId, url: url, trainStatus: 0 });
-        await this.bulkInsertUrls(userId, urls);
-      // }
-
-      await Client.updateOne(
-        { userId },
+      await Agent.updateOne(
+        { _id: agentId },
         { $inc: { "pagesAdded.total": urls.length || 0 } }
       );
 
@@ -520,7 +845,8 @@ async bulkInsertUrls(userId, urls) {
         userId,
         qdrantIndexName,
         plan,
-        sitemapUrl: !!sitemapUrl,
+        sitemapUrl:true,
+        agentId,
         startTime: scrapingStartTime.getTime(),
         totalUrls: urls.length,
       });
@@ -531,11 +857,12 @@ async bulkInsertUrls(userId, urls) {
         // message: "Scraping sta successfully",
       });
     } catch (error) {
-      const { userId } = req.body;
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
-      appEvents.emit("userEvent", userId, "training-event", {
-        message: error.message,
+      const { userId, agentId } = req.body;
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+      appEvents.emit("userEvent", agentId, "training-event", {
         client: await Client.findOne({ userId }),
+        message: error.message,
+        agent: await Agent.findOne({ _id: agentId }),
       });
       console.error("Error starting sitemap scraping:", error);
       res.status(500).json({
@@ -548,12 +875,12 @@ async bulkInsertUrls(userId, urls) {
   // Upgrade plan and continue scraping
   async ContinueScrappingAfterUpgrade(req, res) {
     try {
-      const { userId } = req.body;
+      const { userId, agentId } = req.body;
 
-      if (!userId) {
+      if (!userId || !agentId) {
         return res.status(400).json({
           success: false,
-          error: "Missing required parameters: userId",
+          error: "Missing required parameters: userId, agentId",
         });
       }
 
@@ -564,34 +891,42 @@ async bulkInsertUrls(userId, urls) {
           error: "Client not found",
         });
       }
+      const agent = await Agent.findOne({ _id: agentId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
+      }
       const qdrantIndexName =
         client?.plan == "free"
-          ? client?.qdrantIndexName
-          : client?.qdrantIndexNamePaid;
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
       const plan = await PlanService.getUserPlan(userId);
 
       const remainingUrls = await Url.distinct("url", {
-        userId: userId,
+        // userId: userId,
+        agentId: agentId,
         trainStatus: 0,
       });
       if (remainingUrls.length <= 0) {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
           message: "No URL found to scrape",
         });
       } else {
         const scrapingStartTime = new Date();
-        await Client.updateOne({ 
-          userId 
+        await Agent.updateOne({ 
+          _id: agentId 
         }, { 
           $set: { 
             dataTrainingStatus: 1,
             scrapingStartTime: scrapingStartTime
           } 
         });
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
         });
 
         await urlProcessingQueue.add("processSingleUrl", {
@@ -599,7 +934,7 @@ async bulkInsertUrls(userId, urls) {
           userId,
           qdrantIndexName,
           plan,
-          sitemapUrl: false,
+          agentId: agentId,
           startTime: scrapingStartTime.getTime(),
           totalUrls: remainingUrls.length,
         });
@@ -610,9 +945,9 @@ async bulkInsertUrls(userId, urls) {
         // message: "Plan upgraded and scraping continued",
       });
     } catch (error) {
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
-      appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
         message: error.message,
       });
       console.error("Error upgrading plan and continuing scraping:", error);
@@ -740,11 +1075,11 @@ async bulkInsertUrls(userId, urls) {
     }
   }
 
-  async getScrapingHistoryBySocket(userId, skip, limit, type, status) {
+  async getScrapingHistoryBySocket(userId, agentId, skip, limit, type, status) {
     try {
       const TrainingModel = await PlanService.getTrainingModel(userId);
 
-      const query = { userId };
+      const query = { userId, agentId };
       // Handle sourceType filter from frontend
       let filterType = null;
       switch (type) {
@@ -810,9 +1145,21 @@ async bulkInsertUrls(userId, urls) {
 
   async createSnippet(req, res) {
     try {
-      const { title, content } = req.body;
+      const { title, content, agentId,userId } = req.body;
       const file = req.file;
-      const userId = req.body.userId;
+      if (!agentId) {
+        return res.status(400).json({
+          success: false,
+          error: "Missing required parameters: agentId",
+        });
+      }
+      const agent = await Agent.findOne({ _id: agentId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
+      }
 
       const client = await Client.findOne({ userId });
       if (!client) {
@@ -823,16 +1170,16 @@ async bulkInsertUrls(userId, urls) {
 
       const qdrantIndexName =
         client?.plan == "free"
-          ? client?.qdrantIndexName
-          : client?.qdrantIndexNamePaid;
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
 
       const TrainingModel = await PlanService.getTrainingModel(userId);
 
       let documentsToProcess = [];
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 1 } });
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 1 } });
 
-      appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
       });
 
       // Process snippet if provided
@@ -846,12 +1193,12 @@ async bulkInsertUrls(userId, urls) {
           );
 
         if (!snippetValidation.isValid) {
-          await Client.updateOne(
-            { userId },
+          await Agent.updateOne(
+            { _id: agentId },
             { $set: { dataTrainingStatus: 0 } }
           );
-          appEvents.emit("userEvent", userId, "training-event", {
-            client: await Client.findOne({ userId }),
+          appEvents.emit("userEvent", agentId, "training-event", {
+            agent: await Agent.findOne({ _id: agentId }),
             message: snippetValidation.error,
           });
           return res.status(400).json({
@@ -863,7 +1210,8 @@ async bulkInsertUrls(userId, urls) {
         }
 
         const trainingList = new TrainingModel({
-          userId,
+          userId: userId,
+          agentId: agentId,
           title,
           type: 2, // Snippet
           content: snippetValidation.cleanContent,
@@ -884,6 +1232,7 @@ async bulkInsertUrls(userId, urls) {
             title: title,
             type: "snippet",
             user_id: userId,
+            agent_id: agentId,
             // plan: plan.name,
             // wordCount: snippetValidation.wordCount,
             // estimatedTokens: snippetValidation.estimatedTokens,
@@ -904,12 +1253,12 @@ async bulkInsertUrls(userId, urls) {
           );
 
           if (!fileValidation.isValid) {
-            await Client.updateOne(
-              { userId },
+            await Agent.updateOne(
+              { _id: agentId },
               { $set: { dataTrainingStatus: 0 } }
             );
-            appEvents.emit("userEvent", userId, "training-event", {
-              client: await Client.findOne({ userId }),
+            appEvents.emit("userEvent", agentId, "training-event", {
+              agent: await Agent.findOne({ _id: agentId }),
               message: fileValidation.error,
             });
             return res.status(400).json({
@@ -922,6 +1271,7 @@ async bulkInsertUrls(userId, urls) {
 
           const trainingList = new TrainingModel({
             userId,
+            agentId: agentId,
             title: file.originalname.toString(),
             type: 1, // File
             fileContent: fileValidation.cleanContent.toString(),
@@ -947,6 +1297,7 @@ async bulkInsertUrls(userId, urls) {
               originalFileName: file.originalname,
               type: "file",
               user_id: userId,
+              agent_id: agentId,
               // plan: plan.name,
               // wordCount: fileValidation.wordCount,
               // estimatedTokens: fileValidation.estimatedTokens,
@@ -954,12 +1305,12 @@ async bulkInsertUrls(userId, urls) {
             },
           });
         } catch (fileError) {
-          await Client.updateOne(
-            { userId },
+          await Agent.updateOne(
+            { _id: agentId },
             { $set: { dataTrainingStatus: 0 } }
           );
-          appEvents.emit("userEvent", userId, "training-event", {
-            client: await Client.findOne({ userId }),
+          appEvents.emit("userEvent", agentId, "training-event", {
+            agent: await Agent.findOne({ _id: agentId }),
             message: fileError.message,
           });
           console.error("Error processing file:", fileError);
@@ -973,9 +1324,9 @@ async bulkInsertUrls(userId, urls) {
       }
 
       if (!documentsToProcess.length) {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
           message: "No document found to process ",
         });
         return res.status(400).json({
@@ -990,28 +1341,29 @@ async bulkInsertUrls(userId, urls) {
       let result = await batchService.processDocumentAndTrain(
         documentsToProcess,
         userId,
+        agentId,
         qdrantIndexName,
         false
       );
       if (result.success) {
         await TrainingModel.findOneAndUpdate(
-          { userId: userId, title: title || file.originalname },
+          { userId: userId, agentId: agentId, title: title || file.originalname },
           {
             trainingStatus: 1, // Completed
             chunkCount: result.totalChunks,
             lastEdit: Date.now(),
           }
         );
-        await Client.updateOne({ userId: userId }, { $inc: { filesAdded: 1 } });
+        await Agent.updateOne({ _id: agentId }, { $inc: { filesAdded: 1 } });
 
         // Update client flags
-        await Client.updateOne({ userId: userId }, { dataTrainingStatus: 0 });
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        await Agent.updateOne({ _id: agentId }, { dataTrainingStatus: 0 });
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
         });
       } else {
         await TrainingModel.findByIdAndUpdate(
-          { userId: userId, title: title || file.originalname },
+          { userId: userId, agentId: agentId, title: title || file.originalname },
           {
             trainingStatus: 2, // Error
             lastEdit: Date.now(),
@@ -1019,9 +1371,9 @@ async bulkInsertUrls(userId, urls) {
           }
         );
         // Update client flags
-        await Client.updateOne({ userId: userId }, { dataTrainingStatus: 0 });
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        await Agent.updateOne({ _id: agentId }, { dataTrainingStatus: 0 });
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
           message: "Data training failed",
         });
       }
@@ -1032,9 +1384,10 @@ async bulkInsertUrls(userId, urls) {
       });
     } catch (error) {
       const userId = req.body.userId;
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
-      appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+      const agentId = req.body.agentId;
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
         message: error.message,
       });
       console.error("Error in createSnippet:", error);
@@ -1049,8 +1402,7 @@ async bulkInsertUrls(userId, urls) {
 
   // Updated createFaq with validation - now handles array of FAQs
   async createFaq(req, res) {
-    const { faqs } = req.body;
-    const userId = req.body.userId;
+    const { faqs,userId,agentId } = req.body;
 
     try {
       const client = await Client.findOne({ userId });
@@ -1058,6 +1410,13 @@ async bulkInsertUrls(userId, urls) {
         return res
           .status(404)
           .json({ status: false, message: "Client not found" });
+      }
+      const agent = await Agent.findOne({ _id: agentId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
       }
 
       // Validate that faqs is an array
@@ -1071,14 +1430,14 @@ async bulkInsertUrls(userId, urls) {
 
       const qdrantIndexName =
         client?.plan == "free"
-          ? client?.qdrantIndexName
-          : client?.qdrantIndexNamePaid;
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
 
       const TrainingModel = await PlanService.getTrainingModel(userId);
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 1 } });
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 1 } });
 
-      appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
       });
 
       const documentsToProcess = [];
@@ -1105,7 +1464,8 @@ async bulkInsertUrls(userId, urls) {
         const faqValidation = await ContentValidationService.validateFAQ(
           question,
           answer,
-          userId
+          userId,
+          agentId
         );
 
         if (!faqValidation.isValid) {
@@ -1122,6 +1482,7 @@ async bulkInsertUrls(userId, urls) {
         // Create training model entry
         const trainingList = new TrainingModel({
           userId,
+          agentId: agentId,
           title: question,
           type: 3, // FAQ
           content: faqValidation.cleanContent,
@@ -1145,15 +1506,16 @@ async bulkInsertUrls(userId, urls) {
             answer: answer,
             type: "faq",
             user_id: userId,
+            agent_id: agentId,
           },
         });
       }
 
       // If no valid FAQs after validation, return error
       if (documentsToProcess.length === 0) {
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
           message: "No valid FAQs to process",
         });
         return res.status(400).json({
@@ -1169,6 +1531,7 @@ async bulkInsertUrls(userId, urls) {
       let result = await batchService.processDocumentAndTrain(
         documentsToProcess,
         userId,
+        agentId,
         qdrantIndexName,
         false
       );
@@ -1195,16 +1558,16 @@ async bulkInsertUrls(userId, urls) {
           );
         }
 
-        await Client.updateOne(
-          { userId: userId },
+        await Agent.updateOne(
+          { _id: agentId },
           { 
             $inc: { faqsAdded: documentsToProcess.length },
             $set: { dataTrainingStatus: 0 }
           }
         );
 
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
         });
 
         res.status(201).json({
@@ -1228,10 +1591,10 @@ async bulkInsertUrls(userId, urls) {
         }
 
         // Update client flags
-        await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
 
-        appEvents.emit("userEvent", userId, "training-event", {
-          client: await Client.findOne({ userId }),
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
           message: "failed to train data",
         });
 
@@ -1243,10 +1606,10 @@ async bulkInsertUrls(userId, urls) {
         });
       }
     } catch (error) {
-      await Client.updateOne({ userId }, { $set: { dataTrainingStatus: 0 } });
+      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
 
-      appEvents.emit("userEvent", userId, "training-event", {
-        client: await Client.findOne({ userId }),
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
         message: error.message,
       });
 
@@ -1256,6 +1619,206 @@ async bulkInsertUrls(userId, urls) {
         message: "Failed to create FAQ",
         errorCode: "INTERNAL_ERROR",
         error: error.message,
+      });
+    }
+  }
+
+  /**
+   * Delete training data by IDs. Runs in background.
+   * Body: { ids: string[], agentId: string }
+   */
+  async deleteTrainingData(req, res) {
+    try {
+      const { ids, agentId, userId } = req.body;
+
+      if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "ids array is required and must not be empty",
+        });
+      }
+
+      if (!agentId) {
+        return res.status(400).json({
+          success: false,
+          error: "agentId is required",
+        });
+      }
+
+      // Verify agent belongs to user
+      const agent = await Agent.findOne({ _id: agentId, userId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
+      }
+
+      const client = await Client.findOne({ userId });
+      if (!client) {
+        return res.status(404).json({
+          success: false,
+          error: "Client not found",
+        });
+      }
+
+      const qdrantIndexName =
+        client?.plan === "free"
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
+
+      if (!qdrantIndexName) {
+        return res.status(400).json({
+          success: false,
+          error: "Agent has no Qdrant collection configured",
+        });
+      }
+
+      const TrainingModel = await PlanService.getTrainingModel(userId);
+      const plan = await PlanService.getUserPlan(userId);
+      const TrainingModelName =
+        plan?.name === "free" ? "TrainingListFreeUsers" : "OpenaiTrainingList";
+
+      // Fetch entries by _ids, ensure they belong to this user and agent
+      const mongoose = require("mongoose");
+      const objectIds = ids
+        .filter((id) => id)
+        .map((id) => (typeof id === "string" ? new mongoose.Types.ObjectId(id) : id));
+      const entries = await TrainingModel.find({
+        _id: { $in: objectIds },
+        userId: userId?.toString(),
+        agentId,
+      }).lean();
+
+      if (entries.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: "No matching training entries found",
+        });
+      }
+
+      // Add job to background queue
+      await deleteTrainingDataQueue.add("deleteTrainingData", {
+        entries,
+        userId: userId?.toString(),
+        agentId: agentId?.toString(),
+        qdrantIndexName,
+        TrainingModelName,
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Delete job queued. Training data will be removed in the background.",
+        count: entries.length,
+      });
+    } catch (error) {
+      console.error("deleteTrainingData error:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message || "Failed to delete training data",
+      });
+    }
+  }
+
+  /**
+   * Retrain training data by IDs. Only webpages (type 0) are retrained. Runs in background.
+   * Body: { ids: string[], agentId: string }
+   */
+  async retrainTrainingData(req, res) {
+    try {
+      const { ids, agentId, userId } = req.body;
+
+      if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "ids array is required and must not be empty",
+        });
+      }
+
+      if (!agentId) {
+        return res.status(400).json({
+          success: false,
+          error: "agentId is required",
+        });
+      }
+
+      const agent = await Agent.findOne({ _id: agentId, userId });
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found",
+        });
+      }
+
+      const client = await Client.findOne({ userId });
+      if (!client) {
+        return res.status(404).json({
+          success: false,
+          error: "Client not found",
+        });
+      }
+
+      const qdrantIndexName =
+        client?.plan === "free"
+          ? agent?.qdrantIndexName
+          : agent?.qdrantIndexNamePaid;
+
+      if (!qdrantIndexName) {
+        return res.status(400).json({
+          success: false,
+          error: "Agent has no Qdrant collection configured",
+        });
+      }
+
+      const TrainingModel = await PlanService.getTrainingModel(userId);
+      const plan = await PlanService.getUserPlan(userId);
+      const TrainingModelName =
+        plan?.name === "free" ? "TrainingListFreeUsers" : "OpenaiTrainingList";
+
+      const mongoose = require("mongoose");
+      const objectIds = ids
+        .filter((id) => id)
+        .map((id) => (typeof id === "string" ? new mongoose.Types.ObjectId(id) : id));
+      const entries = await TrainingModel.find({
+        _id: { $in: objectIds },
+        userId: userId?.toString(),
+        agentId,
+      }).lean();
+
+      if (entries.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: "No matching training entries found",
+        });
+      }
+
+      // Filter to only webpages (type 0) - others are skipped in the job
+      const webpageEntries = entries.filter((e) => e.type === 0 && e.webPage?.url);
+      if (webpageEntries.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "No webpage entries found to retrain. Only web pages (type 0) can be retrained.",
+        });
+      }
+
+      await retrainTrainingDataQueue.add("retrainTrainingData", {
+        entries: webpageEntries,
+        userId: userId?.toString(),
+        agentId: agentId?.toString(),
+        qdrantIndexName,
+        TrainingModelName,
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Retrain job queued. Web pages will be scraped and retrained in the background.",
+        count: webpageEntries.length,
+      });
+    } catch (error) {
+      console.error("retrainTrainingData error:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message || "Failed to retrain training data",
       });
     }
   }

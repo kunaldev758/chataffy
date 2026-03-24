@@ -6,8 +6,9 @@ const ChatMessageController = require("../controllers/ChatMessageController");
 const ChatMessage = require("../models/ChatMessage");
 const Client = require("../models/Client");
 const Widget = require("../models/Widget");
+const Agent = require("../models/Agent");
 const WebsiteData = require("../models/WebsiteData");
-
+const HumanAgent = require("../models/HumanAgent");
 const { logOpenAIUsage } = require("../services/UsageTrackingService");
 
 // --- Configuration ---
@@ -22,7 +23,7 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // Initialize Qdrant client
 const qdrantClient = new QdrantClient({
-  url: "https://8659fcda-ff81-4896-8786-55418a544b55.eu-central-1-0.aws.cloud.qdrant.io",
+  url: process.env.QDRANT_URL || "https://8659fcda-ff81-4896-8786-55418a544b55.eu-central-1-0.aws.cloud.qdrant.io",
   apiKey:
     process.env.QDRANT_API_KEY ||
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.HRXxjdjkAjB3phjpoI9inwpfxo8Bv8DjQ11EMdiUrGk",
@@ -74,20 +75,22 @@ class QuestionAnsweringSystem {
     }
 
     // Format messages in a clear conversational flow
+    // Canonical sender types: visitor, client, ai, system, humanAgent
     const formattedMessages = filteredMessages.map((msg, index) => {
       const senderType = msg.sender_type || "unknown";
       const message = msg.message || "";
-      
-      // Normalize sender types for clarity
+
       let role = "User";
-      if (senderType === "bot" || senderType === "ai" || senderType === "assistant") {
+      if (senderType === "ai" || senderType === "bot" || senderType === "assistant") {
         role = "Assistant";
       } else if (senderType === "visitor" || senderType === "user") {
         role = "User";
-      } else if (senderType === "agent") {
+      } else if (senderType === "humanAgent" || senderType === "client" || senderType === "agent") {
         role = "Agent";
+      } else if (senderType === "system") {
+        role = "System";
       }
-      
+
       return `${role}: ${message}`;
     });
 
@@ -779,7 +782,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
     }
   }
 
-  async getAnswer(userId, question, conversationId, options = {}) {
+  async getAnswer(userId,agentId, question, conversationId, options = {}) {
     // Default threshold: 0.4 is reasonable for cosine similarity
     // Lower thresholds (0.2-0.3) may include irrelevant results
     // Higher thresholds (0.5-0.7) may be too strict and miss relevant results
@@ -794,30 +797,32 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       // 3. Get Client, Widget, and WebsiteData
       const clientData = await Client.findOne({ userId }).lean();
-      const widgetData = await Widget.findOne({ userId }).lean();
-      const websiteData = await WebsiteData.findOne({ userId }).lean();
+      const agentData = await Agent.findOne({ _id: agentId }).lean();
+      const widgetData = await Widget.findOne({ agentId }).lean();
+      const websiteData = await WebsiteData.findOne({ agentId }).lean();
 
       if (
         !clientData ||
-        !clientData.qdrantIndexName ||
-        !clientData.qdrantIndexNamePaid
+        !agentData.qdrantIndexName ||
+        !agentData.qdrantIndexNamePaid
       ) {
-        throw new Error(`Qdrant collection not configured for user ${userId}`);
+        throw new Error(`Qdrant collection not configured for agent ${agentId}`);
       }
       if (!widgetData) {
-        throw new Error(`Widget data not found for user ${userId}`);
+        throw new Error(`Widget data not found for agent ${agentId}`);
       }
 
       // Use the same field name for compatibility, but it represents Qdrant collection now
 
       const collectionName =
         clientData?.plan == "free"
-          ? clientData?.qdrantIndexName
-          : clientData?.qdrantIndexNamePaid;
+          ? agentData?.qdrantIndexName
+          : agentData?.qdrantIndexNamePaid;
 
       // 4. Intent detection to choose retrieval mode
       const intent = this.detectIntent(question);
       const userIdString = userId?.toString();
+      const agentIdString = agentId?.toString();
 
       if (intent === "STRUCTURAL") {
         const keywords = this.extractKeywords(question);
@@ -868,6 +873,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       }
 
       // 6. Query Qdrant (semantic)
+      // Filter by user_id (owner) - Qdrant payload stores user_id, not agent_id, for filtering
       const queryResponse = await this.queryQdrant(
         collectionName,
         questionEmbedding,
@@ -882,7 +888,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             `  1. Collection is empty or has no data for this user\n` +
             `  2. Data hasn't been indexed yet\n` +
             `  3. Collection name is incorrect\n` +
-            `  4. user_id filter is too restrictive`
+            `  4. agent_id filter is too restrictive`
         );
       }
 
@@ -1026,6 +1032,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         if (llmUsage) {
           logOpenAIUsage({
             userId,
+            agentId,
             tokens: llmUsage.total_tokens,
             requests: 1,
           });
@@ -1041,7 +1048,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             websiteData,
           );
         finalAnswer = accidentalAnswer;
-        logOpenAIUsage({ userId, tokens: llmUsage.total_tokens, requests: 1 });
+        logOpenAIUsage({ userId, agentId, tokens: llmUsage.total_tokens, requests: 1 });
       } else if ((relevantMatches.length === 0 || isIrrelevant) && !this.isSimpleGreeting(question) && !isAccidental) {
         // Default answer when no relevant context found (and not a greeting or accidental)
         // If query is completely irrelevant (low similarity scores), redirect politely like Fin
@@ -1058,7 +1065,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           websiteData,
         );
       finalAnswer = irrelaventAnswer;
-        logOpenAIUsage({ userId, tokens: llmUsage.total_tokens, requests: 1 });
+        logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       } else {
         // 6. Get Context and Generate Answer via LLM
         const context = this.getRelevantContext(relevantMatches);
@@ -1075,22 +1082,33 @@ Keep responses short, direct, friendly, and professional. Only use information e
             // widgetData.email || "support@example.com"
           );
         finalAnswer = generatedAnswer;
-        logOpenAIUsage({ userId, tokens: llmUsage.total_tokens, requests: 1 });
+        logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       }
 
-      // 10. Prepare Sources
-      // const sources = relevantMatches.map((match) => ({
-      //   id: match.id,
-      //   score: match.score,
-      //   title: match.metadata?.title || match.payload?.title || "Source",
-      //   url: match.metadata?.url || match.payload?.url,
-      //   type: match.metadata?.type || match.payload?.type || "unknown",
-      //   domain: match.metadata?.domain || match.payload?.domain,
-      // }));
+      // 10. Prepare Sources from Qdrant matched payloads
+      const seenSourceKeys = new Set();
+      const sources = relevantMatches
+        .map((match) => {
+          const payload = match.payload || {};
+          const sourceType = payload.type !== undefined ? payload.type : null;
+          const title = payload.title || payload.url || null;
+          const url = payload.url || null;
+          return { type: sourceType, title, url };
+        })
+        .filter(({ type, title, url }) => {
+          // Keep only entries with some identifier
+          if (type === null && !title && !url) return false;
+          // Deduplicate by url (for webpages) or title (for others)
+          const key = url || title;
+          if (!key || seenSourceKeys.has(key)) return false;
+          seenSourceKeys.add(key);
+          return true;
+        });
 
       return {
         success: true,
         answer: finalAnswer,
+        sources: sources.length > 0 ? sources : undefined,
         conversationId,
         isAgentRequest: isAgentRequest || false,
       };
@@ -1122,21 +1140,23 @@ Keep responses short, direct, friendly, and professional. Only use information e
 // Route Handler
 async function handleQuestionAnswer(
   userId,
+  agentId,
   question,
   conversationId,
   options = {}
 ) {
   try {
-    if (!userId || !question || !conversationId) {
+    if (!userId || !agentId || !question || !conversationId) {
       return {
         success: false,
-        error: "userId, question, and conversationId are required.",
+        error: "userId, agentId, question, and conversationId are required.",
       };
     }
 
     const qa = new QuestionAnsweringSystem();
     const result = await qa.getAnswer(
       userId,
+      agentId,
       question,
       conversationId,
       options

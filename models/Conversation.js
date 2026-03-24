@@ -17,6 +17,11 @@ const conversationSchema = new mongoose.Schema(
       required: false,
       ref: "Agent",
     },
+    humanAgentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: false,
+      ref: "HumanAgent",
+    },
     conversationOpenStatus: {
       type: String,
       enum: ["open", "close"],
@@ -24,6 +29,7 @@ const conversationSchema = new mongoose.Schema(
       required: true,
     },
     newMessage: { type: Number, default: 0 },
+    lastMessage: { type: String, default: "" },
     createdAt: {
       type: Date,
       default: Date.now,

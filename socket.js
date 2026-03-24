@@ -16,9 +16,23 @@ const initializeSocketController = (server) => {
   });
 
   // Listen for events from your controllers
-  appEvents.on("userEvent", (userId, eventName, data) => {
-    const userRoom = `user-${userId}`;
-    io.to(userRoom).emit(eventName, data);
+  // 4-arg: (userId, agentId, eventName, data) — emit to user-${userId} and/or user-${agentId} when ids are set
+  // 3-arg: (roomId, eventName, data) — single room; training-event uses agentId as roomId → user-${agentId} only
+  appEvents.on("userEvent", (...args) => {
+    if (args.length >= 4) {
+      const [userId, agentId, eventName, data] = args;
+      if (userId != null && userId !== "") {
+        io.to(`user-${userId}`).emit(eventName, data);
+      }
+      if (agentId != null && agentId !== "") {
+        io.to(`user-${agentId}`).emit(eventName, data);
+      }
+      return;
+    }
+    if (args.length === 3) {
+      const [roomId, eventName, data] = args;
+      io.to(`user-${roomId}`).emit(eventName, data);
+    }
   });
 
   io.use(myMiddleware);
@@ -26,7 +40,7 @@ const initializeSocketController = (server) => {
   io.on("connection", (socket) => {
     console.log("A user connected:", socket.id, "Type:", socket.type);
 
-    if (socket.type === "client" ||socket.type === "agent") {
+    if (socket.type === "client" || socket.type === "human-agent") {
       initializeClientEvents(io, socket);
     } else if (socket.type === "visitor") {
       initializeVisitorEvents(io, socket);

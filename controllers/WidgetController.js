@@ -8,6 +8,19 @@ const fs = require('fs');
 
 const WidgetController = {};
 
+/** Load widget doc + raw Mongo doc (for legacy `position` migration on read). */
+async function getWidgetAndRawByQuery(query) {
+  const widget = await Widget.findOne(query);
+  if (!widget) return { widget: null, raw: null };
+  const raw = await Widget.collection.findOne({ _id: widget._id });
+  return { widget, raw };
+}
+
+function legacyAlignFromRaw(raw) {
+  const a = raw?.position?.align;
+  return a === 'left' || a === 'right' ? a : null;
+}
+
 // File validation helper
 const validateFile = (file, allowedTypes = ['jpg', 'jpeg', 'png'], maxSize = 5 * 1024 * 1024) => {
   const errors = [];
@@ -51,9 +64,9 @@ const validateFile = (file, allowedTypes = ['jpg', 'jpeg', 'png'], maxSize = 5 *
 
 WidgetController.getWidgetToken = async (req, res) => {
   try {
-    const userId = req.body.userId;
-    if (userId) {
-      const widget = await Widget.findOne({ userId });
+    const agentId = req.body.agentId;
+    if (agentId) {
+      const widget = await Widget.findOne({ agentId });
       if (widget) {
         res.status(200).json({ 
           status_code: 200, 
@@ -68,117 +81,7 @@ WidgetController.getWidgetToken = async (req, res) => {
     } else {
       res.status(400).json({ 
         status_code: 400, 
-        message: "UserId is required" 
-      });
-    }
-  } catch (error) {
-    commonHelper.logErrorToFile(error);
-    res.status(500).json({ 
-      status: false, 
-      message: "Something went wrong please try again!" 
-    });
-  }
-};
-
-WidgetController.setBasicInfo = async (req, res) => {
-  try {
-    const { userId, basicInfo } = req.body;
-    
-    if (!userId) {
-      return res.status(400).json({ 
-        status_code: 400, 
-        message: "UserId is required" 
-      });
-    }
-    
-    // Validate basic info fields
-    const allowedFields = ['website', 'organisation', 'fallbackMessage', 'email', 'phone', 'liveAgentSupport'];
-    const updateData = {};
-    
-    Object.keys(basicInfo).forEach(key => {
-      if (allowedFields.includes(key)) {
-        updateData[key] = basicInfo[key];
-      }
-    });
-    
-    // Update Widget with basic info (excluding liveAgentSupport)
-    const widgetUpdateData = { ...updateData };
-    delete widgetUpdateData.liveAgentSupport;
-    
-    const updatedWidget = await Widget.findOneAndUpdate(
-      { userId },
-      { $set: widgetUpdateData },
-      { new: true }
-    );
-    
-    // Update Client with liveAgentSupport if provided
-    if (basicInfo.hasOwnProperty('liveAgentSupport')) {
-      await Client.findOneAndUpdate(
-        { userId },
-        { $set: { liveAgentSupport: basicInfo.liveAgentSupport } },
-        { new: true }
-      );
-    }
-    
-    if (updatedWidget) {
-      res.status(200).json({ 
-        status_code: 200, 
-        message: "Basic information saved successfully",
-        data: updateData
-      });
-    } else {
-      res.status(404).json({ 
-        status_code: 404, 
-        message: "Widget not found for this user" 
-      });
-    }
-  } catch (error) {
-    commonHelper.logErrorToFile(error);
-    res.status(500).json({ 
-      status: false, 
-      message: "Something went wrong please try again!" 
-    });
-  }
-};
-
-WidgetController.getBasicInfo = async (req, res) => {
-  try {
-    const { userId } = req.body;
-    
-    if (!userId) {
-      return res.status(400).json({ 
-        status_code: 400, 
-        message: "UserId is required" 
-      });
-    }
-    
-    const widget = await Widget.findOne({ userId });
-    const client = await Client.findOne({ userId });
-    const user = await User.findById(userId);
-    
-    if (!user) {
-      return res.status(404).json({ 
-        status_code: 404, 
-        message: "User not found" 
-      });
-    }
-    
-    if (widget) {
-      res.status(200).json({ 
-        status_code: 200, 
-        data: {
-          website: widget.website,
-          organisation: widget.organisation,
-          fallbackMessage: widget.fallbackMessage,
-          email: widget.email ? widget.email : user.email,
-          phone: widget.phone,
-          liveAgentSupport: client ? (client.liveAgentSupport !== undefined ? client.liveAgentSupport : false) : false,
-        }
-      });
-    } else {
-      res.status(404).json({ 
-        status_code: 404, 
-        message: "Widget not found for this user" 
+        message: "AgentId is required" 
       });
     }
   } catch (error) {
@@ -192,26 +95,43 @@ WidgetController.getBasicInfo = async (req, res) => {
 
 WidgetController.getThemeSettings = async (req, res) => {
   try {
-    const userId = req.body.userId || req.params.userId;
-    const widgetId = req.body.widgetId;
+    const widgetId = req.body.widgetId || req.params.widgetId;
+    const agentId = req.body.agentId || req.params.agentId;
     
     let widget;
-    
-    if (userId) {
-      widget = await Widget.findOne({ userId: userId });
+    let raw = null;
+
+    if (agentId) {
+      const pair = await getWidgetAndRawByQuery({ agentId: agentId });
+      widget = pair.widget;
+      raw = pair.raw;
     } else if (widgetId) {
-      widget = await Widget.findOne({ _id: widgetId });
+      const pair = await getWidgetAndRawByQuery({ _id: widgetId });
+      widget = pair.widget;
+      raw = pair.raw;
     } else {
       return res.status(400).json({ 
         status_code: 400, 
-        message: "UserId or WidgetId is required" 
+        message: "AgentId or WidgetId is required" 
       });
     }
     
     if (widget) {
+      const align =
+        widget.align || legacyAlignFromRaw(raw) || 'right';
+      const widgetType =
+        widget.widgetType === 'bar' || widget.widgetType === 'bubble'
+          ? widget.widgetType
+          : 'bubble';
+      const displayBarMessage =
+        widget.displayBarMessage != null && String(widget.displayBarMessage).trim() !== ''
+          ? widget.displayBarMessage
+          : "We're Online! Chat Now!";
+
       res.status(200).json({ 
         status_code: 200, 
         data: {
+          widgetId: widget._id,
           logo: widget.logo,
           titleBar: widget.titleBar,
           welcomeMessage: widget.welcomeMessage,
@@ -220,8 +140,17 @@ WidgetController.getThemeSettings = async (req, res) => {
           isPreChatFormEnabled: widget.isPreChatFormEnabled,
           fields: widget.fields,
           colorFields: widget.colorFields,
-          position: widget.position,
-          settings: widget.settings
+          align,
+          widgetType,
+          displayBarMessage,
+          settings: widget.settings,
+          widgetToken: widget.widgetToken,
+          // website: widget.website,
+          // organisation: widget.organisation,
+          // fallbackMessage: widget.fallbackMessage,
+          // email: widget.email || user?.email,
+          // phone: widget.phone,
+          // liveAgentSupport: widget?.liveAgentSupport ?? false,
         }
       });
     } else {
@@ -241,13 +170,13 @@ WidgetController.getThemeSettings = async (req, res) => {
 
 WidgetController.updateThemeSettings = async (req, res) => {
   try {
-    const { userId } = req.body;
-    const themeSettings = req.body?.themeSettings.themeSettings;
+    const { agentId } = req.body;
+    const themeSettings = req.body.themeSettings;
     
-    if (!userId) {
+    if (!agentId) {
       return res.status(400).json({ 
         status_code: 400, 
-        message: "UserId is required" 
+        message: "AgentId is required" 
       });
     }
     
@@ -258,7 +187,7 @@ WidgetController.updateThemeSettings = async (req, res) => {
       });
     }
     
-    const widget = await Widget.findOne({ userId });
+    const widget = await Widget.findOne({ agentId });
     
     if (!widget) {
       return res.status(404).json({ 
@@ -276,6 +205,12 @@ WidgetController.updateThemeSettings = async (req, res) => {
     if (themeSettings.showLogo !== undefined) updateData.showLogo = themeSettings.showLogo;
     if (themeSettings.showWhiteLabel !== undefined) updateData.showWhiteLabel = themeSettings.showWhiteLabel;
     if (themeSettings.isPreChatFormEnabled !== undefined) updateData.isPreChatFormEnabled = themeSettings.isPreChatFormEnabled;
+    if (themeSettings.liveAgentSupport !== undefined) updateData.liveAgentSupport = themeSettings.liveAgentSupport;
+    if (themeSettings.email !== undefined) updateData.email = themeSettings.email;
+    if (themeSettings.phone !== undefined) updateData.phone = themeSettings.phone;
+    if (themeSettings.website !== undefined) updateData.website = themeSettings.website;
+    if (themeSettings.organisation !== undefined) updateData.organisation = themeSettings.organisation;
+    if (themeSettings.fallbackMessage !== undefined) updateData.fallbackMessage = themeSettings.fallbackMessage;
     
     // Validate and update fields
     if (themeSettings.fields && Array.isArray(themeSettings.fields)) {
@@ -303,13 +238,26 @@ WidgetController.updateThemeSettings = async (req, res) => {
       updateData.colorFields = themeSettings.colorFields;
     }
     
-    // Update position settings
-    if (themeSettings.position) {
-      updateData.position = {
-        align: ['left', 'right'].includes(themeSettings.position.align) ? themeSettings.position.align : 'right',
-        sideSpacing: Math.max(0, Math.min(200, themeSettings.position.sideSpacing || 20)),
-        bottomSpacing: Math.max(0, Math.min(200, themeSettings.position.bottomSpacing || 20))
-      };
+    // Horizontal alignment (replaces legacy `position.align`)
+    if (themeSettings.align !== undefined) {
+      updateData.align = ['left', 'right'].includes(themeSettings.align)
+        ? themeSettings.align
+        : 'right';
+    } else if (themeSettings.position && themeSettings.position.align !== undefined) {
+      updateData.align = ['left', 'right'].includes(themeSettings.position.align)
+        ? themeSettings.position.align
+        : 'right';
+    }
+
+    if (themeSettings.widgetType !== undefined) {
+      updateData.widgetType = ['bubble', 'bar'].includes(themeSettings.widgetType)
+        ? themeSettings.widgetType
+        : 'bubble';
+    }
+
+    if (themeSettings.displayBarMessage !== undefined) {
+      const msg = String(themeSettings.displayBarMessage).trim();
+      updateData.displayBarMessage = msg.slice(0, 200) || "We're Online! Chat Now!";
     }
     
     // Update advanced settings
@@ -317,9 +265,14 @@ WidgetController.updateThemeSettings = async (req, res) => {
       updateData.settings = { ...widget.settings.toObject(), ...themeSettings.settings };
     }
     
+    const mongoUpdate = { $unset: { position: 1 } };
+    if (Object.keys(updateData).length > 0) {
+      mongoUpdate.$set = updateData;
+    }
+
     const updatedWidget = await Widget.findOneAndUpdate(
-      { userId },
-      { $set: updateData },
+      { agentId },
+      mongoUpdate,
       { new: true }
     );
     
@@ -335,8 +288,16 @@ WidgetController.updateThemeSettings = async (req, res) => {
         isPreChatFormEnabled: updatedWidget.isPreChatFormEnabled,
         fields: updatedWidget.fields,
         colorFields: updatedWidget.colorFields,
-        position: updatedWidget.position,
-        settings: updatedWidget.settings
+        align: updatedWidget.align,
+        widgetType: updatedWidget.widgetType,
+        displayBarMessage: updatedWidget.displayBarMessage,
+        settings: updatedWidget.settings,
+        website: updatedWidget.website,
+        organisation: updatedWidget.organisation,
+        fallbackMessage: updatedWidget.fallbackMessage,
+        email: updatedWidget.email,
+        phone: updatedWidget.phone,
+        liveAgentSupport: updatedWidget.liveAgentSupport,
       }
     });
   } catch (error) {
@@ -350,12 +311,12 @@ WidgetController.updateThemeSettings = async (req, res) => {
 
 WidgetController.uploadLogo = async (req, res) => {
   try {
-    const userId  = req.params.userId;
+    const agentId  = req.params.agentId;
     
-    if (!userId) {
+    if (!agentId) {
       return res.status(400).json({ 
         status_code: 400, 
-        message: "UserId is required" 
+        message: "AgentId is required" 
       });
     }
     
@@ -379,7 +340,7 @@ WidgetController.uploadLogo = async (req, res) => {
       });
     }
     
-    const widget = await Widget.findOne({ userId });
+    const widget = await Widget.findOne({ agentId });
     
     if (!widget) {
       // Delete uploaded file if widget not found
@@ -412,7 +373,7 @@ WidgetController.uploadLogo = async (req, res) => {
     const filePath = `/uploads/${req.file.filename}`;
     
     const updatedWidget = await Widget.findOneAndUpdate(
-      { userId: userId },
+      { agentId: agentId },
       { logo: filePath },
       { new: true }
     );
@@ -525,42 +486,39 @@ WidgetController.getPublicWidgetSettings = async (req, res) => {
   }
 };
 
-// Update widget position
+// Update widget horizontal alignment (legacy body: { position: { align } } still accepted)
 WidgetController.updateWidgetPosition = async (req, res) => {
   try {
-    const { userId, position } = req.body;
-    
-    if (!userId) {
+    const { agentId, position, align: alignBody } = req.body;
+    const alignRaw = alignBody ?? position?.align;
+
+    if (!agentId) {
       return res.status(400).json({ 
         status_code: 400, 
-        message: "UserId is required" 
+        message: "AgentId is required" 
       });
     }
-    
-    if (!position) {
+
+    if (alignRaw === undefined && !position) {
       return res.status(400).json({ 
         status_code: 400, 
-        message: "Position data is required" 
+        message: "align or position.align is required" 
       });
     }
-    
-    const updateData = {
-      'position.align': ['left', 'right'].includes(position.align) ? position.align : 'right',
-      'position.sideSpacing': Math.max(0, Math.min(200, position.sideSpacing || 20)),
-      'position.bottomSpacing': Math.max(0, Math.min(200, position.bottomSpacing || 20))
-    };
-    
+
+    const align = ['left', 'right'].includes(alignRaw) ? alignRaw : 'right';
+
     const updatedWidget = await Widget.findOneAndUpdate(
-      { userId },
-      { $set: updateData },
+      { agentId },
+      { $set: { align }, $unset: { position: 1 } },
       { new: true }
     );
     
     if (updatedWidget) {
       res.status(200).json({ 
         status_code: 200, 
-        message: "Widget position updated successfully",
-        data: { position: updatedWidget.position }
+        message: "Widget alignment updated successfully",
+        data: { align: updatedWidget.align }
       });
     } else {
       res.status(404).json({ 
@@ -574,6 +532,34 @@ WidgetController.updateWidgetPosition = async (req, res) => {
       status: false, 
       message: "Something went wrong please try again!" 
     });
+  }
+};
+
+// POST /widget/toggle-status — toggle isActive (1/0) for a widget by agentId
+WidgetController.toggleWidgetStatus = async (req, res) => {
+  try {
+    const { agentId, isActive } = req.body;
+    if (!agentId) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'agentId is required' });
+    }
+    if (isActive === undefined) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'isActive is required' });
+    }
+
+    const widget = await Widget.findOneAndUpdate(
+      { agentId },
+      { $set: { isActive: isActive ? 1 : 0 } },
+      { new: true }
+    );
+
+    if (!widget) {
+      return res.status(404).json({ status_code: 404, status: false, message: 'Widget not found for this agent' });
+    }
+
+    return res.status(200).json({ status_code: 200, status: true, message: 'Widget status updated', isActive: widget.isActive });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to update widget status' });
   }
 };
 

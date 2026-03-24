@@ -37,6 +37,98 @@ ConversationController.getAllOldConversations = async (visitor_id, agentId) => {
   }
 };
 
+//get ai only conversation
+ConversationController.getAiOnlyConversation = async (agentId) => {
+  try {
+    const conv = await Conversation.find({
+      agentId: agentId,
+      aiChat: true,
+      conversationOpenStatus: "open",
+    }).populate('humanAgentId', 'name avatar isClient').sort({ createdAt: -1 });
+
+    const updatedVisitors = await Promise.all(
+      conv.map(async (conv) => {
+        const conversation = conv.toObject();
+        const visitor = await Visitor.findOne({ _id: conv.visitor });
+        conversation["visitor"] = visitor;
+        return conversation;
+      })
+    );
+
+    return updatedVisitors;
+  } catch (error) {
+    console.error("Error fetching ai only conversations list:", error);
+    return error;
+  }
+}
+
+//get non ai only conversation
+ConversationController.getNonAiOnlyConversation = async (agentId) => {
+  try{
+    const conv = await Conversation.find({
+      agentId: agentId,
+      aiChat: false,
+      conversationOpenStatus: "open",
+    }).populate('humanAgentId', 'name avatar isClient').sort({ createdAt: -1 });
+    const updatedVisitors = await Promise.all(
+      conv.map(async (conv) => {
+        const conversation = conv.toObject();
+        const visitor = await Visitor.findOne({ _id: conv.visitor });
+        conversation["visitor"] = visitor;
+        return conversation;
+      })
+    );
+    return updatedVisitors;
+  } catch (error) {
+    console.error("Error fetching non ai only conversations list:", error);
+    return error;
+  }
+}
+
+//get good rated conversations
+ConversationController.getGoodRatedConversations = async (agentId) => {
+  try{
+    const conv = await Conversation.find({
+      agentId: agentId,
+      feedback: true,
+    }).populate('humanAgentId', 'name avatar isClient').sort({ createdAt: -1 });
+    const updatedVisitors = await Promise.all(
+      conv.map(async (conv) => {
+        const conversation = conv.toObject();
+        const visitor = await Visitor.findOne({ _id: conv.visitor });
+        conversation["visitor"] = visitor;
+        return conversation;
+      })
+    );
+    return updatedVisitors;
+  } catch (error) {
+    console.error("Error fetching good rated conversations list:", error);
+    return error;
+  }
+}
+
+//get bad rated conversations
+ConversationController.getBadRatedConversations = async (agentId) => {
+  try{
+    const conv = await Conversation.find({
+      agentId: agentId,
+      feedback: false,
+    }).populate('humanAgentId', 'name avatar isClient').sort({ createdAt: -1 });
+    const updatedVisitors = await Promise.all(
+      conv.map(async (conv) => {
+        const conversation = conv.toObject();
+        const visitor = await Visitor.findOne({ _id: conv.visitor });
+        conversation["visitor"] = visitor;
+        return conversation;
+      })
+    );
+    return updatedVisitors;
+  } catch (error) {
+    console.error("Error fetching bad rated conversations list:", error);
+    return error;
+  }
+}
+
 
 //get Open Conversation
 ConversationController.getOpenConversation = async (visitorId, userId, agentId) => {
@@ -44,11 +136,11 @@ ConversationController.getOpenConversation = async (visitorId, userId, agentId) 
     const result = await Conversation.findOne({
       visitor: visitorId,
       conversationOpenStatus: "open",
-      // agentId: agentId
+      agentId: agentId
     });
     if(!result){
       // const conversation = await ConversationController.createConversation(visitorId, userId, agentId);
-      const conversation = await ConversationController.createConversation(visitorId, userId);
+      const conversation = await ConversationController.createConversation(visitorId, userId, agentId);
       return conversation;
     }
     return result;
@@ -62,7 +154,7 @@ ConversationController.createConversation = async (visitorId, userId, agentId) =
     const result = await Conversation.create({
       visitor: visitorId,
       userId: userId,
-      // agentId: agentId
+      agentId: agentId
     });
     return result;
   } catch (err) {
@@ -118,7 +210,7 @@ ConversationController.UpdateConversationStatusOpenClose = async (
   }
 };
 
-ConversationController.searchByTagOrName = async (query, userId) => {
+ConversationController.searchByTagOrName = async (query, userId, agentId) => {
   try {
     // Split the query into individual words
     const queryWords = query.split(" ").filter((word) => word.trim() !== "");
@@ -130,12 +222,12 @@ ConversationController.searchByTagOrName = async (query, userId) => {
 
     // Search for visitors matching any of the words
     const visitors = await Visitor.find({
-      $and: [{ userId: userId }, { $or: regexConditions }],
+      $and: [{ userId: userId }, { $or: regexConditions }, { agentId: agentId }],
     });
 
     // Search for tags matching any of the words
     const tags = await ConversationTag.find({
-      $and: [{ userId: userId }, { $or: regexConditions }],
+      $and: [{ userId: userId }, { $or: regexConditions }, { agentId: agentId }],
     });
 
   const updatedVisitors = await Promise.all(
@@ -144,7 +236,8 @@ ConversationController.searchByTagOrName = async (query, userId) => {
       const conversation = await Conversation.findOne({
         visitor: visitor._id,
         is_started:true,
-      }).populate('agentId', 'name avatar isClient').lean(); // use lean() for a plain JS object
+        agentId: agentId
+      }).populate('humanAgentId', 'name avatar isClient').lean(); // use lean() for a plain JS object
   
       if (conversation) {
         conversation["visitor"] = visitor; // Embed visitor in conversation
@@ -163,7 +256,7 @@ ConversationController.searchByTagOrName = async (query, userId) => {
    const tagConversations = await Promise.all(
     tags.map(async (tag) => {
       // const visitor = visitorDoc.toObject();
-      const conversation = await Conversation.findOne({ _id: tag.conversation, is_started:true, }).populate('agentId', 'name avatar isClient').lean();
+      const conversation = await Conversation.findOne({ _id: tag.conversation, is_started:true, agentId: agentId }).populate('agentId', 'name avatar isClient').lean();
   
       if (conversation) {
         const visitor = await Visitor.findOne({ _id: conversation.visitor }).lean();
@@ -237,6 +330,47 @@ ConversationController.getConversationStats = async (timeframe = 'today') => {
     return stats[0] || { total: 0, aiChats: 0, humanChats: 0, openChats: 0 };
   } catch (error) {
     throw error;
+  }
+};
+
+ConversationController.getFilteredConversations = async (req, res) => {
+  try {
+    const { status, rating, handledBy } = req.body;
+    const userId = req.userId;
+    const agentId = req.body.agentId || req.agentId;
+
+    const query = { userId };
+    if (agentId) query.agentId = agentId;
+
+    if (status && status !== "all") {
+      query.conversationOpenStatus = status;
+    }
+    if (rating === "good") {
+      query.feedback = true;
+    } else if (rating === "bad") {
+      query.feedback = false;
+    }
+    if (handledBy === "ai") {
+      query.aiChat = true;
+    }
+
+    const conv = await Conversation.find(query)
+      .populate("humanAgentId", "name avatar isClient")
+      .sort({ createdAt: -1 });
+
+    const updatedVisitors = await Promise.all(
+      conv.map(async (conv) => {
+        const conversation = conv.toObject();
+        const visitor = await Visitor.findOne({ _id: conv.visitor });
+        conversation["visitor"] = visitor;
+        return conversation;
+      })
+    );
+
+    res.json({ success: true, conversations: updatedVisitors });
+  } catch (error) {
+    console.error("Error fetching filtered conversations:", error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
