@@ -99,6 +99,9 @@ const initializeClientEvents = (io, socket) => {
 
   socket.join(userAgentRoom);
   if (agentRoom) socket.join(agentRoom);
+  // Rooms used by appEvents userEvent (e.g. client-status-updated, client-profile-updated)
+  socket.join(userRoom);
+  socket.join(`user-${humanAgentId}`);
 
   socket.on("client-connect", async () => {
     socket.emit("client-connect-response", {

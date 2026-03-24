@@ -279,6 +279,7 @@ UserController.updateClientStatus = async (req, res) => {
     // Emit socket event to notify about client status change
     const appEvents = require("../events");
     const updatedClientData = {
+      id: clientAgent._id,
       _id: clientAgent._id,
       userId: clientAgent.userId,
       email: clientAgent.email,
@@ -566,6 +567,21 @@ UserController.updateClientProfileGeneral = async (req, res) => {
 
     await user.save();
     await clientAgent.save();
+
+    const appEvents = require("../events");
+    const profileSocketPayload = {
+      _id: clientAgent._id,
+      userId: clientAgent.userId,
+      name: clientAgent.name,
+      email: clientAgent.email,
+      avatar: clientAgent.avatar,
+      isClient: true,
+      phone: user.phone || '',
+    };
+    if (clientAgent.userId) {
+      appEvents.emit("userEvent", clientAgent.userId.toString(), "client-profile-updated", profileSocketPayload);
+    }
+    appEvents.emit("userEvent", clientAgent._id.toString(), "client-profile-updated", profileSocketPayload);
 
     return res.json({
       status_code: 200,

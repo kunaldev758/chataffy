@@ -121,7 +121,7 @@ exports.createHumanAgent = async (req, res) => {
       password: hashedPassword,
       status: 'approved',
       isClient: false,
-      avatar: '/uploads/default-avatar.png',
+      avatar: '',
       assignedAgents: agentIds
     });
 
@@ -284,6 +284,7 @@ exports.updateHumanAgentStatus = async (req, res) => {
     // Emit socket event to notify all clients about agent status change
     const updatedAgentData = {
       id: humanAgent._id,
+      _id: humanAgent._id,
       name: humanAgent.name,
       email: humanAgent.email,
       status: humanAgent.status,
@@ -292,15 +293,36 @@ exports.updateHumanAgentStatus = async (req, res) => {
       avatar: humanAgent.avatar,
       userId: humanAgent.userId,
       assignedAgents: humanAgent.assignedAgents,
+      isClient: !!humanAgent.isClient,
     };
 
     // Emit to the client's room (userId) so settings page can update
     if (humanAgent.userId) {
-      appEvents.emit("userEvent", humanAgent.userId, "human-agent-status-updated", updatedAgentData);
+      appEvents.emit("userEvent", humanAgent.userId.toString(), "human-agent-status-updated", updatedAgentData);
+      appEvents.emit("userEvent", humanAgent.userId.toString(), "agent-status-updated", updatedAgentData);
     }
 
-    // Also emit to the agent's own room (agentId) in case they're viewing settings
+    // Also emit to the agent's own room (humanAgent id) in case they're viewing settings
     appEvents.emit("userEvent", humanAgent._id.toString(), "human-agent-status-updated", updatedAgentData);
+    appEvents.emit("userEvent", humanAgent._id.toString(), "agent-status-updated", updatedAgentData);
+
+    // Client agent (isClient): same events as UserController.updateClientStatus for inbox / profile menu
+    if (humanAgent.isClient) {
+      const clientPayload = {
+        _id: humanAgent._id,
+        userId: humanAgent.userId,
+        email: humanAgent.email,
+        name: humanAgent.name,
+        isActive: humanAgent.isActive,
+        lastActive: humanAgent.lastActive,
+        isClient: true,
+        assignedAgents: humanAgent.assignedAgents,
+      };
+      if (humanAgent.userId) {
+        appEvents.emit("userEvent", humanAgent.userId.toString(), "client-status-updated", clientPayload);
+      }
+      appEvents.emit("userEvent", humanAgent._id.toString(), "client-status-updated", clientPayload);
+    }
 
     res.json({
       message: "Human agent status updated successfully",

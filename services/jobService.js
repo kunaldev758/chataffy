@@ -14,7 +14,7 @@ const QdrantVectorStoreManager = require("./QdrantService");
 
 const redisConfig =
   process.env.ENVIRONMENT === "local"
-    ? { url: process.env.REDIS_URL, maxRetriesPerRequest: null }
+    ? { host: "127.0.0.1", port: 6379, maxRetriesPerRequest: null }
     : {
         host: "127.0.0.1",
         port: 6379,
@@ -407,6 +407,18 @@ new Worker(
 
           const processResult = await processWebPage(url, sourceCode,footerCache);
           if (!processResult.content) {
+            await TrainingModel.create({
+              userId,
+              agentId,
+              type: 0,
+              content: "",
+              dataSize: 0,
+              trainingStatus: 2,
+              error: "No data found",
+              "webPage.url": url,
+              chunkCount: 0,
+              lastEdit: Date.now(),
+            });
             await Url.updateOne(
               { url:url, agentId:agentId },
               {
@@ -582,6 +594,7 @@ new Worker(
         // 3️⃣ Update training status in DB
         for (const doc of scrapedDocs) {
           const status = result?.failedUrls?.includes(doc.originalUrl) ? 2 : 1;
+          if(status == 1){
           await TrainingModel.create({
             userId,
             agentId,
@@ -593,7 +606,19 @@ new Worker(
             chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
             lastEdit: Date.now(),
           });
-          if(status == 2){
+        }else if(status == 2){
+          await TrainingModel.create({
+            userId,
+            agentId,
+            type: 0,
+            content: doc.content,
+            dataSize: doc.dataSize,
+            trainingStatus: status,
+            error: "Failed to process/minify web page content",
+            "webPage.url": doc.originalUrl,
+            chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
+            lastEdit: Date.now(),
+          });
           await Url.updateOne(
             { url:doc.originalUrl, agentId:agentId },
             {

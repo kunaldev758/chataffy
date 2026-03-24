@@ -837,7 +837,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       
       await Agent.updateOne(
         { _id: agentId },
-        { $set: { "pagesAdded.total": urls.length || 0 } }
+        { $inc: { "pagesAdded.total": urls.length || 0 } }
       );
 
       await urlProcessingQueue.add("processSingleUrl", {

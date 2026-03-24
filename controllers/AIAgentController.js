@@ -70,7 +70,7 @@ AIAgentController.createAgent = async (req, res) => {
       message: 'Agent created successfully',
       agent: {
         _id: agent._id,
-        website_name: agent.website_name,
+        agentName: agent.agentName,
         isActive: agent.isActive,
       }
     });
