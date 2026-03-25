@@ -29,20 +29,19 @@ const initializeVisitorEvents = (io, socket) => {
   const { visitorId } = socket;
   const { agentId } = socket;
   const {type} = socket;
-  let userAgentRoom = "";
-  let userRoom = "";
+  // let userAgentRoom = "";
+  // let userRoom = "";
   let visitorRoom = "";
   let agentRoom = "";
+  let conversationRoom = "";
 
-
-    userAgentRoom = `user-${agentId}-${humanAgentId}`;
+    // userAgentRoom = `user-${agentId}-${humanAgentId}`;
     agentRoom = `user-${agentId}`;
     visitorRoom = `visitor-${agentId}-${visitorId}`;
-    userRoom = `user-${userId}`;
+    // userRoom = `user-${userId}`;
   socket.join(visitorRoom);
-  socket.join(userRoom);
-  socket.join(userAgentRoom);
   socket.join(agentRoom);
+  // socket.join(userRoom);
 
   socket.on("visitor-ip", async ({ ip }, callback) => {
     try {
@@ -113,9 +112,13 @@ const initializeVisitorEvents = (io, socket) => {
         comment: conversation.comment
       } : null;
 
+      conversationRoom = `conversation-${conversation?._id}`;
+      socket.join(conversationRoom);
+
       // Emit visitor-connect-response directly to the visitor.
       // socket.to(room) EXCLUDES the sender — the visitor would never receive it.
-      socket.emit("visitor-connect-response", {
+      io.to(conversationRoom).emit("visitor-connect-response", {
+        conversationId: conversation?._id,
         chatMessages,
         themeSettings,
         aiChat: aiChat,
@@ -166,7 +169,7 @@ const initializeVisitorEvents = (io, socket) => {
         await Conversation.findByIdAndUpdate(conversationId, {
           is_started: true,
         });
-        io.to([userAgentRoom, agentRoom]).emit(
+        io.to([agentRoom]).emit(
           "visitor-connect-list-update",
           {}
         );
@@ -190,7 +193,7 @@ const initializeVisitorEvents = (io, socket) => {
 
       const chatMessageObj = chatMessage.toObject ? chatMessage.toObject() : chatMessage;
 
-      io.to([userAgentRoom, agentRoom, visitorRoom]).emit(
+      io.to(conversationRoom).emit(
         "conversation-append-message",
         {
           chatMessage: chatMessageObj,
@@ -200,7 +203,7 @@ const initializeVisitorEvents = (io, socket) => {
         { _id: conversationId },
         { $inc: { newMessage: 1 }, $set: { lastMessage: message } }
       );
-      io.to([userAgentRoom, agentRoom]).emit("new-message-count", { conversationId, lastMessage: message });
+      io.to([agentRoom]).emit("new-message-count", { conversationId, lastMessage: message });
       callback?.({ success: true, chatMessage: chatMessageObj, id });
       if (conversation.aiChat) {
         const response_data = await QueryController.handleQuestionAnswer(
@@ -209,7 +212,7 @@ const initializeVisitorEvents = (io, socket) => {
           message,
           conversationId
         );
-        io.to([visitorRoom, userAgentRoom, agentRoom]).emit("intermediate-response", {
+        io.to(conversationRoom).emit("intermediate-response", {
           message: "...replying",
           conversationId,
         });
@@ -223,7 +226,7 @@ const initializeVisitorEvents = (io, socket) => {
             const conversationDoc = await Conversation.findById(conversationId).lean();
             
             // Emit agent connection request to visitor (show connecting state)
-            io.to(visitorRoom).emit("agent-connection-request", {
+            io.to(conversationRoom).emit("agent-connection-request", {
               conversationId,
               visitorId,
               message: "Connecting to agent...",
@@ -241,7 +244,7 @@ const initializeVisitorEvents = (io, socket) => {
 
             // Emit to client room and agent room (inbox receives from agentRoom)
             // Note: emit to array deduplicates – sockets in both rooms only receive it once.
-            io.to([userAgentRoom, agentRoom]).emit("agent-connection-notification", notificationData);
+            io.to([agentRoom]).emit("agent-connection-notification", notificationData);
 
             // Create per-agent DB notifications (do NOT re-emit to agentRoom – already done above)
             const agents = await HumanAgent.find({ agentId, status: 'approved', isActive: true }).lean();
@@ -272,12 +275,12 @@ const initializeVisitorEvents = (io, socket) => {
                   userId
                 );
                 
-                io.to([visitorRoom, userAgentRoom, agentRoom]).emit("conversation-append-message", {
+                io.to(conversationRoom).emit("conversation-append-message", {
                   chatMessage: timeoutMessage,
                 });
 
                 // Emit to visitor that connection failed
-                io.to(visitorRoom).emit("agent-connection-timeout", {
+                io.to(conversationRoom).emit("agent-connection-timeout", {
                   conversationId,
                 });
 
@@ -314,7 +317,7 @@ const initializeVisitorEvents = (io, socket) => {
             { _id: conversationId },
             { $set: { lastMessage: stripHtml(response_data.answer) } }
           );
-          io.to([visitorRoom, userAgentRoom, agentRoom]).emit(
+          io.to(conversationRoom).emit(
             "conversation-append-message",
             {
               chatMessage: chatMessageResponse,
@@ -335,7 +338,7 @@ const initializeVisitorEvents = (io, socket) => {
             { _id: conversationId },
             { $set: { lastMessage: "error in generating Response" } }
           );
-          io.to([visitorRoom, userAgentRoom, agentRoom]).emit(
+          io.to(conversationRoom).emit(
             "conversation-append-message",
             { chatMessage: chatMessageResponse }
           );
@@ -351,12 +354,23 @@ const initializeVisitorEvents = (io, socket) => {
     "conversation-feedback",
     async ({ conversationId, feedback, comment }, callback) => {
       try {
-        const updatedMessage = await ConversationController.updateFeedback(
+        await ConversationController.updateFeedback(
           conversationId,
           feedback,
           comment
         );
-        callback?.({ success: true, updatedMessage });
+        callback?.({ success: true });
+
+        // Build the conversation room from the payload so we don't depend on the
+        // closure variable (which is only set after visitor-connect fires).
+        const feedbackConvRoom = `conversation-${conversationId}`;
+        const rooms = [agentRoom, feedbackConvRoom].filter(Boolean);
+        console.log(`[conversation-feedback] emitting conversation-feedback-update to rooms:`, rooms, { conversationId, feedback, comment });
+        io.to(rooms).emit("conversation-feedback-update", {
+          conversationId,
+          feedback,
+          comment,
+        });
       } catch (error) {
         console.error("message-feedback error:", error.message);
         callback?.({ success: false, error: error.message });
@@ -381,7 +395,7 @@ const initializeVisitorEvents = (io, socket) => {
           const humanAgentId = conversation.humanAgentId;
           
           // Emit to conversation room
-          io.to([userAgentRoom, agentRoom, visitorRoom]).emit("visitor-close-chat", {
+          io.to([ agentRoom, conversationRoom]).emit("visitor-close-chat", {
             conversationStatus: "close",
           });
           
@@ -433,6 +447,10 @@ const initializeVisitorEvents = (io, socket) => {
 
   socket.on("disconnect", () => {
     socket.leave(visitorRoom);
+    socket.leave(conversationRoom);
+    socket.leave(agentRoom);
+    // socket.leave(userAgentRoom);
+    // socket.leave(userRoom);
   });
 };
 

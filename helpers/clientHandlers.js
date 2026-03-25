@@ -73,9 +73,9 @@ async function transferChatToHuman(io, { conversationId, visitorId, humanAgentId
   const agentRooms = [`conversation-${conversationId}`, `conversation-${visitorId}`];
   const visitorRoom = `visitor-${agentId}-${visitorId}`;
 
-  io.to([...agentRooms, visitorRoom]).emit("conversation-append-message", { chatMessage: systemMessageObj });
+  io.to(`conversation-${conversationId}`).emit("conversation-append-message", { chatMessage: systemMessageObj });
 
-  io.to([...agentRooms, visitorRoom]).emit("ai-chat-status-update", {
+  io.to(`conversation-${conversationId}`).emit("ai-chat-status-update", {
     aiChat: false,
     conversationId,
     transferredTo: transferName,
@@ -290,7 +290,7 @@ const initializeClientEvents = (io, socket) => {
       if (aiChat === false) {
         io.to([
           `conversation-${conversationId}`,
-          `conversation-${visitorId}`,
+          // `visitor-${agentId}-${visitorId}`,
         ]).emit("agent-typing", { conversationId, visitorId });
       }
       callback?.({ success: true });
@@ -305,7 +305,7 @@ const initializeClientEvents = (io, socket) => {
       if (aiChat === false) {
         io.to([
           `conversation-${conversationId}`,
-          `conversation-${visitorId}`,
+          // `visitor-${agentId}-${visitorId}`,
         ]).emit("agent-stop-typing", { conversationId, visitorId });
       }
       callback?.({ success: true });
@@ -353,17 +353,19 @@ const initializeClientEvents = (io, socket) => {
         { $set: { lastMessage: stripHtml(message) } }
       );
 
+      // const visitorRoom = `visitor-${agentId}-${visitorId}`;
+
       // Use the conversation already fetched above — no second DB call needed
       if (conversation && !conversation.aiChat) {
         io.to([
           `conversation-${conversationId}`,
-          `conversation-${visitorId}`,
+          // visitorRoom,
         ]).emit("agent-stop-typing", { conversationId, visitorId });
       }
 
       io.to([
         `conversation-${conversationId}`,
-        `conversation-${visitorId}`,
+        // visitorRoom,
       ]).emit("conversation-append-message", { chatMessage: chatMessageObj });
 
       callback?.({ success: true, chatMessage: chatMessageObj });
@@ -489,11 +491,11 @@ const initializeClientEvents = (io, socket) => {
 
       // Emit only to userAgentRoom — client socket is also in conversation-{id} room
       // (joined via set-conversation-id) so emitting to both would deliver it twice.
-      io.to(userAgentRoom).emit("conversation-close-triggered", {
+      io.to([conversationRoom]).emit("conversation-close-triggered", {
         conversationStatus: "close",
       });
 
-      io.to(`conversation-${visitorId}`).emit("visitor-conversation-close", {
+      io.to(conversationRoom).emit("visitor-conversation-close", {
         conversationStatus: "close",
       });
 
@@ -515,11 +517,11 @@ const initializeClientEvents = (io, socket) => {
       await ConversationController.UpdateConversationStatusOpenClose(conversationId, "close");
 
       // Emit only to userAgentRoom to avoid double delivery (client is in both rooms)
-      io.to(userAgentRoom).emit("conversation-close-triggered", {
+      io.to([conversationRoom]).emit("conversation-close-triggered", {
         conversationStatus: "close",
       });
 
-      io.to(`conversation-${visitorId}`).emit("visitor-blocked", {
+      io.to(conversationRoom).emit("visitor-blocked", {
         conversationStatus: "close",
       });
 
@@ -674,7 +676,7 @@ const initializeClientEvents = (io, socket) => {
 
       // Notify visitor that agent accepted.
       // Visitor sockets join visitor-${agentId}-${visitorId}, NOT conversation rooms.
-      io.to(`visitor-${agentId}-${visitorId}`).emit("agent-connection-accepted", {
+      io.to(conversationRoom).emit("agent-connection-accepted", {
         conversationId,
         agentName: transferName,
       });
@@ -709,6 +711,8 @@ const initializeClientEvents = (io, socket) => {
     if (userAgentRoom) socket.leave(userAgentRoom);
     if (userRoom) socket.leave(userRoom);
     if (conversationRoom) socket.leave(conversationRoom);
+    if (agentRoom) socket.leave(agentRoom);
+
     console.log("User disconnected from client socket");
   });
 };

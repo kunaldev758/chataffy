@@ -60,8 +60,18 @@ DashboardController.getDashboardDataForAgent = async (dateRange, userId, agentId
       csat = 0;
     }
 
-    const location = await Visitor.find({userId:userId, agentId: agentId}, { location: 1, _id: 0 })
-   const locationData = transformData(location)
+    const location = await Visitor.find(
+      {
+        userId: userId,
+        agentId: agentId,
+        createdAt: {
+          $gte: new Date(startDate),
+          $lte: new Date(endDate),
+        },
+      },
+      { location: 1, _id: 0 }
+    );
+    const locationData = transformData(location);
 
    //total Agents
     const totalHumanAgents = await HumanAgent.find({ userId: userId, isClient: false }).countDocuments();
@@ -167,8 +177,18 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
       csat = 0;
     }
 
-    const location = await Visitor.find({userId:userId}, { location: 1, _id: 0 })
-   const locationData = transformData(location)
+  const location = await Visitor.find(
+    {
+      userId: userId,
+      agentId: agentId,
+      createdAt: {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      },
+    },
+    { location: 1, _id: 0 }
+  );
+  const locationData = transformData(location);
 
    //total Agents
     const totalHumanAgents = await HumanAgent.find({ userId: userId, isClient: false }).countDocuments();

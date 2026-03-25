@@ -3,6 +3,7 @@ const { OpenAIEmbeddings } = require("@langchain/openai");
 const { QdrantClient } = require("@qdrant/js-client-rest");
 const { v4: uuidv4 } = require("uuid");
 const Agent = require("../models/Agent");
+const Client = require("../models/Client");
 const { logOpenAIUsage, logQdrantUsage } = require("../services/UsageTrackingService");
 
 const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
