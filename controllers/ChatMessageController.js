@@ -19,23 +19,28 @@ ChatMessageController.getRecentChatMessages = async (conversation_id) => {
     throw error;
   }
 };
+const fetchChatMessagesByConversationId = async (conversation_id) => {
+  if (!conversation_id) return [];
+  return ChatMessage.find({ conversation_id })
+    .populate("humanAgentId", "name avatar isClient")
+    .populate({
+      path: "replyTo",
+      select: "sender message createdAt sender_type humanAgentId",
+      populate: { path: "humanAgentId", select: "name isClient" },
+    })
+    .lean();
+};
+
 // Get all chat messages (optionally scoped by agentId for multi-agent support)
 const getAllChatMessages = async (visitor_id, agentId) => {
   try {
-    let chatMessages;
-    if (visitor_id) {
-      const query = { visitor: visitor_id, conversationOpenStatus: "open" };
-      if (agentId != null) query.agentId = agentId;
-      const conversation = await Conversation.findOne(query);
-      const conversation_id = conversation?._id;
-      chatMessages = await ChatMessage.find({ conversation_id })
-        .populate('humanAgentId', 'name avatar isClient')
-        .populate({ path: 'replyTo', select: 'sender message createdAt sender_type humanAgentId', populate: { path: 'humanAgentId', select: 'name isClient' } })
-        .lean();
-    } else {
+    if (!visitor_id) {
       throw new Error("visitor_id is required");
     }
-    return chatMessages;
+    const query = { visitor: visitor_id, conversationOpenStatus: "open" };
+    if (agentId != null) query.agentId = agentId;
+    const conversation = await Conversation.findOne(query);
+    return fetchChatMessagesByConversationId(conversation?._id);
   } catch (error) {
     throw error;
   }
@@ -43,23 +48,26 @@ const getAllChatMessages = async (visitor_id, agentId) => {
 ChatMessageController.getAllChatMessages = getAllChatMessages;
 ChatMessageController.getAllChatMessagesAPI = async (req, res) => {
   try {
-    const chatMessages = await getAllChatMessages(req.body.id); //conversationId
-    const conversationId = chatMessages[0]?.conversation_id;
-    let conversationData = null;
-    if (conversationId) {
-      const Conversation = require("../models/Conversation");
-      const conversation = await Conversation.findById(conversationId).lean();
-      if (conversation) {
-        conversationData = {
-          feedback: conversation.feedback,
-          comment: conversation.comment
-        };
-      }
+    const conversationId = req.body.id;
+    if (!conversationId) {
+      return res.status(400).json({ error: "conversation id is required" });
     }
-    res.json({ 
-      chatMessages: chatMessages, 
-      conversationOpenStatus: "open",
-      conversationFeedback: conversationData
+    const conversationDoc = await Conversation.findOne({
+      _id: conversationId,
+    }).lean();
+    const chatMessages = await fetchChatMessagesByConversationId(
+      conversationDoc?._id
+    );
+    const conversationData = conversationDoc
+      ? {
+          feedback: conversationDoc.feedback,
+          comment: conversationDoc.comment,
+        }
+      : null;
+    res.json({
+      chatMessages,
+      conversationOpenStatus: conversationDoc?.conversationOpenStatus ?? null,
+      conversationFeedback: conversationData,
     });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch chat messages" });

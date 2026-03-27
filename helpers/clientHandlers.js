@@ -24,14 +24,29 @@ async function resolveHumanAgent(socket, userId) {
     const humanAgent = await HumanAgent.findById(socket.humanAgentId).lean();
     return {
       id: socket.humanAgentId,
-      name: humanAgent ? (humanAgent.isClient ? "Client" : humanAgent.name) : "Agent",
+      name: humanAgent ? humanAgent.name : "Agent",
     };
   }
   if (socket.type === "client") {
     const rec = await HumanAgent.findOne({ userId, isClient: true }).lean();
-    return rec ? { id: rec._id, name: "Client" } : { id: undefined, name: "Client" };
+    return rec ? { id: rec._id, name: rec.name } : { id: undefined, name: "Client" };
   }
   return { id: undefined, name: "Agent" };
+}
+
+/** System line in the thread when a conversation is closed (dashboard / agent). */
+async function appendConversationClosedSystemMessage(io, { conversationId, visitorId, userId, agentId, closedByName }) {
+  const message = `Chat ended: ${closedByName} closed the chat.`;
+  const chatMessage = await ChatMessageController.createChatMessage(
+    conversationId,
+    visitorId || "system",
+    "agent-connect",
+    message,
+    userId,
+    agentId
+  );
+  const chatMessageObj = chatMessage.toObject ? chatMessage.toObject() : chatMessage;
+  io.to(`conversation-${conversationId}`).emit("conversation-append-message", { chatMessage: chatMessageObj });
 }
 
 /**
@@ -487,7 +502,22 @@ const initializeClientEvents = (io, socket) => {
 
       let visitorId = conversation?.visitor;
 
-      await ConversationController.UpdateConversationStatusOpenClose(conversationId, status);
+      const { name: closedByName } = await resolveHumanAgent(socket, userId);
+      await ConversationController.UpdateConversationStatusOpenClose(
+        conversationId,
+        status,
+        status === "close" ? closedByName : undefined
+      );
+
+      if (status === "close") {
+        await appendConversationClosedSystemMessage(io, {
+          conversationId,
+          visitorId,
+          userId,
+          agentId: conversation.agentId || agentId,
+          closedByName,
+        });
+      }
 
       // Emit only to userAgentRoom — client socket is also in conversation-{id} room
       // (joined via set-conversation-id) so emitting to both would deliver it twice.
@@ -514,7 +544,23 @@ const initializeClientEvents = (io, socket) => {
     try {
       await VisitorController.blockVisitor({ visitorId });
 
-      await ConversationController.UpdateConversationStatusOpenClose(conversationId, "close");
+      const { name: closedByName } = await resolveHumanAgent(socket, userId);
+      await ConversationController.UpdateConversationStatusOpenClose(
+        conversationId,
+        "close",
+        closedByName
+      );
+
+      const conv = await Conversation.findById(conversationId).lean();
+      if (conv) {
+        await appendConversationClosedSystemMessage(io, {
+          conversationId,
+          visitorId: conv.visitor,
+          userId: conv.userId,
+          agentId: conv.agentId || agentId,
+          closedByName,
+        });
+      }
 
       // Emit only to userAgentRoom to avoid double delivery (client is in both rooms)
       io.to([conversationRoom]).emit("conversation-close-triggered", {

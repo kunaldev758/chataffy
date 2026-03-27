@@ -185,21 +185,23 @@ ConversationController.disableAiChat = async ({conversationId}) => {
 
 ConversationController.UpdateConversationStatusOpenClose = async (
   conversationId,
-  status
+  status,
+  closedBy
 ) => {
   try {
     if (conversationId) {
       if (status == "open") {
-        let conversation = await Conversation.findByIdAndUpdate(
-          conversationId,
-          { conversationOpenStatus: "open" }
-        );
+        await Conversation.findByIdAndUpdate(conversationId, {
+          $set: { conversationOpenStatus: "open" },
+          $unset: { closedBy: "" },
+        });
         return true;
       } else {
-        let conversation = await Conversation.findByIdAndUpdate(
-          conversationId,
-          { conversationOpenStatus: "close" }
-        );
+        const $set = { conversationOpenStatus: "close" };
+        if (closedBy != null && String(closedBy).trim() !== "") {
+          $set.closedBy = String(closedBy).trim();
+        }
+        await Conversation.findByIdAndUpdate(conversationId, { $set });
         return true;
       }
     } else {

@@ -382,18 +382,39 @@ const initializeVisitorEvents = (io, socket) => {
     "close-conversation-visitor",
     async ({ conversationId, status }, callback) => {
       try {
+        let closedByName = "Visitor";
+        try {
+          const visitorDoc = await Visitor.findById(socket.visitorId).lean();
+          if (visitorDoc?.name) closedByName = visitorDoc.name;
+        } catch (_) {
+          /* keep default */
+        }
         await ConversationController.UpdateConversationStatusOpenClose(
           conversationId,
-          status
+          status,
+          status === "close" ? closedByName : undefined
         );
+
+        const conversation = await Conversation.findById(conversationId).lean();
+
+        if (status === "close" && conversation) {
+          const closeLine = await ChatMessageController.createChatMessage(
+            conversationId,
+            conversation.visitor,
+            "agent-connect",
+            `Chat ended: ${closedByName} closed the chat.`,
+            conversation.userId,
+            conversation.agentId || agentId
+          );
+          const closeLineObj = closeLine.toObject ? closeLine.toObject() : closeLine;
+          io.to(`conversation-${conversationId}`).emit("conversation-append-message", {
+            chatMessage: closeLineObj,
+          });
+        }
+
         callback?.({ success: true });
 
-        // Get conversation to find userId and humanAgentId
-        const conversation = await Conversation.findById(conversationId).lean();
         if (conversation) {
-          const userId = conversation.userId;
-          const humanAgentId = conversation.humanAgentId;
-          
           // Emit to conversation room
           io.to([ agentRoom, conversationRoom]).emit("visitor-close-chat", {
             conversationStatus: "close",

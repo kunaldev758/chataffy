@@ -83,7 +83,7 @@ UserController.createUser = async (req, res) => {
           userId: userId,
           status: 'approved',
           isClient: true,
-          avatar: '/uploads/default-avatar.png',
+          avatar: '',
           assignedAgents: [agent._id] // Default avatar path
         });
         await humanAgent.save();
@@ -399,7 +399,7 @@ UserController.googleOAuth = async (req, res) => {
           userId: userId,
           status: 'approved',
           isClient: true,
-          avatar: '/uploads/default-avatar.png', // Default avatar path
+          avatar: '', // Default avatar path
           assignedAgents: [agent._id] // Default avatar path
         });
         await humanAgent.save();
