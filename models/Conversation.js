@@ -28,6 +28,10 @@ const conversationSchema = new mongoose.Schema(
       default: "open",
       required: true,
     },
+    closedBy: {
+      type: String,
+      default: null,
+    },
     newMessage: { type: Number, default: 0 },
     lastMessage: { type: String, default: "" },
     createdAt: {

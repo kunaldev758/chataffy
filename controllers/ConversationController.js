@@ -11,12 +11,10 @@ ConversationController.getAllOldConversations = async (visitor_id, agentId) => {
   try {
     if (!visitor_id) return [];
 
-    // Fetch closed conversations for the visitor
+    // Fetch all conversations for the visitor (open and closed)
     let conversations = await Conversation.find({
       visitor: visitor_id,
-      conversationOpenStatus: "close",
-      // agentId: agentId
-    });
+    }).sort({ createdAt: -1 });
 
     // For each conversation, get the last message and add it to the `message` field
     const updatedConversations = await Promise.all(
