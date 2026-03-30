@@ -521,8 +521,8 @@ new Worker(
             });
           }
         } catch (error) {
-          await TrainingModel.findByIdAndUpdate(
-            { userId: userId,agentId:agentId, "webPage.url": url },
+          await TrainingModel.findOneAndUpdate(
+            { userId, agentId, "webPage.url": url },
             {
               trainingStatus: 2, // Error
               lastEdit: Date.now(),

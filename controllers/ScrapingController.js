@@ -1362,7 +1362,7 @@ async bulkInsertUrls(userId,agentId, urls) {
           agent: await Agent.findOne({ _id: agentId }),
         });
       } else {
-        await TrainingModel.findByIdAndUpdate(
+        await TrainingModel.findOneAndUpdate(
           { userId: userId, agentId: agentId, title: title || file.originalname },
           {
             trainingStatus: 2, // Error
