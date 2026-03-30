@@ -15,6 +15,14 @@ const { agentConnectionTimeouts } = require("./visitorHandlers");
 
 const stripHtml = (html) => (html || "").replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
 
+/** Pending agent connection: map stores { timeoutId, requestStartedAt } (legacy: raw timeout id number). */
+function getAgentConnectionEntry(conversationId) {
+  const raw = agentConnectionTimeouts.get(conversationId?.toString());
+  if (raw == null) return null;
+  if (typeof raw === "number") return { timeoutId: raw, requestStartedAt: null };
+  return raw.timeoutId ? raw : null;
+}
+
 /**
  * Resolves the human agent id and display name from a socket.
  * Avoids repeated HumanAgent.findOne calls across multiple handlers.
@@ -257,7 +265,8 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("check-pending-agent-request", async ({ conversationId }, callback) => {
     try {
-      const hasPendingRequest = agentConnectionTimeouts.has(conversationId?.toString());
+      const entry = getAgentConnectionEntry(conversationId);
+      const hasPendingRequest = !!entry;
 
       if (hasPendingRequest) {
         const conversation = await Conversation.findById(conversationId).lean();
@@ -270,6 +279,7 @@ const initializeClientEvents = (io, socket) => {
             visitor: visitor,
             message: "Visitor requested to connect to an agent",
             timestamp: new Date(),
+            requestStartedAt: entry.requestStartedAt,
           };
 
           socket.emit("agent-connection-notification", notificationData);
@@ -728,9 +738,9 @@ const initializeClientEvents = (io, socket) => {
       });
 
       // Clear the pending timeout.
-      const timeoutId = agentConnectionTimeouts.get(conversationId.toString());
-      if (timeoutId) {
-        clearTimeout(timeoutId);
+      const pending = getAgentConnectionEntry(conversationId);
+      if (pending) {
+        clearTimeout(pending.timeoutId);
         agentConnectionTimeouts.delete(conversationId.toString());
       }
 

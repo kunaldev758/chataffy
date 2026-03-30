@@ -232,6 +232,9 @@ const initializeVisitorEvents = (io, socket) => {
               message: "Connecting to agent...",
             });
 
+            // Same start time for countdown + sessionStorage dismiss key on every replay (e.g. check-pending).
+            const requestStartedAt = Date.now();
+
             // Emit notification to client and agents with sound
             const notificationData = {
               conversationId,
@@ -240,6 +243,7 @@ const initializeVisitorEvents = (io, socket) => {
               visitor: visitor,
               message: "Visitor requested to connect to an agent",
               timestamp: new Date(),
+              requestStartedAt,
             };
 
             // Emit to client room and agent room (inbox receives from agentRoom)
@@ -295,8 +299,11 @@ const initializeVisitorEvents = (io, socket) => {
               }
             }, 20000); // 20 seconds
 
-            // Store timeout ID
-            agentConnectionTimeouts.set(conversationId.toString(), timeoutId);
+            // Store timeout + start time (check-pending replays need requestStartedAt for dismiss/sessionStorage)
+            agentConnectionTimeouts.set(conversationId.toString(), {
+              timeoutId,
+              requestStartedAt,
+            });
             
             return; // Don't send AI response if agent connection is requested
           }
@@ -458,9 +465,9 @@ const initializeVisitorEvents = (io, socket) => {
 
   // Listen for agent connection accepted to clear timeout
   socket.on("agent-connection-accepted-clear-timeout", ({ conversationId }) => {
-    const timeoutId = agentConnectionTimeouts.get(conversationId?.toString());
-    if (timeoutId) {
-      clearTimeout(timeoutId);
+    const entry = agentConnectionTimeouts.get(conversationId?.toString());
+    if (entry?.timeoutId) {
+      clearTimeout(entry.timeoutId);
       agentConnectionTimeouts.delete(conversationId?.toString());
       console.log(`Cleared timeout for conversation ${conversationId}`);
     }
