@@ -95,11 +95,11 @@ ChatMessageController.getAllOldChatMessages = async (req, res) => {
           comment: conversation.comment
         };
       }
-      
-      res.json({ 
-        chatMessages: chatMessages, 
-        conversationOpenStatus: "close",
-        conversationFeedback: conversationData
+
+      res.json({
+        chatMessages: chatMessages,
+        conversationOpenStatus: conversation?.conversationOpenStatus ?? null,
+        conversationFeedback: conversationData,
       });
     } else {
       throw new error();

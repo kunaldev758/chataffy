@@ -178,6 +178,7 @@ const initializeClientEvents = (io, socket) => {
       const conv = await Conversation.find({
         userId: userId,
         agentId: agentId,
+        is_started: true,
         conversationOpenStatus: "open",
       })
         .populate("humanAgentId", "name avatar isClient")
