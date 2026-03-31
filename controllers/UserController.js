@@ -104,7 +104,7 @@ UserController.createUser = async (req, res) => {
     const verificationLink = `${client_url}verify-email?token=${emailVerificationToken}`;
     const emailContent = emailTemplate.replace(/VERIFY_LINK_HERE/g, verificationLink);
     const mailOptions = {
-      from: 'Chataffy <support@favseo.com>',
+      from: 'Chataffy <noreply@chataffy.com>',
       to: email,
       subject: 'Email Verification',
       html: emailContent, // Use the modified email content

@@ -119,7 +119,7 @@ exports.createHumanAgent = async (req, res) => {
       name: name,
       email: email,
       password: hashedPassword,
-      status: 'approved',
+      status: 'pending',
       isClient: false,
       avatar: '',
       assignedAgents: agentIds
@@ -128,7 +128,7 @@ exports.createHumanAgent = async (req, res) => {
     await humanAgent.save();
 
     const acceptUrl = `${process.env.CLIENT_URL}agent-accept-invite/?token=${inviteToken}`;
-    // await sendAgentApprovalEmail({ ...humanAgent.toObject() }, acceptUrl, password);
+    await sendAgentApprovalEmail({ ...humanAgent.toObject() }, acceptUrl, password);
 
     res.status(201).json({
       message: "Human agent created successfully",
