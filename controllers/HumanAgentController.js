@@ -122,7 +122,9 @@ exports.createHumanAgent = async (req, res) => {
       status: 'pending',
       isClient: false,
       avatar: '',
-      assignedAgents: agentIds
+      assignedAgents: agentIds,
+      inviteToken: inviteToken,
+      inviteTokenExpires: inviteTokenExpires,
     });
 
     await humanAgent.save();
@@ -248,6 +250,7 @@ exports.deleteHumanAgent = async (req, res) => {
 exports.acceptInviteHumanAgent = async (req, res) => {
   try {
     const { token } = req.params;
+    console.log(token,"token")
     const humanAgent = await HumanAgent.findOne({
       inviteToken: token,
       inviteTokenExpires: { $gt: Date.now() },
