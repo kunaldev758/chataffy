@@ -332,18 +332,25 @@ const initializeVisitorEvents = (io, socket) => {
             }
           );
         } else {
+          const agentFallback = await Agent.findById(agentId)
+            .select("fallbackMessage")
+            .lean();
+          const fallbackText =
+            (agentFallback?.fallbackMessage &&
+              String(agentFallback.fallbackMessage).trim()) ||
+            "error in generating Response";
           const chatMessageResponse =
             await ChatMessageController.createChatMessage(
               conversationId,
               "",
               "system",
-              "error in generating Response",
+              fallbackText,
               userId,
               agentId
             );
           await Conversation.updateOne(
             { _id: conversationId },
-            { $set: { lastMessage: "error in generating Response" } }
+            { $set: { lastMessage: stripHtml(fallbackText) } }
           );
           io.to(conversationRoom).emit(
             "conversation-append-message",
