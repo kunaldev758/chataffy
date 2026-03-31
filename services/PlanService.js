@@ -50,9 +50,9 @@ class PlanService {
       displayName: 'Free Plan',
       limits: {
         maxStorage: 1000 * 1024, // 1000KB
-        maxPages: 50,
         maxQueries: 100,
         maxAgentsPerAccount:1,
+        maxHumanAgentsPerAccount:1,
       },
       status: 'active',
       isDefault: true
@@ -244,6 +244,7 @@ class PlanService {
       const checks = {
         canMakeQueries: true,
         canAddAgents: true,
+        canAddHumanAgents: true,
         message: '',
         upgradeSuggested: false
       };

@@ -78,12 +78,12 @@ exports.createHumanAgent = async (req, res) => {
   try {
     const { name, email, userId, agentId, assignedAgents } = req.body;
 
-    const checkLimit = await checkPlanLimits(userId, 'add_agent');
+    const checkLimit = await checkPlanLimits(userId, 'add_human_agent');
 
-    if (!checkLimit.canAddAgents) {
-      await Client.updateOne({ userId }, { $set: { "upgradePlanStatus.agentLimitExceeded": true } });
+    if (!checkLimit.canAddHumanAgents) {
+      await Client.updateOne({ userId }, { $set: { "upgradePlanStatus.humanAgentLimitExceeded": true } });
       return res.status(403).json({
-        message: "Agent limit reached. Please upgrade your plan to add more agents.",
+        message: "Human agent limit reached. Please upgrade your plan to add more human agents.",
         upgradeSuggested: true
       });
     }
