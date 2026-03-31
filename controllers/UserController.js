@@ -17,8 +17,8 @@ const https = require('https');
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
-    host: 'email-smtp.us-east-1.amazonaws.com', // SMTP server hostname
-    port: 587, // Port for the SMTP server (587 for TLS, 465 for SSL)
+    host: process.env.SMTP_HOST, // SMTP server hostname
+    port: process.env.SMTP_PORT, // Port for the SMTP server (587 for TLS, 465 for SSL)
     secure: false, // Set to true if using SSL
     auth: {
       user: process.env.EMAIL_USERNAME,
@@ -104,7 +104,7 @@ UserController.createUser = async (req, res) => {
     const verificationLink = `${client_url}verify-email?token=${emailVerificationToken}`;
     const emailContent = emailTemplate.replace(/VERIFY_LINK_HERE/g, verificationLink);
     const mailOptions = {
-      from: 'Chataffy <noreply@chataffy.com>',
+      from: process.env.SMTP_FROM,
       to: email,
       subject: 'Email Verification',
       html: emailContent, // Use the modified email content
