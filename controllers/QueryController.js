@@ -16,7 +16,15 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 // Define models used in this service
 const EMBEDDING_MODEL =
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
-const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4.1";
+const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-5";
+
+/** GPT-5 / o-series chat models reject `max_tokens`; they require `max_completion_tokens`. */
+function chatCompletionLimitPayload(maxTokens) {
+  if (/^gpt-5|^o\d/i.test(CHAT_MODEL)) {
+    return { max_completion_tokens: maxTokens };
+  }
+  return { max_tokens: maxTokens };
+}
 
 // --- Initialize Clients ---
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -593,7 +601,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           { role: "user", content: userPrompt },
         ],
         temperature: 0.4, // Increased for more natural, human-like responses
-        max_tokens: dynamicMaxTokens, // Dynamic token limit based on query type
+        ...chatCompletionLimitPayload(dynamicMaxTokens),
       });
 
       const answer =
