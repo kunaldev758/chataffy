@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const Agent = require('../models/Agent');
 const Widget = require('../models/Widget');
 const User = require('../models/User');
+const HumanAgent = require('../models/HumanAgent');
 const TrainingListFreeUsers = require('../models/TrainingListFreeUsers');
 const Url = require('../models/Url');
 const WebsiteData = require('../models/WebsiteData');
@@ -63,6 +64,15 @@ AIAgentController.createAgent = async (req, res) => {
     const widgetToken = crypto.randomBytes(8).toString('hex') + userId + agent._id;
     const widget = new Widget({ userId, widgetToken, agentId: agent._id });
     await widget.save();
+
+    const user = await User.findById(userId).select('isOnboarded');
+    if (user && !user.isOnboarded) {
+      const humanAgent = await HumanAgent.findOne({ userId, isClient: true });
+      if (humanAgent) {
+        humanAgent.name = commonHelper.clientHumanAgentNameFromAgent(agent);
+        await humanAgent.save();
+      }
+    }
 
     return res.status(200).json({
       status_code: 200,
@@ -132,6 +142,16 @@ AIAgentController.updateAgentSettings = async (req, res) => {
     if (!agent) {
       return res.status(404).json({ status_code: 404, status: false, message: 'Agent not found' });
     }
+
+    const owner = await User.findById(agent.userId).select('isOnboarded');
+    if (owner && !owner.isOnboarded) {
+      const humanAgent = await HumanAgent.findOne({ userId: agent.userId, isClient: true });
+      if (humanAgent) {
+        humanAgent.name = commonHelper.clientHumanAgentNameFromAgent(agent);
+        await humanAgent.save();
+      }
+    }
+
     return res.status(200).json({
       status_code: 200,
       status: true,

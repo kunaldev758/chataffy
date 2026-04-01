@@ -77,7 +77,7 @@ UserController.createUser = async (req, res) => {
         const humanAgentPassword = crypto.randomBytes(16).toString('hex');
         const hashedPassword = await bcrypt.hash(humanAgentPassword, 10);
         const humanAgent = new HumanAgent({
-          name: 'client',
+          name: commonHelper.clientHumanAgentNameFromAgent(agent),
           email: email,
           password: hashedPassword,
           userId: userId,
@@ -393,7 +393,7 @@ UserController.googleOAuth = async (req, res) => {
         const agentPassword = crypto.randomBytes(16).toString('hex');
         const hashedPassword = await bcrypt.hash(agentPassword, 10);
         const humanAgent = new HumanAgent({
-          name: 'client',
+          name: commonHelper.clientHumanAgentNameFromAgent(agent),
           email: email,
           password: hashedPassword,
           userId: userId,
