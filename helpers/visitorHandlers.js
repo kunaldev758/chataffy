@@ -188,7 +188,14 @@ const initializeVisitorEvents = (io, socket) => {
       );
 
       if (replyTo) {
-        await chatMessage.populate("replyTo", "sender message createdAt sender_type humanAgentId");
+        await chatMessage.populate({
+          path: "replyTo",
+          select: "sender message createdAt sender_type humanAgentId agentId",
+          populate: [
+            { path: "humanAgentId", select: "name isClient" },
+            { path: "agentId", select: "agentName" },
+          ],
+        });
       }
 
       const chatMessageObj = chatMessage.toObject ? chatMessage.toObject() : chatMessage;
@@ -320,6 +327,9 @@ const initializeVisitorEvents = (io, socket) => {
               agentId,
               response_data?.sources
             );
+          await chatMessageResponse.populate("agentId", "agentName");
+          const chatMessageObj =
+            chatMessageResponse.toObject?.() ?? chatMessageResponse;
           await Conversation.updateOne(
             { _id: conversationId },
             { $set: { lastMessage: stripHtml(response_data.answer) } }
@@ -327,7 +337,7 @@ const initializeVisitorEvents = (io, socket) => {
           io.to(conversationRoom).emit(
             "conversation-append-message",
             {
-              chatMessage: chatMessageResponse,
+              chatMessage: chatMessageObj,
               sources: response_data?.sources,
             }
           );

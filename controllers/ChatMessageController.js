@@ -23,10 +23,14 @@ const fetchChatMessagesByConversationId = async (conversation_id) => {
   if (!conversation_id) return [];
   return ChatMessage.find({ conversation_id })
     .populate("humanAgentId", "name avatar isClient")
+    .populate("agentId", "agentName")
     .populate({
       path: "replyTo",
-      select: "sender message createdAt sender_type humanAgentId",
-      populate: { path: "humanAgentId", select: "name isClient" },
+      select: "sender message createdAt sender_type humanAgentId agentId",
+      populate: [
+        { path: "humanAgentId", select: "name isClient" },
+        { path: "agentId", select: "agentName" },
+      ],
     })
     .lean();
 };
@@ -82,7 +86,15 @@ ChatMessageController.getAllOldChatMessages = async (req, res) => {
     if (conversation_id) {
       chatMessages = await ChatMessage.find({ conversation_id })
         .populate('humanAgentId', 'name avatar isClient')
-        .populate({ path: 'replyTo', select: 'sender message createdAt sender_type humanAgentId', populate: { path: 'humanAgentId', select: 'name isClient' } })
+        .populate('agentId', 'agentName')
+        .populate({
+          path: 'replyTo',
+          select: 'sender message createdAt sender_type humanAgentId agentId',
+          populate: [
+            { path: 'humanAgentId', select: 'name isClient' },
+            { path: 'agentId', select: 'agentName' },
+          ],
+        })
         .lean();
       
       // Get conversation feedback data

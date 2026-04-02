@@ -368,8 +368,16 @@ const initializeClientEvents = (io, socket) => {
       if (humanAgentIdForMessage) {
         await chatMessage.populate("humanAgentId", "name avatar isClient");
       }
+      await chatMessage.populate("agentId", "agentName");
       if (replyTo) {
-        await chatMessage.populate("replyTo", "sender message createdAt sender_type");
+        await chatMessage.populate({
+          path: "replyTo",
+          select: "sender message createdAt sender_type humanAgentId agentId",
+          populate: [
+            { path: "humanAgentId", select: "name isClient" },
+            { path: "agentId", select: "agentName" },
+          ],
+        });
       }
 
       const chatMessageObj = chatMessage.toObject ? chatMessage.toObject() : chatMessage;
