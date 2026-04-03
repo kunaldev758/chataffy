@@ -129,19 +129,56 @@ ConversationController.getBadRatedConversations = async (agentId) => {
 
 
 //get Open Conversation
+// Excludes conversations the visitor has closed (visitorClosed: true) so that
+// "Start New Chat" creates a fresh conversation even while the old one stays
+// visible to agents with conversationOpenStatus: "open".
 ConversationController.getOpenConversation = async (visitorId, userId, agentId) => {
   try {
     const result = await Conversation.findOne({
       visitor: visitorId,
       conversationOpenStatus: "open",
-      agentId: agentId
+      agentId: agentId,
+      visitorClosed: { $ne: true },
     });
     if(!result){
-      // const conversation = await ConversationController.createConversation(visitorId, userId, agentId);
       const conversation = await ConversationController.createConversation(visitorId, userId, agentId);
       return conversation;
     }
     return result;
+  } catch (err) {
+    throw err;
+  }
+};
+
+// Find the open conversation for an agent/client sending a message.
+// Unlike getOpenConversation (used by visitors), this intentionally includes
+// visitorClosed: true conversations so agents can still reply after a visitor
+// has ended their side of the chat.
+ConversationController.getOpenConversationForAgent = async (visitorId, userId, agentId) => {
+  try {
+    const result = await Conversation.findOne({
+      visitor: visitorId,
+      conversationOpenStatus: "open",
+      agentId: agentId,
+    });
+    if (!result) {
+      const conversation = await ConversationController.createConversation(visitorId, userId, agentId);
+      return conversation;
+    }
+    return result;
+  } catch (err) {
+    throw err;
+  }
+};
+
+// Mark a conversation as closed by the visitor without changing conversationOpenStatus.
+// The conversation stays in the agent's open inbox; only agents can truly close it.
+ConversationController.markVisitorClosed = async (conversationId) => {
+  try {
+    await Conversation.findByIdAndUpdate(conversationId, {
+      $set: { visitorClosed: true },
+    });
+    return true;
   } catch (err) {
     throw err;
   }

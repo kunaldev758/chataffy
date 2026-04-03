@@ -35,13 +35,19 @@ const fetchChatMessagesByConversationId = async (conversation_id) => {
     .lean();
 };
 
-// Get all chat messages (optionally scoped by agentId for multi-agent support)
+// Get all chat messages (optionally scoped by agentId for multi-agent support).
+// Excludes visitor-closed conversations so that after "Start New Chat" the visitor
+// gets a fresh session (new conversation created by getOpenConversation).
 const getAllChatMessages = async (visitor_id, agentId) => {
   try {
     if (!visitor_id) {
       throw new Error("visitor_id is required");
     }
-    const query = { visitor: visitor_id, conversationOpenStatus: "open" };
+    const query = {
+      visitor: visitor_id,
+      conversationOpenStatus: "open",
+      visitorClosed: { $ne: true },
+    };
     if (agentId != null) query.agentId = agentId;
     const conversation = await Conversation.findOne(query);
     return fetchChatMessagesByConversationId(conversation?._id);

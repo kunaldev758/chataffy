@@ -404,7 +404,7 @@ const initializeVisitorEvents = (io, socket) => {
 
   socket.on(
     "close-conversation-visitor",
-    async ({ conversationId, status }, callback) => {
+    async ({ conversationId }, callback) => {
       try {
         let closedByName = "Visitor";
         try {
@@ -413,15 +413,15 @@ const initializeVisitorEvents = (io, socket) => {
         } catch (_) {
           /* keep default */
         }
-        await ConversationController.UpdateConversationStatusOpenClose(
-          conversationId,
-          status,
-          status === "close" ? closedByName : undefined
-        );
+
+        // Only mark the conversation as visitor-closed.
+        // conversationOpenStatus intentionally stays "open" so the conversation
+        // remains visible in the agent's inbox. Only a human agent can truly close it.
+        await ConversationController.markVisitorClosed(conversationId);
 
         const conversation = await Conversation.findById(conversationId).lean();
 
-        if (status === "close" && conversation) {
+        if (conversation) {
           const closeLine = await ChatMessageController.createChatMessage(
             conversationId,
             conversation.visitor,
@@ -439,42 +439,14 @@ const initializeVisitorEvents = (io, socket) => {
         callback?.({ success: true });
 
         if (conversation) {
-          // Emit to conversation room
-          io.to([ agentRoom, conversationRoom]).emit("visitor-close-chat", {
+          // Notify visitor side that chat is closed (UI shows closed state).
+          // Also notify agent room so they see the system message and visitor status update.
+          io.to([agentRoom, conversationRoom]).emit("visitor-close-chat", {
             conversationStatus: "close",
           });
-          
-          // Emit to client room
-          // if (userId) {
-          //   io.to(`user-${userId}`).emit("conversation-close-triggered", {
-          //     conversationStatus: "close",
-          //     conversationId: conversationId
-          //   });
-          // }
-          
-          // Emit to agent room if conversation is assigned to an agent
-          // if (humanAgentId) {
-          //   io.to(`user-${humanAgentId}`).emit("conversation-close-triggered", {
-          //     conversationStatus: "close",
-          //     conversationId: conversationId
-          //   });
-          // }
-          
-          // Also emit to all agents for this client
-          // if (userId) {
-          //   const Agent = require("../models/Agent");
-          //   const agents = await Agent.find({ userId, status: 'approved' }).lean();
-          //   agents.forEach(agent => {
-          //     io.to(`user-${agent._id}`).emit("conversation-close-triggered", {
-          //       conversationStatus: "close",
-          //       conversationId: conversationId
-          //     });
-          //   });
-          // }
         }
-        
       } catch (error) {
-        console.error("close-conversation error:", error.message);
+        console.error("close-conversation-visitor error:", error.message);
         callback?.({ success: false, error: error.message });
       }
     }

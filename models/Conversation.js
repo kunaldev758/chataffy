@@ -42,6 +42,7 @@ const conversationSchema = new mongoose.Schema(
     feedback: { type: Boolean },
     comment: { type: String },
     is_started:{type: Boolean, default: false },
+    visitorClosed: { type: Boolean, default: false },
     transferredAt: {
       type: Date,
       default: null,

@@ -341,13 +341,22 @@ const initializeClientEvents = (io, socket) => {
     }
   });
 
-  socket.on("client-send-message", async ({ message, visitorId, replyTo }, callback) => {
+  socket.on("client-send-message", async ({ message, visitorId, conversationId: payloadConversationId, replyTo }, callback) => {
     try {
-      const conversation = await ConversationController.getOpenConversation(
-        visitorId,
-        userId,
-        agentId
-      );
+      // Use the explicit conversationId from the frontend when available so the
+      // message always targets the correct conversation (important when a visitor
+      // has multiple open conversations). Fall back to a lookup for backwards compat.
+      let conversation;
+      if (payloadConversationId) {
+        conversation = await Conversation.findById(payloadConversationId);
+      }
+      if (!conversation) {
+        conversation = await ConversationController.getOpenConversationForAgent(
+          visitorId,
+          userId,
+          agentId
+        );
+      }
       const conversationId = conversation?._id || null;
 
       const { id: humanAgentIdForMessage } = await resolveHumanAgent(socket, userId);
