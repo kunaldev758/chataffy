@@ -190,6 +190,11 @@ AIAgentController.deleteAgent = async (req, res) => {
       TrainingListFreeUsers.deleteMany({ agentId }),
       Url.deleteMany({ agentId }),
       WebsiteData.deleteMany({ agentId }),
+      // Drop this website from human agents’ assignedAgents (prevents stale IDs after delete)
+      HumanAgent.updateMany(
+        { assignedAgents: agentId },
+        { $pull: { assignedAgents: new mongoose.Types.ObjectId(agentId) } }
+      ),
     ]);
 
     return res.status(200).json({ status_code: 200, status: true, message: 'Agent deleted successfully' });

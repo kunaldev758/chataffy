@@ -11,6 +11,31 @@ const path = require('path');
 const fs = require('fs');
 const appEvents = require("../events");
 
+/** Build JSON-safe payload for socket.io (avoid BSON/ObjectId quirks on the client). */
+function serializeHumanAgentForSocket(humanAgentDoc) {
+  if (!humanAgentDoc) return null;
+  const ha = humanAgentDoc.toObject ? humanAgentDoc.toObject() : { ...humanAgentDoc };
+  const oid = (v) => {
+    if (v == null) return v;
+    if (typeof v.toString === "function") return v.toString();
+    return String(v);
+  };
+  return {
+    id: oid(ha._id),
+    _id: oid(ha._id),
+    name: ha.name,
+    email: ha.email,
+    status: ha.status,
+    isActive: ha.isActive,
+    lastActive: ha.lastActive ?? null,
+    avatar: ha.avatar,
+    userId: ha.userId != null ? oid(ha.userId) : ha.userId,
+    assignedAgents: Array.isArray(ha.assignedAgents)
+      ? ha.assignedAgents.map((x) => oid(typeof x === "object" && x && x._id ? x._id : x))
+      : [],
+    isClient: !!ha.isClient,
+  };
+}
 
 exports.agentLogin = async (req, res) => {
   try {
@@ -157,7 +182,26 @@ exports.createHumanAgent = async (req, res) => {
 exports.getAllHumanAgents = async (req, res) => {
   try {
     const userId = req.body.userId;
-    const humanAgents = await HumanAgent.find({userId:userId}, "-password");
+    const validAgentIds = await Agent.find({
+      userId,
+      isDeleted: { $ne: true },
+    }).distinct("_id");
+    const validSet = new Set(validAgentIds.map((id) => String(id)));
+
+    const humanAgents = await HumanAgent.find({ userId }, "-password");
+    const saveTasks = [];
+    for (const ha of humanAgents) {
+      const raw = ha.assignedAgents || [];
+      const filtered = raw.filter((id) => validSet.has(String(id)));
+      if (filtered.length !== raw.length) {
+        ha.assignedAgents = filtered;
+        saveTasks.push(ha.save());
+      }
+    }
+    if (saveTasks.length) {
+      await Promise.all(saveTasks);
+    }
+
     res.json(humanAgents);
   } catch (error) {
     console.error("Error fetching human agents:", error);
@@ -212,6 +256,30 @@ exports.updateHumanAgent = async (req, res) => {
     // agent.email = email || agent.email;
 
     await humanAgent.save();
+
+    const updatedAgentData = serializeHumanAgentForSocket(humanAgent);
+
+    if (humanAgent.userId) {
+      appEvents.emit("userEvent", humanAgent.userId.toString(), "human-agent-status-updated", updatedAgentData);
+      appEvents.emit("userEvent", humanAgent.userId.toString(), "agent-status-updated", updatedAgentData);
+    }
+
+    if (humanAgent.isClient) {
+      const clientPayload = {
+        _id: updatedAgentData._id,
+        userId: updatedAgentData.userId,
+        email: humanAgent.email,
+        name: humanAgent.name,
+        isActive: humanAgent.isActive,
+        lastActive: humanAgent.lastActive,
+        isClient: true,
+        assignedAgents: updatedAgentData.assignedAgents,
+      };
+      if (humanAgent.userId) {
+        appEvents.emit("userEvent", humanAgent.userId.toString(), "client-status-updated", clientPayload);
+      }
+      appEvents.emit("userEvent", humanAgent._id.toString(), "client-status-updated", clientPayload);
+    }
 
     res.json({
       message: "Human agent updated successfully",
@@ -285,41 +353,25 @@ exports.updateHumanAgentStatus = async (req, res) => {
     await humanAgent.save();
 
     // Emit socket event to notify all clients about agent status change
-    const updatedAgentData = {
-      id: humanAgent._id,
-      _id: humanAgent._id,
-      name: humanAgent.name,
-      email: humanAgent.email,
-      status: humanAgent.status,
-      isActive: humanAgent.isActive,
-      lastActive: humanAgent.lastActive,
-      avatar: humanAgent.avatar,
-      userId: humanAgent.userId,
-      assignedAgents: humanAgent.assignedAgents,
-      isClient: !!humanAgent.isClient,
-    };
+    const updatedAgentData = serializeHumanAgentForSocket(humanAgent);
 
-    // Emit to the client's room (userId) so settings page can update
+    // Emit to the account room (tenant userId). Sockets join user-${userId}, so avoid duplicate emits to user-${humanAgentId}.
     if (humanAgent.userId) {
       appEvents.emit("userEvent", humanAgent.userId.toString(), "human-agent-status-updated", updatedAgentData);
       appEvents.emit("userEvent", humanAgent.userId.toString(), "agent-status-updated", updatedAgentData);
     }
 
-    // Also emit to the agent's own room (humanAgent id) in case they're viewing settings
-    appEvents.emit("userEvent", humanAgent._id.toString(), "human-agent-status-updated", updatedAgentData);
-    appEvents.emit("userEvent", humanAgent._id.toString(), "agent-status-updated", updatedAgentData);
-
     // Client agent (isClient): same events as UserController.updateClientStatus for inbox / profile menu
     if (humanAgent.isClient) {
       const clientPayload = {
-        _id: humanAgent._id,
-        userId: humanAgent.userId,
+        _id: updatedAgentData._id,
+        userId: updatedAgentData.userId,
         email: humanAgent.email,
         name: humanAgent.name,
         isActive: humanAgent.isActive,
         lastActive: humanAgent.lastActive,
         isClient: true,
-        assignedAgents: humanAgent.assignedAgents,
+        assignedAgents: updatedAgentData.assignedAgents,
       };
       if (humanAgent.userId) {
         appEvents.emit("userEvent", humanAgent.userId.toString(), "client-status-updated", clientPayload);
