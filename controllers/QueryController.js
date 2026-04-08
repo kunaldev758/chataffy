@@ -847,22 +847,61 @@ Keep responses short, direct, friendly, and professional. Only use information e
         const topItems = uniquePages.slice(0, requestedCount);
 
         if (topItems.length > 0) {
-          const listItems = topItems
+          const companyName =
+            websiteData?.company_name ||
+            widgetData.organisation ||
+            "the company";
+          const pagesLines = topItems
             .map((p, idx) => {
-              const url = p.url || "#";
-              const title = p.title || p.url || `Item ${idx + 1}`;
-              return `<li><a href="${url}" target="_blank" style="color:#007bff; text-decoration:underline;">${title}</a></li>`;
+              const url = p.url || "";
+              const title = p.title || p.url || `Page ${idx + 1}`;
+              return `${idx + 1}. ${title} — ${url}`;
             })
-            .join("");
+            .join("\n");
 
-          const descriptor = keywords.length ? keywords.slice(0, 3).join(", ") : "items";
-          const structuralAnswer = `<p>Here are ${topItems.length} ${descriptor} links:</p><ul>${listItems}</ul>`;
+          const structuralContext = `The user wants pages or items from ${companyName}'s site. These ${topItems.length} knowledge-base pages match (use every entry; keep exact URLs and titles):\n\n${pagesLines}\n\nReply in clean HTML: a short, natural lead if it helps, then a <ul> of <li> items with links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>. Do not use a fixed opener like "Here are N links:" unless it truly fits; sound human and direct.`;
+
+          const { answer: structuralAnswer, usage: structuralUsage } =
+            await this.generateAnswer(
+              question,
+              structuralContext,
+              chatHistory,
+              widgetData.organisation || "the company",
+              websiteData
+            );
+          if (structuralUsage) {
+            logOpenAIUsage({
+              userId,
+              agentId,
+              tokens: structuralUsage.total_tokens,
+              requests: 1,
+            });
+          }
+
+          const seenStructuralKeys = new Set();
+          const structuralSources = topItems
+            .map((payload) => {
+              const sourceType =
+                payload.type !== undefined ? payload.type : null;
+              const title = payload.title || payload.url || null;
+              const url = payload.url || null;
+              return { type: sourceType, title, url };
+            })
+            .filter(({ type, title, url }) => {
+              if (type === null && !title && !url) return false;
+              const key = url || title;
+              if (!key || seenStructuralKeys.has(key)) return false;
+              seenStructuralKeys.add(key);
+              return true;
+            });
 
           return {
             success: true,
             answer: structuralAnswer,
+            sources:
+              structuralSources.length > 0 ? structuralSources : undefined,
             conversationId,
-            isAgentRequest: false,
+            isAgentRequest: this.isAgentConnectionRequest(question),
           };
         }
 
@@ -1094,8 +1133,14 @@ Keep responses short, direct, friendly, and professional. Only use information e
       }
 
       // 10. Prepare Sources from Qdrant matched payloads
+      // Use full retrieval set (not threshold-filtered) so citations appear even when
+      // scores are low, irrelevant redirect runs, or LLM context used only "relevant" hits.
+      const matchesForSources =
+        queryResponse.length > 0
+          ? [...queryResponse].sort((a, b) => b.score - a.score)
+          : [];
       const seenSourceKeys = new Set();
-      const sources = relevantMatches
+      const sources = matchesForSources
         .map((match) => {
           const payload = match.payload || {};
           const sourceType = payload.type !== undefined ? payload.type : null;
