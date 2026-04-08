@@ -278,7 +278,37 @@ module.exports.getAllClients = async (req, res) => {
   try {
     const clients = await Client.find({ isDeleted: false }).lean(); // Use lean() to get plain JavaScript objects
 
+    const userIds = clients.map((c) => c.userId).filter(Boolean);
+    const agentTrainingStatsByUserId = new Map();
+    if (userIds.length > 0) {
+      const agentStatsAgg = await Agent.aggregate([
+        { $match: { userId: { $in: userIds }, isDeleted: { $ne: true } } },
+        {
+          $group: {
+            _id: "$userId",
+            pagesSuccess: { $sum: { $ifNull: ["$pagesAdded.success", 0] } },
+            pagesFailed: { $sum: { $ifNull: ["$pagesAdded.failed", 0] } },
+            filesAdded: { $sum: { $ifNull: ["$filesAdded", 0] } },
+            faqsAdded: { $sum: { $ifNull: ["$faqsAdded", 0] } },
+          },
+        },
+      ]);
+      for (const row of agentStatsAgg) {
+        agentTrainingStatsByUserId.set(String(row._id), row);
+      }
+    }
+
     const updatedClients = await Promise.all(clients.map(async (client) => {
+      const st = client.userId
+        ? agentTrainingStatsByUserId.get(String(client.userId))
+        : null;
+      client.pagesAdded = {
+        success: st?.pagesSuccess ?? 0,
+        failed: st?.pagesFailed ?? 0,
+      };
+      client.filesAdded = st?.filesAdded ?? 0;
+      client.faqsAdded = st?.faqsAdded ?? 0;
+
       const planDetails = await PlanService.getUserPlan(client.userId);
 
       if (!planDetails) {
