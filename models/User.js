@@ -86,6 +86,20 @@ userSchema.methods.generateAuthToken = function () {
   return token;
 };
 
+/** Short-lived JWT for email verification links (first-time verify only; expiry checked in verifyEmail). */
+userSchema.methods.generateEmailVerificationToken = function () {
+  return jwt.sign(
+    {
+      _id: this._id,
+      email: this.email,
+      role: this.role,
+      purpose: "email_verification",
+    },
+    process.env.JWT_SECRET_KEY,
+    { expiresIn: "15m" }
+  );
+};
+
 // Compare the user's password with a given password
 userSchema.methods.comparePassword = async function (password) {
   if (!this.password) return false;

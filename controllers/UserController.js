@@ -12,6 +12,7 @@ const smtpTransport = require('nodemailer-smtp-transport');
 const commonHelper = require("../helpers/commonHelper.js");
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const UserController = {};
 const https = require('https');
 
@@ -47,8 +48,8 @@ UserController.createUser = async (req, res) => {
       return res.status(400).json({ status_code: 201, status: false, message: 'Email already in use' });
     }
     const user = new User({ email, password, role });
-    const emailVerificationToken = user.generateAuthToken();
-    user.verification_token = emailVerificationToken; // Store the token in the user document    
+    const emailVerificationToken = user.generateEmailVerificationToken();
+    user.verification_token = emailVerificationToken; // Store the token in the user document (expires in 15m)
     const userId = user.id;
     await user.save();
     //create agent — set qdrant fields before first save (they are required)
@@ -130,13 +131,62 @@ UserController.verifyEmail = async (req, res) => {
     if (!user) {
       return res.status(400).json({ status_code: 201, status: false, message: 'Invalid verification token' });
     }
-    if (user.email_verified == 1) {
-      return res.status(400).json({ status_code: 201, status: false, message: 'Already verify, Please login' });
+
+    // First-time verification: link must be used within 15 minutes (JWT exp). Already-verified users can still use the stored link to sign in.
+    if (!user.email_verified) {
+      try {
+        jwt.verify(verification_token, process.env.JWT_SECRET_KEY);
+      } catch (err) {
+        if (err.name === 'TokenExpiredError') {
+          return res.status(400).json({
+            status_code: 201,
+            status: false,
+            message: 'Verification link has expired.',
+          });
+        }
+        return res.status(400).json({ status_code: 201, status: false, message: 'Invalid verification token' });
+      }
     }
+
+    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id agentName isActive');
+
+    // Already verified: still return a session so reopening the link (e.g. new tab) signs the user in
+    if (user.email_verified) {
+      const authToken = user.generateAuthToken();
+      user.auth_token = authToken;
+      await user.save();
+      if (req.io) {
+        req.io.emit('user-logged-in', { userId: user._id });
+      }
+      return res.status(200).json({
+        status_code: 200,
+        status: true,
+        token: authToken,
+        userId: user._id,
+        isOnboarded: user.isOnboarded,
+        agents,
+        message: 'Signed in successfully',
+      });
+    }
+
     user.email_verified = true;
-    // user.verification_token = '';
+    const token = user.generateAuthToken();
+    user.auth_token = token;
     await user.save();
-    return res.status(200).json({ status_code: 200, status: true, message: 'Email verified successfully' });
+
+    if (req.io) {
+      req.io.emit('user-logged-in', { userId: user._id });
+    }
+
+    return res.status(200).json({
+      status_code: 200,
+      status: true,
+      token,
+      userId: user._id,
+      isOnboarded: user.isOnboarded,
+      agents,
+      message: 'Email verified successfully',
+    });
   } catch (error) {
     return res.status(500).json({ status_code: 500, status: false, message: 'Email verification failed' });
   }
