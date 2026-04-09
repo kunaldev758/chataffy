@@ -31,6 +31,7 @@ const clientSchema = new mongoose.Schema(
     upgradePlanStatus: {
       storageLimitExceeded: { type: Boolean, default: false },
       agentLimitExceeded: { type: Boolean, default: false },
+      humanAgentLimitExceeded: { type: Boolean, default: false },
       chatLimitExceeded: { type: Boolean, default: false },
     },
 
@@ -68,6 +69,14 @@ const clientSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    customLimits: {
+      isCustomLimits: { type: Boolean, default: false },
+      maxQueries: { type: Number, default: null },
+      maxHumanAgents: { type: Number, default: null },
+      maxAgents: { type: Number, default: null },
+      maxStorage: { type: Number, default: null },
+    },
+
     isDeleted: {
       type: Boolean,
       default: false,
