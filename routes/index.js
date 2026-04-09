@@ -46,6 +46,19 @@ const generalUpload = multer({
   preservePath: true
 }).single('file');
 
+// Audio upload for voice notes
+const audioUpload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('audio/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only audio files are allowed'), false);
+    }
+  },
+}).single('audio');
+
 // Add middleware to preserve req.body
 const preserveBody = (req, res, next) => {
   const bodyData = { ...req.body };
@@ -146,6 +159,22 @@ router.post('/deleteTrainingData', middleware, scrapingController.deleteTraining
 router.post('/retrainTrainingData', middleware, scrapingController.retrainTrainingData);
 
 
+
+// Voice note audio upload
+router.post('/upload-voice-note', middleware, (req, res) => {
+  audioUpload(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'No audio file provided' });
+    }
+    res.json({ success: true, url: `/uploads/${req.file.filename}` });
+  });
+});
 
 // Chat message routes
 router.post('/getConversationMessages',middleware, ChatMessageController.getAllChatMessagesAPI);
