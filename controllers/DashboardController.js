@@ -74,7 +74,10 @@ DashboardController.getDashboardDataForAgent = async (dateRange, userId, agentId
     const locationData = transformData(location);
 
    //total Agents
-    const totalHumanAgents = await HumanAgent.find({ userId: userId, isClient: false }).countDocuments();
+    const [totalHumanAgents, totalAiAgents] = await Promise.all([
+      HumanAgent.countDocuments({ userId: userId, isClient: false }),
+      Agent.countDocuments({ userId: userId, isDeleted: { $ne: true } }),
+    ]);
 
     let totalChatsInPlan = 0;
 
@@ -90,10 +93,17 @@ DashboardController.getDashboardDataForAgent = async (dateRange, userId, agentId
       
         const now = new Date();
       
-        // Calculate start of the current monthly cycle
+        // Calculate how many full billing months have elapsed.
+        // A month is only "complete" once the current day-of-month has reached
+        // the billing day (e.g. created on the 27th → cycle renews on the 27th).
         let monthsSinceBase = 
           (now.getFullYear() * 12 + now.getMonth()) -
           (baseDate.getFullYear() * 12 + baseDate.getMonth());
+
+        if (now.getDate() < baseDate.getDate()) {
+          monthsSinceBase -= 1;
+        }
+        if (monthsSinceBase < 0) monthsSinceBase = 0;
       
         let cycleStart = new Date(baseDate);
         cycleStart.setMonth(baseDate.getMonth() + monthsSinceBase);
@@ -118,9 +128,10 @@ DashboardController.getDashboardDataForAgent = async (dateRange, userId, agentId
       aiAssists: AiconversationCount,
       totalMessage: totalMessages,
       csat: csat,
-      totalHumanAgents:totalHumanAgents,
-      locationData:locationData,
-      totalChatsInPlan:totalChatsInPlan,
+      totalHumanAgents,
+      totalAiAgents,
+      locationData,
+      totalChatsInPlan,
     };
   } catch (error) {
     return error;
@@ -207,10 +218,17 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
       
         const now = new Date();
       
-        // Calculate start of the current monthly cycle
+        // Calculate how many full billing months have elapsed.
+        // A month is only "complete" once the current day-of-month has reached
+        // the billing day (e.g. created on the 27th → cycle renews on the 27th).
         let monthsSinceBase = 
           (now.getFullYear() * 12 + now.getMonth()) -
           (baseDate.getFullYear() * 12 + baseDate.getMonth());
+
+        if (now.getDate() < baseDate.getDate()) {
+          monthsSinceBase -= 1;
+        }
+        if (monthsSinceBase < 0) monthsSinceBase = 0;
       
         let cycleStart = new Date(baseDate);
         cycleStart.setMonth(baseDate.getMonth() + monthsSinceBase);

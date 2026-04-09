@@ -94,7 +94,11 @@ class PlanService {
     const client = await Client.findOne({userId});
     const plan = await PlanService.getUserPlan(userId);
 
-    if (client.currentDataSize+contentSize > plan.limits.maxStorage) {
+    const maxStorage = (client.customLimits?.isCustomLimits && client.customLimits?.maxStorage != null)
+      ? client.customLimits.maxStorage
+      : plan.limits.maxStorage;
+
+    if (client.currentDataSize+contentSize > maxStorage) {
       await Client.updateOne(
         { userId },
         { $set: { "upgradePlanStatus.storageLimitExceeded" : true }  }
@@ -132,14 +136,13 @@ class PlanService {
          const oldPlan = await this.getUserPlan(userId);
 
          if(newPlan.order>oldPlan.order){
-          await Client.updateOne({ userId },{ $set: { upgradePlanStatus: { agentLimitExceeded: false,chatLimitExceeded:false,storageLimitExceeded:false } } });
+          await Client.updateOne({ userId },{ $set: { upgradePlanStatus: { agentLimitExceeded: false,chatLimitExceeded:false,storageLimitExceeded:false,humanAgentLimitExceeded:false } } });
          }
 
-      // Update client's plan
-      // Update the client's plan and retrieve the updated client document
+      // Update client's plan and reset custom limits flag
       const updatedClient = await Client.findOneAndUpdate(
         { userId },
-        { plan: newPlanName },
+        { plan: newPlanName, 'customLimits.isCustomLimits': false },
         { new: true }
       );
       
@@ -201,10 +204,17 @@ class PlanService {
       
         const now = new Date();
       
-        // Calculate start of the current monthly cycle
+        // Calculate how many full billing months have elapsed.
+        // A month is only "complete" once the current day-of-month has reached
+        // the billing day (e.g. created on the 27th → cycle renews on the 27th).
         let monthsSinceBase = 
           (now.getFullYear() * 12 + now.getMonth()) -
           (baseDate.getFullYear() * 12 + baseDate.getMonth());
+
+        if (now.getDate() < baseDate.getDate()) {
+          monthsSinceBase -= 1;
+        }
+        if (monthsSinceBase < 0) monthsSinceBase = 0;
       
         let cycleStart = new Date(baseDate);
         cycleStart.setMonth(baseDate.getMonth() + monthsSinceBase);
@@ -235,10 +245,34 @@ class PlanService {
     }
   }
 
+  // Resolve effective limits for a user (custom limits override plan limits)
+  static async getEffectiveLimits(userId) {
+    const client = await Client.findOne({ userId });
+    const plan = await PlanService.getUserPlan(userId);
+
+    if (client?.customLimits?.isCustomLimits) {
+      return {
+        maxAgentsPerAccount: client.customLimits.maxAgents ?? plan.limits?.maxAgentsPerAccount ?? 1,
+        maxHumanAgentsPerAccount: client.customLimits.maxHumanAgents ?? plan.limits?.maxHumanAgentsPerAccount ?? 1,
+        maxQueries: client.customLimits.maxQueries ?? plan.limits?.maxQueries ?? 1000,
+        maxStorage: client.customLimits.maxStorage ?? plan.limits?.maxStorage ?? 1024 * 1024,
+        isCustom: true,
+      };
+    }
+
+    return {
+      maxAgentsPerAccount: plan.limits?.maxAgentsPerAccount ?? 1,
+      maxHumanAgentsPerAccount: plan.limits?.maxHumanAgentsPerAccount ?? 1,
+      maxQueries: plan.limits?.maxQueries ?? 1000,
+      maxStorage: plan.limits?.maxStorage ?? 1024 * 1024,
+      isCustom: false,
+    };
+  }
+
   // Check if user can perform action based on plan limits
   static async checkPlanLimits(userId, action) {
     try {
-      const plan = await PlanService.getUserPlan(userId);
+      const limits = await PlanService.getEffectiveLimits(userId);
       const usage = await PlanService.getPlanUsage(userId);
 
       const checks = {
@@ -251,34 +285,33 @@ class PlanService {
 
       switch (action) {
         case 'add_agent': {
-          const maxAgents = plan.limits?.maxAgentsPerAccount || 1;
+          const maxAgents = limits.maxAgentsPerAccount;
           checks.canAddAgents = usage.totalAgents < maxAgents;
           if (!checks.canAddAgents) {
-            checks.message = `Cannot add agent. Plan limit: ${maxAgents}, Current: ${usage.totalAgents}`;
-            checks.upgradeSuggested = true;
+            checks.message = `Cannot add agent. Limit: ${maxAgents}, Current: ${usage.totalAgents}`;
+            checks.upgradeSuggested = !limits.isCustom;
           }
           break;
         }
         case 'add_human_agent': {
-          const maxHumanAgents = plan.limits?.maxHumanAgentsPerAccount || 1;
+          const maxHumanAgents = limits.maxHumanAgentsPerAccount;
           checks.canAddHumanAgents = usage.totalHumanAgents < maxHumanAgents;
           if (!checks.canAddHumanAgents) {
-            checks.message = `Cannot add human agent. Plan limit: ${maxHumanAgents}, Current: ${usage.totalHumanAgents}`;
-            checks.upgradeSuggested = true;
+            checks.message = `Cannot add human agent. Limit: ${maxHumanAgents}, Current: ${usage.totalHumanAgents}`;
+            checks.upgradeSuggested = !limits.isCustom;
           }
           break;
         }
         case 'query': {
-          const maxQueries = plan.limits?.maxQueries || 1000;
+          const maxQueries = limits.maxQueries;
           checks.canMakeQueries = usage.totalChats < maxQueries;
           if (!checks.canMakeQueries) {
-            checks.message = `Cannot make query. Plan limit: ${maxQueries}, Current: ${usage.totalChats}`;
-            checks.upgradeSuggested = true;
+            checks.message = `Cannot make query. Limit: ${maxQueries}, Current: ${usage.totalChats}`;
+            checks.upgradeSuggested = !limits.isCustom;
           }
           break;
         }
         default:
-          // No action, keep all checks as true
           break;
       }
 

@@ -706,14 +706,13 @@ const initializeClientEvents = (io, socket) => {
   ///////dashboard////////////
   socket.on("fetch-dashboard-data", async ({ dateRange,agentId }, callback) => {
     try {
-      const data = await DashboardController.getDashboardDataForAgent(
-        dateRange,
-        socket.userId,
-        agentId
-      );
-      const analytics = await DashboardController.getUsageAnalytics(socket.userId);
-      const plan = await PlanService.getUserPlan(socket.userId);
-      callback({ success: true, data, analytics, plan });
+      const [data, analytics, plan, effectiveLimits] = await Promise.all([
+        DashboardController.getDashboardDataForAgent(dateRange, socket.userId, agentId),
+        DashboardController.getUsageAnalytics(socket.userId),
+        PlanService.getUserPlan(socket.userId),
+        PlanService.getEffectiveLimits(socket.userId),
+      ]);
+      callback({ success: true, data, analytics, plan, effectiveLimits });
     } catch (error) {
       console.error("Error fetching dashboard data:", error);
       callback({ success: false, error: "Failed to fetch data" });

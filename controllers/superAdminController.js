@@ -325,15 +325,19 @@ module.exports.getAllClients = async (req, res) => {
 
       const currentDataUsed = client.currentDataSize;
 
+      const effectiveLimits = await PlanService.getEffectiveLimits(client.userId);
+
       client.usageDetails = {
-        maxAgents: planDetails.limits.maxAgentsPerAccount,
+        maxAgents: effectiveLimits.maxAgentsPerAccount,
+        maxHumanAgents: effectiveLimits.maxHumanAgentsPerAccount,
         totalAgents: totalAiAgents,
         totalAiAgents,
         totalHumanAgents,
-        maxStorage: planDetails.limits.maxStorage,
+        maxStorage: effectiveLimits.maxStorage,
         currentDataUsed,
-        maxQueries: planDetails.limits.maxQueries,
+        maxQueries: effectiveLimits.maxQueries,
         totalConversations,
+        isCustomLimits: effectiveLimits.isCustom,
       };
 
       return client;
@@ -410,5 +414,75 @@ module.exports.cancelClientSubscription = async (req, res) => {
   } catch (error) {
     console.error("Error cancelling client subscription:", error);
     res.status(500).json({ message: "Error cancelling client subscription" });
+  }
+};
+
+module.exports.setCustomLimits = async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { isCustomLimits, maxQueries, maxHumanAgents, maxAgents, maxStorage } = req.body;
+
+    const client = await Client.findById(clientId);
+    if (!client) {
+      return res.status(404).json({ message: "Client not found" });
+    }
+
+    // Update custom limits
+    client.customLimits = {
+      isCustomLimits: Boolean(isCustomLimits),
+      maxQueries: maxQueries != null ? Number(maxQueries) : null,
+      maxHumanAgents: maxHumanAgents != null ? Number(maxHumanAgents) : null,
+      maxAgents: maxAgents != null ? Number(maxAgents) : null,
+      maxStorage: maxStorage != null ? Number(maxStorage) : null,
+    };
+
+    // If custom limits are being enabled, recalculate upgradePlanStatus
+    if (isCustomLimits) {
+      const userId = client.userId;
+
+      const [totalAiAgents, totalHumanAgents, totalConversations] = await Promise.all([
+        Agent.countDocuments({ userId, isDeleted: { $ne: true } }),
+        HumanAgent.countDocuments({ userId, isDeleted: false, isClient: false }),
+        Conversation.countDocuments({ userId }),
+      ]);
+
+      const effectiveMaxAgents = maxAgents != null ? Number(maxAgents) : null;
+      const effectiveMaxHumanAgents = maxHumanAgents != null ? Number(maxHumanAgents) : null;
+      const effectiveMaxQueries = maxQueries != null ? Number(maxQueries) : null;
+      const effectiveMaxStorage = maxStorage != null ? Number(maxStorage) : null;
+
+      const upgradePlanStatus = { ...client.upgradePlanStatus.toObject?.() || client.upgradePlanStatus };
+
+      if (effectiveMaxAgents != null) {
+        upgradePlanStatus.agentLimitExceeded = totalAiAgents > effectiveMaxAgents;
+      }
+      if (effectiveMaxHumanAgents != null) {
+        upgradePlanStatus.humanAgentLimitExceeded = totalHumanAgents > effectiveMaxHumanAgents;
+      }
+      if (effectiveMaxQueries != null) {
+        upgradePlanStatus.chatLimitExceeded = totalConversations > effectiveMaxQueries;
+      }
+      if (effectiveMaxStorage != null) {
+        upgradePlanStatus.storageLimitExceeded = client.currentDataSize > effectiveMaxStorage;
+      }
+
+      client.upgradePlanStatus = upgradePlanStatus;
+    }
+
+    await client.save();
+
+    res.status(200).json({
+      success: true,
+      message: isCustomLimits
+        ? "Custom limits applied successfully"
+        : "Custom limits disabled; plan limits are now in effect",
+      data: {
+        customLimits: client.customLimits,
+        upgradePlanStatus: client.upgradePlanStatus,
+      },
+    });
+  } catch (error) {
+    console.error("Error setting custom limits:", error);
+    res.status(500).json({ message: "Error setting custom limits" });
   }
 };

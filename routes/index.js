@@ -113,6 +113,7 @@ router.get('/superadmin/clients', verifySuperAdminToken, superAdminController.ge
 router.get('/superadmin/clients/:clientId/agents', verifySuperAdminToken, superAdminController.getClientAgents);
 router.get('/superadmin/agent/:clientId', verifySuperAdminToken, superAdminController.getClientAgents);
 router.get('/superadmin/cancel/sunscription/:clientId', verifySuperAdminToken, superAdminController.cancelClientSubscription);
+router.put('/superadmin/clients/:clientId/custom-limits', verifySuperAdminToken, superAdminController.setCustomLimits);
 router.get('/superadmin/delete/:userId',verifySuperAdminToken, UserController.deleteUser);
 
 
