@@ -215,8 +215,11 @@ ChatMessageController.getAllChatNotesMessages = async (conversationId) => {
     if (conversationId) {
       chatMessagesNotes = await ChatMessage.find({
         conversation_id: conversationId,
-        is_note: "true",
-      });
+        $or: [{ is_note: "true" }, { is_note: true }],
+      })
+        .populate("humanAgentId", "name avatar isClient")
+        .populate("agentId", "agentName")
+        .lean();
     }
     return chatMessagesNotes;
   } catch (error) {
