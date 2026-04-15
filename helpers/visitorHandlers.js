@@ -1,5 +1,6 @@
 // handlers/visitorHandlers.js
 const { encode } = require("html-entities");
+const nodemailer = require("nodemailer");
 const ChatMessageController = require("../controllers/ChatMessageController");
 const VisitorController = require("../controllers/VisitorController");
 const ConversationController = require("../controllers/ConversationController");
@@ -11,14 +12,147 @@ const Conversation = require("../models/Conversation");
 const ChatMessage = require("../models/ChatMessage");
 const Agent = require("../models/Agent");
 const HumanAgent = require("../models/HumanAgent");
+const ChatTranscriptSetting = require("../models/ChatTranscriptSetting");
 const BlockedVisitorIp = require("../models/blockedVisitorIp");
 const NotificationController = require("../controllers/NotificationController");
 const { checkPlanLimits } = require("../services/PlanService");
-
+const { transcriptEmailQueue } = require("../services/jobService");
+const { chatTranscriptTemplate } = require("../templates/transcript-template");
 // Store active timeouts for agent connection requests
 const agentConnectionTimeouts = new Map();
 
-const stripHtml = (html) => (html || "").replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
+const stripHtml = (html) =>
+  (html || "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .trim();
+
+const transcriptMailTransporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST, // SMTP server hostname
+    port:Number( process.env.SMTP_PORT), // Port for the SMTP server (587 for TLS, 465 for SSL)
+    secure: false, // Set to true if using SSL
+    auth: {
+      user: process.env.EMAIL_USERNAME,
+      pass: process.env.EMAIL_PASSWORD,
+    },
+  }
+);
+
+const formatTimestamp = (dateValue) => {
+  if (!dateValue) return "-";
+  return new Date(dateValue).toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+};
+
+const formatDuration = (start, end) => {
+  if (!start || !end) return "-";
+  const diffMs = Math.max(0, new Date(end).getTime() - new Date(start).getTime());
+  const totalSec = Math.floor(diffMs / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+};
+
+const getVisitorEmail = (visitorDoc) => {
+  if (!visitorDoc?.visitorDetails?.length) return "N/A";
+  const emailField = visitorDoc.visitorDetails.find((item) => {
+    const key = String(item?.field || "").toLowerCase();
+    return key.includes("email");
+  });
+  return emailField?.value || "N/A";
+};
+
+const sendConversationTranscriptEmail = async (conversation) => {
+  console.log(conversation ,"<----------- conversation");
+  if (!conversation?.userId || !conversation?._id) return;
+   const transcriptSettings = await ChatTranscriptSetting.findOne({
+     userId: conversation.userId,
+   }).lean();
+   const recipients = transcriptSettings?.transcriptEmails || [];
+   console.log(recipients ,"<----------- recipients");
+   if (!recipients || !recipients.length) {
+     console.log("NO transcriptEmails found returning");
+     return
+   };
+ 
+   const [visitorDoc, messages, widget] = await Promise.all([
+     Visitor.findById(conversation.visitor).lean(),
+     ChatMessage.find({ conversation_id: conversation._id })
+       .sort({ createdAt: 1 })
+       .populate("humanAgentId", "name")
+       .populate("agentId", "agentName")
+       .lean(),
+     Widget.findOne({ userId: conversation.userId }).select("titleBar colorFields").lean(),
+   ]);
+ 
+   const mappedMessages = messages
+   .filter((msg) => msg?.sender_type !== "agent-connect")
+   .map((msg) => {
+     const senderType = msg?.sender_type || "system";
+     const humanAgentName = msg?.humanAgentId?.name;
+     const agentName = msg?.agentId?.agentName;
+ 
+     const senderName =
+     (senderType === "ai" ? "AI Assistant" : null) ||
+     (senderType === "system" ? "System" : null) ||
+       humanAgentName ||
+       agentName ||
+       msg?.sender ||
+       senderType ||
+       "System";
+ 
+     return {
+       sender: senderName,
+       sender_type: senderType,
+       timestamp: formatTimestamp(msg?.createdAt),
+       text: stripHtml(msg?.message || ""),
+     };
+   });
+ 
+   const html = chatTranscriptTemplate({
+     websiteName: widget?.titleBar || "Chataffy",
+     conversationId: conversation._id.toString(),
+     visitorName: visitorDoc?.name || "Visitor",
+     visitorEmail: getVisitorEmail(visitorDoc),
+     startedAt: formatTimestamp(conversation.createdAt),
+     endedAt: formatTimestamp(conversation.endedAt || conversation.updatedAt || new Date()),
+     duration: formatDuration(conversation.createdAt, conversation.endedAt || new Date()),
+     messages: mappedMessages,
+     colorFields: widget?.colorFields || [],
+   });
+ 
+   const result = await Promise.allSettled(
+    recipients.map((email) =>
+      transcriptMailTransporter.sendMail({
+        from: process.env.SMTP_FROM,
+        to: email,
+        subject: `Chat Transcript`,
+        html,
+      })
+    )
+  );
+
+  const rejected = result.filter((result) => result.status === "rejected");
+  if (rejected.length > 0) {
+    console.error("Transcript email rejected:", rejected);
+  }
+
+  // retry to send the failed emails
+};
 
 // Export for use in other handlers
 module.exports.agentConnectionTimeouts = agentConnectionTimeouts;
@@ -434,6 +568,11 @@ const initializeVisitorEvents = (io, socket) => {
           io.to(`conversation-${conversationId}`).emit("conversation-append-message", {
             chatMessage: closeLineObj,
           });
+          try {
+            await transcriptEmailQueue.add("sendConversationTranscriptEmail", { conversation });
+          } catch (mailError) {
+            console.error("queue transcript email error:", mailError.message);
+          }
         }
 
         callback?.({ success: true });
@@ -474,4 +613,5 @@ const initializeVisitorEvents = (io, socket) => {
 module.exports = {
   initializeVisitorEvents,
   agentConnectionTimeouts,
+  sendConversationTranscriptEmail,
 };

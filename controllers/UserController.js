@@ -15,6 +15,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const UserController = {};
 const https = require('https');
+const { saveChatTranscriptSettings } = require("./ChatTranscriptController.js");
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
@@ -100,6 +101,20 @@ UserController.createUser = async (req, res) => {
         stack: humanAgentError.stack
       });
     }
+
+    console.log("Creating Transcript emails for user:", userId);
+    const chatTranscript = await saveChatTranscriptSettings(
+      userId,
+      [email],
+      [email],
+      [email],
+      '',
+      '',
+    )
+    if (chatTranscript instanceof Error) {
+      console.error("Error creating chat transcript while creating user:", chatTranscript.message);
+    }
+    console.log("Chat transcript created successfully:", chatTranscript);
 
     const client_url = process.env.CLIENT_URL;
     const verificationLink = `${client_url}verify-email?token=${emailVerificationToken}`;

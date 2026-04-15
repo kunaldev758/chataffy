@@ -74,7 +74,7 @@ class PlanAdminController {
   // Create new plan
   async createPlan(req, res) {
     try {
-      const adminId = req.user?.id || req.body.adminId; // Get from auth middleware
+      const adminId = req.user?.id || req.body.adminId || req.superAdmin?.id; // Get from auth middleware
       
       const planData = {
         ...req.body,
