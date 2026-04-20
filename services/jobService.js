@@ -467,8 +467,11 @@ new Worker(
 
             let clientDoc = await Client.findOne({ userId });
             currentDataSize = clientDoc?.currentDataSize || 0;
-
-          if (currentDataSize + contentSize > plan.limits.maxStorage) {
+            const maxStorage = (clientDoc.customLimits?.isCustomLimits && clientDoc.customLimits?.maxStorage != null)
+              ? clientDoc.customLimits.maxStorage
+              : plan.limits.maxStorage;
+          // if (currentDataSize + contentSize > plan.limits.maxStorage) {
+            if (currentDataSize + contentSize > maxStorage) {
             await Client.updateOne(
               { userId },
               { $set: { "upgradePlanStatus.storageLimitExceeded": true } }

@@ -720,6 +720,19 @@ const initializeClientEvents = (io, socket) => {
   });
   ////////////////dash end///////////
 
+  /////// effective limits ///////
+  socket.on("fetch-effective-limits", async ({ }, callback) => {
+    try {
+      const [effectiveLimits] = await Promise.all([
+        PlanService.getEffectiveLimits(socket.userId),
+      ]);
+      callback?.({ success: true , effectiveLimits: effectiveLimits });
+    } catch (error) {
+      console.error("Error fetching effective limits:", error);
+      callback?.({ success: false, error: "Failed to fetch effective limits" });
+    }
+  });
+
   socket.on("accept-agent-connection", async ({ conversationId }, callback) => {
     try {
       const conversation = await Conversation.findOne({ _id: conversationId });
