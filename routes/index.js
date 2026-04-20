@@ -212,6 +212,7 @@ router.post('/ai-agents/delete/:agentId', middleware, AIAgentController.deleteAg
 router.post('/complete-onboarding', middleware, AIAgentController.completeOnboarding);
 router.get('/agent-settings/:agentId', middleware, AIAgentController.getAgentSettings);
 router.post('/updateAgentSettings', middleware, AIAgentController.updateAgentSettings);
+router.get('/ai-agents/agent-data/:agentId', middleware, AIAgentController.getAgentData);
 
 router.post('/sendEmailForOfflineChat', ConversationController.sendEmailForOfflineChatController);
 router.post('/conversations/filter', middleware, ConversationController.getFilteredConversations);
