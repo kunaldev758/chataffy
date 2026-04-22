@@ -12,6 +12,7 @@ const Agent = require("../models/Agent");
 const HumanAgent = require("../models/HumanAgent");
 const PlanService = require("../services/PlanService");
 const { agentConnectionTimeouts } = require("./visitorHandlers");
+const { transcriptEmailQueue } = require("../services/jobService");
 
 const stripHtml = (html) => (html || "").replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
 
@@ -527,6 +528,14 @@ const initializeClientEvents = (io, socket) => {
         }
         return;
       }
+
+     if(status === "close" && conversation.visitorClosed === false){
+      try {
+        await transcriptEmailQueue.add("sendConversationTranscriptEmail", { conversation: conversation.toObject() });
+      } catch (mailError) {
+        console.error("queue transcript email error:", mailError.message);
+      }
+     }
 
       let visitorId = conversation?.visitor;
 
