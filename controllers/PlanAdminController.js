@@ -74,12 +74,24 @@ class PlanAdminController {
   // Create new plan
   async createPlan(req, res) {
     try {
-      const adminId = req.user?.id || req.body.adminId || req.superAdmin?.id; // Get from auth middleware
-      
+      const adminId =
+        req.superAdmin?.id != null
+          ? String(req.superAdmin.id)
+          : req.user?.id != null
+            ? String(req.user.id)
+            : req.body.adminId;
+
+      if (!adminId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Could not resolve creator (super admin id). Ensure you are authenticated.',
+        });
+      }
+
       const planData = {
         ...req.body,
         createdBy: adminId,
-        updatedBy: adminId
+        updatedBy: adminId,
       };
       
       // Validate required fields
@@ -126,11 +138,16 @@ class PlanAdminController {
   async updatePlan(req, res) {
     try {
       const { planId } = req.params;
-      const adminId = req.user?.id || req.body.adminId;
-      
+      const adminId =
+        req.superAdmin?.id != null
+          ? String(req.superAdmin.id)
+          : req.user?.id != null
+            ? String(req.user.id)
+            : req.body.adminId;
+
       const updateData = {
         ...req.body,
-        updatedBy: adminId
+        ...(adminId ? { updatedBy: adminId } : {}),
       };
       
       // Remove fields that shouldn't be updated directly

@@ -125,6 +125,46 @@ class PlanService {
     return require("../models/OpenaiTrainingList");
   }
 
+  /**
+   * Persist per-client limits as copies of the global plan document (superadmin can edit later).
+   * Merges with getFallbackPlan() so missing fields still get defaults (never all-null / isCustomLimits false).
+   * @param {import('mongoose').Document|null|object} plan — Plan doc from DB, plain object, or null
+   */
+  static buildCustomLimitsFromPlan(plan) {
+    const fb = PlanService.getFallbackPlan().limits;
+    let raw = {};
+    if (plan && plan.limits) {
+      raw =
+        typeof plan.limits.toObject === 'function'
+          ? plan.limits.toObject()
+          : { ...plan.limits };
+    }
+    const lim = { ...fb, ...raw };
+    return {
+      isCustomLimits: true,
+      maxQueries: lim.maxQueries ?? null,
+      maxHumanAgents: lim.maxHumanAgentsPerAccount ?? null,
+      maxAgents: lim.maxAgentsPerAccount ?? null,
+      maxStorage: lim.maxStorage ?? null,
+    };
+  }
+
+  /**
+   * After creating a Client row, copy the current global plan limits into customLimits (default plan: free).
+   */
+  static async seedCustomLimitsForNewClient(userId) {
+    try {
+      const client = await Client.findOne({ userId });
+      if (!client) return;
+      const planName = (client.plan || 'free').toLowerCase();
+      const planDoc = await Plan.getPlanByName(planName);
+      const customLimits = PlanService.buildCustomLimitsFromPlan(planDoc);
+      await Client.updateOne({ _id: client._id }, { $set: { customLimits } });
+    } catch (e) {
+      console.error('seedCustomLimitsForNewClient:', e);
+    }
+  }
+
   static async upgradePlan(userId, newPlanName) {
     try {
       // Validate that the new plan exists
@@ -139,10 +179,16 @@ class PlanService {
           await Client.updateOne({ userId },{ $set: { upgradePlanStatus: { agentLimitExceeded: false,chatLimitExceeded:false,storageLimitExceeded:false,humanAgentLimitExceeded:false } } });
          }
 
-      // Update client's plan and reset custom limits flag
+      const customLimits = PlanService.buildCustomLimitsFromPlan(newPlan);
+
       const updatedClient = await Client.findOneAndUpdate(
         { userId },
-        { plan: newPlanName, 'customLimits.isCustomLimits': false },
+        {
+          $set: {
+            plan: newPlanName,
+            customLimits,
+          },
+        },
         { new: true }
       );
       

@@ -1,5 +1,6 @@
 const SuperAdmin = require("../models/SuperAdmin");
 const Client = require("../models/Client");
+const Plan = require("../models/Plan");
 const Agent = require("../models/Agent");
 const HumanAgent = require("../models/HumanAgent");
 const Conversation = require("../models/Conversation");
@@ -222,7 +223,7 @@ module.exports.getDashboardData = async (req, res) => {
       },
       chatRatio: {
         ai: {
-          count: aiOnlyChats,
+          count: aiOnlyChats, 
           percentage: parseFloat(aiChatPercentage),
         },
         human: {
@@ -273,38 +274,40 @@ module.exports.getDashboardData = async (req, res) => {
   }
 };
 
-// Get all clients with details and metrics (aggregation version)
-module.exports.getAllClients = async (req, res) => {
-  try {
-    const clients = await Client.find({ isDeleted: false }).lean(); // Use lean() to get plain JavaScript objects
+/** Enrich a page of client docs with plan usage (only runs for the current page, not the full collection). */
+async function enrichClientsPage(clients) {
+  if (!clients.length) return [];
 
-    const userIds = clients.map((c) => c.userId).filter(Boolean);
-    const agentTrainingStatsByUserId = new Map();
-    if (userIds.length > 0) {
-      const agentStatsAgg = await Agent.aggregate([
-        { $match: { userId: { $in: userIds }, isDeleted: { $ne: true } } },
-        {
-          $group: {
-            _id: "$userId",
-            pagesSuccess: { $sum: { $ifNull: ["$pagesAdded.success", 0] } },
-            pagesFailed: { $sum: { $ifNull: ["$pagesAdded.failed", 0] } },
-            filesAdded: { $sum: { $ifNull: ["$filesAdded", 0] } },
-            faqsAdded: { $sum: { $ifNull: ["$faqsAdded", 0] } },
-          },
+  const userIds = clients.map((c) => c.userId).filter(Boolean);
+  const agentTrainingStatsByUserId = new Map();
+  if (userIds.length > 0) {
+    const agentStatsAgg = await Agent.aggregate([
+      { $match: { userId: { $in: userIds }, isDeleted: { $ne: true } } },
+      {
+        $group: {
+          _id: "$userId",
+          pagesSuccess: { $sum: { $ifNull: ["$pagesAdded.success", 0] } },
+          pagesFailed: { $sum: { $ifNull: ["$pagesAdded.failed", 0] } },
+          pagesTotal: { $sum: { $ifNull: ["$pagesAdded.total", 0] } },
+          filesAdded: { $sum: { $ifNull: ["$filesAdded", 0] } },
+          faqsAdded: { $sum: { $ifNull: ["$faqsAdded", 0] } },
         },
-      ]);
-      for (const row of agentStatsAgg) {
-        agentTrainingStatsByUserId.set(String(row._id), row);
-      }
+      },
+    ]);
+    for (const row of agentStatsAgg) {
+      agentTrainingStatsByUserId.set(String(row._id), row);
     }
+  }
 
-    const updatedClients = await Promise.all(clients.map(async (client) => {
+  return Promise.all(
+    clients.map(async (client) => {
       const st = client.userId
         ? agentTrainingStatsByUserId.get(String(client.userId))
         : null;
       client.pagesAdded = {
         success: st?.pagesSuccess ?? 0,
         failed: st?.pagesFailed ?? 0,
+        total: st?.pagesTotal ?? 0,
       };
       client.filesAdded = st?.filesAdded ?? 0;
       client.faqsAdded = st?.faqsAdded ?? 0;
@@ -312,7 +315,7 @@ module.exports.getAllClients = async (req, res) => {
       const planDetails = await PlanService.getUserPlan(client.userId);
 
       if (!planDetails) {
-        return client; // Return client as is if no plan details
+        return client;
       }
 
       const totalAiAgents = await Agent.countDocuments({
@@ -341,15 +344,132 @@ module.exports.getAllClients = async (req, res) => {
       };
 
       return client;
-    }));
+    })
+  );
+}
+
+// GET /superadmin/clients?page=&limit=&sortBy=&sortOrder=&search=
+module.exports.getAllClients = async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(String(req.query.page), 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit), 10) || 10));
+    const skip = (page - 1) * limit;
+    const sortBy = req.query.sortBy || "createdAt";
+    const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
+    const search = String(req.query.search || "").trim();
+
+    const matchFilter = { isDeleted: false };
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rx = new RegExp(escaped, "i");
+      matchFilter.$or = [{ email: rx }, { plan: rx }];
+    }
+
+    const totalCount = await Client.countDocuments(matchFilter);
+    const totalPages = totalCount === 0 ? 0 : Math.ceil(totalCount / limit);
+
+    const agentsColl = Agent.collection.name;
+    const convColl = Conversation.collection.name;
+
+    let clientsPage = [];
+
+    if (sortBy === "agents") {
+      const pipeline = [
+        { $match: matchFilter },
+        {
+          $lookup: {
+            from: agentsColl,
+            let: { uid: "$userId" },
+            pipeline: [
+              { $match: { $expr: { $eq: ["$userId", "$$uid"] } } },
+              { $match: { isDeleted: { $ne: true } } },
+              { $count: "c" },
+            ],
+            as: "_aiAgg",
+          },
+        },
+        {
+          $addFields: {
+            _sortAgents: { $ifNull: [{ $arrayElemAt: ["$_aiAgg.c", 0] }, 0] },
+          },
+        },
+        { $sort: { _sortAgents: sortOrder } },
+        { $skip: skip },
+        { $limit: limit },
+        { $project: { _aiAgg: 0, _sortAgents: 0 } },
+      ];
+      clientsPage = await Client.aggregate(pipeline);
+    } else if (sortBy === "conversations") {
+      const pipeline = [
+        { $match: matchFilter },
+        {
+          $lookup: {
+            from: convColl,
+            let: { uid: "$userId" },
+            pipeline: [
+              { $match: { $expr: { $eq: ["$userId", "$$uid"] } } },
+              { $count: "c" },
+            ],
+            as: "_convAgg",
+          },
+        },
+        {
+          $addFields: {
+            _sortConvs: { $ifNull: [{ $arrayElemAt: ["$_convAgg.c", 0] }, 0] },
+          },
+        },
+        { $sort: { _sortConvs: sortOrder } },
+        { $skip: skip },
+        { $limit: limit },
+        { $project: { _convAgg: 0, _sortConvs: 0 } },
+      ];
+      clientsPage = await Client.aggregate(pipeline);
+    } else {
+      const sortFieldMap = {
+        email: "email",
+        plan: "plan",
+        contentSize: "currentDataSize",
+        totalAmountPaid: "totalAmountPaid",
+        createdAt: "createdAt",
+      };
+      const mongoField = sortFieldMap[sortBy] || "createdAt";
+      const sortSpec = { [mongoField]: sortOrder };
+      clientsPage = await Client.find(matchFilter).sort(sortSpec).skip(skip).limit(limit).lean();
+    }
+
+    const data = await enrichClientsPage(clientsPage);
 
     res.status(200).json({
       success: true,
-      data: updatedClients,
+      data,
+      pagination: {
+        page,
+        limit,
+        totalCount,
+        totalPages,
+      },
     });
   } catch (error) {
-    console.error('Error fetching clients:', error);
-    res.status(500).json({ message: 'Error fetching clients' });
+    console.error("Error fetching clients:", error);
+    res.status(500).json({ message: "Error fetching clients" });
+  }
+};
+
+module.exports.getClientById = async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const client = await Client.findOne({ _id: clientId, isDeleted: false }).lean();
+    if (!client) {
+      return res.status(404).json({ message: "Client not found" });
+    }
+    const [data] = await enrichClientsPage([client]);
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  } catch (error) {
+    console.error("Error fetching client:", error);
+    res.status(500).json({ message: "Error fetching client" });
   }
 };
 
@@ -405,6 +525,9 @@ module.exports.cancelClientSubscription = async (req, res) => {
     client.paymentStatus = "unpaid";
     client.planExpiry = null;
 
+    const freePlan = await Plan.getPlanByName("free");
+    client.customLimits = PlanService.buildCustomLimitsFromPlan(freePlan);
+
     await client.save();
 
     res.status(200).json({
@@ -427,17 +550,37 @@ module.exports.setCustomLimits = async (req, res) => {
       return res.status(404).json({ message: "Client not found" });
     }
 
-    // Update custom limits
-    client.customLimits = {
-      isCustomLimits: Boolean(isCustomLimits),
-      maxQueries: maxQueries != null ? Number(maxQueries) : null,
-      maxHumanAgents: maxHumanAgents != null ? Number(maxHumanAgents) : null,
-      maxAgents: maxAgents != null ? Number(maxAgents) : null,
-      maxStorage: maxStorage != null ? Number(maxStorage) : null,
+    const planDoc = await Plan.getPlanByName(client.plan);
+    const plim = planDoc?.limits || {};
+
+    const mergeDim = (bodyVal, planVal) => {
+      if (bodyVal !== undefined && bodyVal !== null && bodyVal !== "") {
+        const n = Number(bodyVal);
+        return Number.isFinite(n) ? n : null;
+      }
+      return planVal != null ? Number(planVal) : null;
     };
 
-    // If custom limits are being enabled, recalculate upgradePlanStatus
-    if (isCustomLimits) {
+    if (!isCustomLimits) {
+      client.customLimits = {
+        isCustomLimits: false,
+        maxQueries: null,
+        maxHumanAgents: null,
+        maxAgents: null,
+        maxStorage: null,
+      };
+    } else {
+      // Missing/null body fields default to the client's current global plan limits
+      client.customLimits = {
+        isCustomLimits: true,
+        maxQueries: mergeDim(maxQueries, plim.maxQueries),
+        maxHumanAgents: mergeDim(maxHumanAgents, plim.maxHumanAgentsPerAccount),
+        maxAgents: mergeDim(maxAgents, plim.maxAgentsPerAccount),
+        maxStorage: mergeDim(maxStorage, plim.maxStorage),
+      };
+    }
+
+    if (client.customLimits.isCustomLimits) {
       const userId = client.userId;
 
       const [totalAiAgents, totalHumanAgents, totalConversations] = await Promise.all([
@@ -446,10 +589,11 @@ module.exports.setCustomLimits = async (req, res) => {
         Conversation.countDocuments({ userId }),
       ]);
 
-      const effectiveMaxAgents = maxAgents != null ? Number(maxAgents) : null;
-      const effectiveMaxHumanAgents = maxHumanAgents != null ? Number(maxHumanAgents) : null;
-      const effectiveMaxQueries = maxQueries != null ? Number(maxQueries) : null;
-      const effectiveMaxStorage = maxStorage != null ? Number(maxStorage) : null;
+      const cl = client.customLimits;
+      const effectiveMaxAgents = cl.maxAgents;
+      const effectiveMaxHumanAgents = cl.maxHumanAgents;
+      const effectiveMaxQueries = cl.maxQueries;
+      const effectiveMaxStorage = cl.maxStorage;
 
       const upgradePlanStatus = { ...client.upgradePlanStatus.toObject?.() || client.upgradePlanStatus };
 
@@ -473,9 +617,9 @@ module.exports.setCustomLimits = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message: isCustomLimits
-        ? "Custom limits applied successfully"
-        : "Custom limits disabled; plan limits are now in effect",
+      message: client.customLimits.isCustomLimits
+        ? "Limits saved successfully"
+        : "Per-client limits cleared; global plan limits apply",
       data: {
         customLimits: client.customLimits,
         upgradePlanStatus: client.upgradePlanStatus,
