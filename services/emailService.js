@@ -127,10 +127,43 @@ const sendEmailForOfflineChat = async (email,location,ip,reason, message,userId)
   }
 };
 
+const sendEmailForLimitExpiry = async (userEmail, message, subject, visitorName, visitorMail) => {
+  const mailOptions = {
+    from: process.env.SMTP_FROM,
+    to: userEmail,
+    subject: subject || "Chat Limit Reached",
+    html: `
+      <h2>Chat Limit Reached</h2>
+      <p>Hello,</p>
+      <p>A visitor has attempted to chat but chat limit has been reached for this session.</p>
+      
+      <p><strong>Visitor Details:</strong></p>
+      <ul>
+        <li><strong>Name:</strong> ${visitorName || 'Not provided'}</li>
+        <li><strong>Email:</strong> ${visitorMail || 'Not provided'}</li>
+      </ul>
+      
+      <p><strong>Message:</strong></p>
+      <blockquote style="background:#f9f9f9;padding:10px;border-left:3px solid #ccc;">
+        ${message || 'No message provided'}
+      </blockquote>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    return true;
+  } catch (error) {
+    console.error("Error sending limit expiry email:", error);
+    return false;
+  }
+};
+
 
 module.exports = {
   sendAgentApprovalEmail,
   sendPlanUpgradeEmail,
   sendPlanDowngradeEmail,
   sendEmailForOfflineChat,
+  sendEmailForLimitExpiry,
 };

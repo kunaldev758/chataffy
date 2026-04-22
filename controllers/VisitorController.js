@@ -1,5 +1,7 @@
+const User = require("../models/User");
 const Visitor = require("../models/Visitor");
 const BlockedVisitorIp = require("../models/blockedVisitorIp");
+const { sendEmailForLimitExpiry } = require("../services/emailService");
 
 const things = [
   "Shirt",
@@ -280,5 +282,26 @@ VisitorController.deleteVisitorById = async (req, res) => {
     res.status(500).json({ error: "Failed to delete visitor" });
   }
 };
+
+VisitorController.leaveMessage = async (req, res) => {
+  try {
+    const { name, email, subject, message, userId } = req.body;
+
+    const user = await User.findById(userId);
+
+    if (!user) {
+      return res.status(404).json({ status_code: 404, status : false, error: "User not found" });
+    }
+
+    await sendEmailForLimitExpiry(user.email, message, subject, name, email);
+    
+    res.status(200).json({ status_code: 200, status : true, message: "Leave message sent successfully" });
+
+  } catch (error) {
+    console.error("Error sending leave message:", error);
+    res.status(500).json({ status_code: 500, status : false, error: "Failed to send leave message -> " + error.message });
+  }
+};
+
 
 module.exports = VisitorController;

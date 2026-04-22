@@ -68,7 +68,13 @@ const initializeVisitorEvents = (io, socket) => {
       // Use agentId from URL/query, fallback to Widget's agentId (multi-agent support)
       const effectiveAgentId = agentId || themeSettings.agentId;
 
-      // Fetch the visitor's conversation history
+      const LimitAvailable = await checkPlanLimits(userId || themeSettings.userId, "query");
+      const isLimitExpired = !(LimitAvailable?.canMakeQueries);
+      if(isLimitExpired) {
+        await Client.updateOne({ userId },{ $set: { "upgradePlanStatus.chatLimitExceeded": true }  });
+      }
+
+      // Fetch the visitor's conversation history  
       let chatMessages = [];
       chatMessages = await ChatMessageController.getAllChatMessages(visitorId, effectiveAgentId);
 
@@ -123,6 +129,7 @@ const initializeVisitorEvents = (io, socket) => {
         themeSettings,
         aiChat: aiChat,
         conversationFeedback: conversationFeedback,
+        isLimitExpired,
       });
     } catch (error) {
       console.error("Error handling visitor-connect:", error);

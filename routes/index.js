@@ -83,6 +83,7 @@ const NotificationController = require('../controllers/NotificationController');
 const { reviseAnswer } = require('../controllers/ReviseAnswerController');
 const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
+const VisitorController = require('../controllers/VisitorController');
 
 /* Public routes (no authentication required) */
 router.get('/test', (req, res) => {
@@ -222,6 +223,9 @@ router.post('/revise-answer', middleware, reviseAnswer);
 router.get('/notifications/agent/:agentId', middleware, NotificationController.getByAgentId);
 router.put('/notifications/:id/seen', middleware, NotificationController.markAsSeen);
 router.put('/notifications/agent/:agentId/seen-all', middleware, NotificationController.markAllAsSeenByAgentId);
+
+// Visitor management routes
+router.post('/leaveMessage', VisitorController.leaveMessage);
 
 // Error handling middleware for multer errors
 router.use((error, req, res, next) => {
