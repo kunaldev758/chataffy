@@ -111,6 +111,7 @@ router.post('/create', superAdminController.createSuperAdmin); // For initial se
 router.get('/superadmin/dashboard', verifySuperAdminToken, superAdminController.getDashboardData);
 router.get('/superadmin/clients', verifySuperAdminToken, superAdminController.getAllClients);
 router.get('/superadmin/clients/:clientId/agents', verifySuperAdminToken, superAdminController.getClientAgents);
+router.get('/superadmin/clients/:clientId', verifySuperAdminToken, superAdminController.getClientById);
 router.get('/superadmin/agent/:clientId', verifySuperAdminToken, superAdminController.getClientAgents);
 router.get('/superadmin/cancel/sunscription/:clientId', verifySuperAdminToken, superAdminController.cancelClientSubscription);
 router.put('/superadmin/clients/:clientId/custom-limits', verifySuperAdminToken, superAdminController.setCustomLimits);

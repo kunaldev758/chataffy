@@ -10,6 +10,7 @@ const fs = require('fs');
 const nodemailer = require('nodemailer');
 const smtpTransport = require('nodemailer-smtp-transport');
 const commonHelper = require("../helpers/commonHelper.js");
+const PlanService = require('../services/PlanService');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -65,6 +66,7 @@ UserController.createUser = async (req, res) => {
     const client = new Client({userId});
     client.email = email;
     await client.save();
+    await PlanService.seedCustomLimitsForNewClient(userId);
     // Generate widget token and insert in widget table
     const widgetToken = crypto.randomBytes(8).toString('hex') + userId + agent._id;
     const widget = new Widget({userId,widgetToken,agentId:agent._id});
@@ -433,6 +435,7 @@ UserController.googleOAuth = async (req, res) => {
       
       client.email = email;
       await client.save();
+      await PlanService.seedCustomLimitsForNewClient(userId);
 
       const widgetToken = crypto.randomBytes(8).toString('hex') + userId + agent._id;
       const widget = new Widget({ userId, widgetToken, agentId: agent._id });
