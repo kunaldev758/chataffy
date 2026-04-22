@@ -467,8 +467,11 @@ new Worker(
 
             let clientDoc = await Client.findOne({ userId });
             currentDataSize = clientDoc?.currentDataSize || 0;
-
-          if (currentDataSize + contentSize > plan.limits.maxStorage) {
+            const maxStorage = (clientDoc.customLimits?.isCustomLimits && clientDoc.customLimits?.maxStorage != null)
+              ? clientDoc.customLimits.maxStorage
+              : plan.limits.maxStorage;
+          // if (currentDataSize + contentSize > plan.limits.maxStorage) {
+            if (currentDataSize + contentSize > maxStorage) {
             await Client.updateOne(
               { userId },
               { $set: { "upgradePlanStatus.storageLimitExceeded": true } }
@@ -983,4 +986,44 @@ new Worker(
   { connection: redisConfig, concurrency: 1 }
 );
 
-module.exports = { planUpgradeQueue, urlProcessingQueue, deleteTrainingDataQueue, retrainTrainingDataQueue };
+const transcriptEmailQueue = new Queue("transcriptEmailQueue", {
+  connection: redisConfig,
+  defaultJobOptions: {
+    removeOnComplete: 20,
+    removeOnFail: 50,
+    attempts: 3,
+    backoff: {
+      type: "exponential",
+      delay: 2000,
+    },
+  },
+});
+
+new Worker(
+  "transcriptEmailQueue",
+  async (job) => {
+    const { conversation } = job.data || {};
+    try {
+      if (!conversation?._id || !conversation?.userId) {
+        console.warn("[transcriptEmailQueue] Missing conversation data, skipping job");
+        return;
+      }
+
+      const { sendConversationTranscriptEmail } = require("../helpers/visitorHandlers");
+      await sendConversationTranscriptEmail(conversation);
+      console.log(`[transcriptEmailQueue] Transcript email sent for conversation ${conversation._id}`);
+    } catch (error) {
+      console.error("[transcriptEmailQueue] Job failed:", error);
+      throw error;
+    }
+  },
+  { connection: redisConfig, concurrency: 2 }
+);
+
+module.exports = {
+  planUpgradeQueue,
+  urlProcessingQueue,
+  deleteTrainingDataQueue,
+  retrainTrainingDataQueue,
+  transcriptEmailQueue,
+};

@@ -83,6 +83,7 @@ const NotificationController = require('../controllers/NotificationController');
 const { reviseAnswer } = require('../controllers/ReviseAnswerController');
 const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
+const ChatTranscriptController = require('../controllers/ChatTranscriptController');
 const VisitorController = require('../controllers/VisitorController');
 
 /* Public routes (no authentication required) */
@@ -212,6 +213,7 @@ router.post('/ai-agents/delete/:agentId', middleware, AIAgentController.deleteAg
 router.post('/complete-onboarding', middleware, AIAgentController.completeOnboarding);
 router.get('/agent-settings/:agentId', middleware, AIAgentController.getAgentSettings);
 router.post('/updateAgentSettings', middleware, AIAgentController.updateAgentSettings);
+router.get('/ai-agents/agent-data/:agentId', middleware, AIAgentController.getAgentData);
 
 router.post('/sendEmailForOfflineChat', ConversationController.sendEmailForOfflineChatController);
 router.post('/conversations/filter', middleware, ConversationController.getFilteredConversations);
@@ -223,6 +225,10 @@ router.post('/revise-answer', middleware, reviseAnswer);
 router.get('/notifications/agent/:agentId', middleware, NotificationController.getByAgentId);
 router.put('/notifications/:id/seen', middleware, NotificationController.markAsSeen);
 router.put('/notifications/agent/:agentId/seen-all', middleware, NotificationController.markAllAsSeenByAgentId);
+
+// Chat transcript settings routes
+router.post('/chat-transcripts/settings/get', middleware, ChatTranscriptController.getChatTranscriptData);
+router.post('/chat-transcripts/settings/update', middleware, ChatTranscriptController.updateChatTranscriptData);
 
 // Visitor management routes
 router.post('/leaveMessage', VisitorController.leaveMessage);

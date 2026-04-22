@@ -1354,10 +1354,16 @@ async bulkInsertUrls(userId,agentId, urls) {
             lastEdit: Date.now(),
           }
         );
-        await Agent.updateOne({ _id: agentId }, { $inc: { filesAdded: 1 } });
+        await Agent.updateOne(
+          { _id: agentId },
+          {
+            $inc: { filesAdded: 1 },
+            $set: { dataTrainingStatus: 0, lastTrained: new Date() },
+          },
+        );
 
         // Update client flags
-        await Agent.updateOne({ _id: agentId }, { dataTrainingStatus: 0 });
+        // await Agent.updateOne({ _id: agentId }, { dataTrainingStatus: 0 });
         appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
         });
@@ -1562,7 +1568,7 @@ async bulkInsertUrls(userId,agentId, urls) {
           { _id: agentId },
           { 
             $inc: { faqsAdded: documentsToProcess.length },
-            $set: { dataTrainingStatus: 0 }
+            $set: { dataTrainingStatus: 0, lastTrained: new Date() }
           }
         );
 

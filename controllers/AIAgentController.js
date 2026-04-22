@@ -8,6 +8,8 @@ const HumanAgent = require('../models/HumanAgent');
 const TrainingListFreeUsers = require('../models/TrainingListFreeUsers');
 const Url = require('../models/Url');
 const WebsiteData = require('../models/WebsiteData');
+const Client = require('../models/Client');
+const PlanService = require('../services/PlanService');
 const commonHelper = require('../helpers/commonHelper');
 
 const AIAgentController = {};
@@ -48,6 +50,23 @@ AIAgentController.createAgent = async (req, res) => {
 
     if (!userId) {
       return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+    }
+
+    const effectiveLimits = await PlanService.getEffectiveLimits(userId);
+    const maxAgentsPerAccount = Number(effectiveLimits?.maxAgentsPerAccount);
+    if (Number.isFinite(maxAgentsPerAccount) && maxAgentsPerAccount > 0) {
+      const agentsCount = await Agent.countDocuments({ userId });
+      if (agentsCount >= maxAgentsPerAccount) {
+        await Client.updateOne(
+          { userId },
+          { $set: { 'upgradePlanStatus.agentLimitExceeded': true } }
+        );
+        return res.status(400).json({
+          status_code: 400,
+          status: false,
+          message: 'Max Website per account limit exceeded',
+        });
+      }
     }
 
     const agentId = new mongoose.Types.ObjectId();
@@ -224,6 +243,43 @@ AIAgentController.completeOnboarding = async (req, res) => {
   } catch (error) {
     commonHelper.logErrorToFile(error);
     return res.status(500).json({ status_code: 500, status: false, message: 'Failed to complete onboarding' });
+  }
+};
+
+// GET /agent-data/:agentId — return agent data
+AIAgentController.getAgentData = async (req, res) => {
+  try {
+    const agentId = req.params.agentId;
+    if (!agentId) {
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Agent ID is required",
+        });
+    }
+    const agent = await Agent.findById(agentId).select(
+      "agentName website_name email phone fallbackMessage liveAgentSupport onboardingStep onboardingWebsiteUrl onboardingExtractedUrls isSitemapAdded filesAdded faqsAdded pagesAdded dataTrainingStatus scrapingStartTime",
+    );
+    if (!agent) {
+      return res
+        .status(404)
+        .json({ status_code: 404, status: false, message: "Agent not found" });
+    }
+
+    return res
+      .status(200)
+      .json({ status_code: 200, status: true, agent: agent });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "Failed to get agent data",
+      });
   }
 };
 

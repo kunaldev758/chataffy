@@ -12,6 +12,7 @@ const Agent = require("../models/Agent");
 const HumanAgent = require("../models/HumanAgent");
 const PlanService = require("../services/PlanService");
 const { agentConnectionTimeouts } = require("./visitorHandlers");
+const { transcriptEmailQueue } = require("../services/jobService");
 
 const stripHtml = (html) => (html || "").replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
 
@@ -528,6 +529,14 @@ const initializeClientEvents = (io, socket) => {
         return;
       }
 
+     if(status === "close" && conversation.visitorClosed === false){
+      try {
+        await transcriptEmailQueue.add("sendConversationTranscriptEmail", { conversation: conversation.toObject() });
+      } catch (mailError) {
+        console.error("queue transcript email error:", mailError.message);
+      }
+     }
+
       let visitorId = conversation?.visitor;
 
       const { name: closedByName } = await resolveHumanAgent(socket, userId);
@@ -719,6 +728,19 @@ const initializeClientEvents = (io, socket) => {
     }
   });
   ////////////////dash end///////////
+
+  /////// effective limits ///////
+  socket.on("fetch-effective-limits", async ({ }, callback) => {
+    try {
+      const [effectiveLimits] = await Promise.all([
+        PlanService.getEffectiveLimits(socket.userId),
+      ]);
+      callback?.({ success: true , effectiveLimits: effectiveLimits });
+    } catch (error) {
+      console.error("Error fetching effective limits:", error);
+      callback?.({ success: false, error: "Failed to fetch effective limits" });
+    }
+  });
 
   socket.on("accept-agent-connection", async ({ conversationId }, callback) => {
     try {
