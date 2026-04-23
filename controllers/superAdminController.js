@@ -322,7 +322,12 @@ async function enrichClientsPage(clients) {
         userId: client.userId,
         isDeleted: { $ne: true },
       });
-      const totalHumanAgents = await HumanAgent.countDocuments({ userId: client.userId });
+      // Team "Admin" is stored as HumanAgent with isClient: true; only invited agents (isClient: false) count toward plan limits
+      const totalHumanAgents = await HumanAgent.countDocuments({
+        userId: client.userId,
+        isDeleted: false,
+        isClient: false,
+      });
 
       const totalConversations = await Conversation.countDocuments({ userId: client.userId });
 
