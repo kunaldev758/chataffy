@@ -150,7 +150,7 @@ const initializeClientEvents = (io, socket) => {
   });
 
   socket.on("get-training-list", async (data) => {
-    const { skip, limit, sourcetype, actionType } = data;
+    const { skip, limit, sourcetype, actionType, search } = data;
     let status = actionType;
     let type = sourcetype;
     const webPages = await ScrappingController.getScrapingHistoryBySocket(
@@ -159,7 +159,8 @@ const initializeClientEvents = (io, socket) => {
       skip,
       limit,
       type,
-      status
+      status,
+      search
     );
     socket.emit("get-training-list-response", {
       response: "Received data from message",

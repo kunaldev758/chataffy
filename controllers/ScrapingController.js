@@ -1075,7 +1075,7 @@ async bulkInsertUrls(userId,agentId, urls) {
     }
   }
 
-  async getScrapingHistoryBySocket(userId, agentId, skip, limit, type, status) {
+  async getScrapingHistoryBySocket(userId, agentId, skip, limit, type, status, search) {
     try {
       const TrainingModel = await PlanService.getTrainingModel(userId);
 
@@ -1111,6 +1111,19 @@ async bulkInsertUrls(userId,agentId, urls) {
         } else {
           query.trainingStatus = { $in: [0, 1, 2] };
         }
+      }
+
+      const searchTerm =
+        typeof search === "string" && search.trim() ? search.trim() : null;
+      if (searchTerm) {
+        const escaped = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        query.$or = [
+          { title: { $regex: escaped, $options: "i" } },
+          { "webPage.url": { $regex: escaped, $options: "i" } },
+          { fileName: { $regex: escaped, $options: "i" } },
+          { originalFileName: { $regex: escaped, $options: "i" } },
+          { content: { $regex: escaped, $options: "i" } },
+        ];
       }
 
       const [entries, total] = await Promise.all([
