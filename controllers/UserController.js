@@ -113,8 +113,9 @@ UserController.createUser = async (req, res) => {
     )
     if (chatTranscript instanceof Error) {
       console.error("Error creating chat transcript while creating user:", chatTranscript.message);
+    }else{
+      console.log("Chat transcript created successfully:", chatTranscript);
     }
-    console.log("Chat transcript created successfully:", chatTranscript);
 
     const client_url = process.env.CLIENT_URL;
     const verificationLink = `${client_url}verify-email?token=${emailVerificationToken}`;
@@ -478,6 +479,21 @@ UserController.googleOAuth = async (req, res) => {
           keyValue: agentError.keyValue,
           stack: agentError.stack
         });
+      }
+
+      console.log("Creating Transcript emails for user:", userId);
+      const chatTranscript = await saveChatTranscriptSettings(
+        userId,
+        [email],
+        [email],
+        [email],
+        '',
+        '',
+      )
+      if (chatTranscript instanceof Error) {
+        console.error("Error creating chat transcript while creating user:", chatTranscript.message);
+      }else{
+        console.log("Chat transcript created successfully:", chatTranscript);
       }
 
       isNewUser = true;
