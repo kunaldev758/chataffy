@@ -1,6 +1,7 @@
 const ConversationTag = require("../models/ConversationTag");
 const Conversation = require("../models/Conversation");
 const Visitor = require("../models/Visitor");
+const PlanService = require("../services/PlanService");
 const ChatMessage = require("../models/ChatMessage");
 const Agent = require("../models/Agent");
 const emailService = require("../services/emailService");
@@ -140,11 +141,14 @@ ConversationController.getOpenConversation = async (visitorId, userId, agentId) 
       agentId: agentId,
       visitorClosed: { $ne: true },
     });
-    if(!result){
-      const conversation = await ConversationController.createConversation(visitorId, userId, agentId);
-      return conversation;
+    if (result) {
+      return result;
     }
-    return result;
+    const limitCheck = await PlanService.checkPlanLimits(userId, "query");
+    if (!limitCheck.canMakeQueries) {
+      return null;
+    }
+    return await ConversationController.createConversation(visitorId, userId, agentId);
   } catch (err) {
     throw err;
   }

@@ -15,7 +15,6 @@ const HumanAgent = require("../models/HumanAgent");
 const ChatTranscriptSetting = require("../models/ChatTranscriptSetting");
 const BlockedVisitorIp = require("../models/blockedVisitorIp");
 const NotificationController = require("../controllers/NotificationController");
-const { checkPlanLimits } = require("../services/PlanService");
 const { transcriptEmailQueue } = require("../services/jobService");
 const { chatTranscriptTemplate } = require("../templates/transcript-template");
 // Store active timeouts for agent connection requests
@@ -242,24 +241,38 @@ const initializeVisitorEvents = (io, socket) => {
       }
       // Use agentId from URL/query, fallback to Widget's agentId (multi-agent support)
       const effectiveAgentId = agentId || themeSettings.agentId;
+      const ownerUserId = userId || themeSettings.userId;
 
-      const LimitAvailable = await checkPlanLimits(userId || themeSettings.userId, "query");
-      const isLimitExpired = !(LimitAvailable?.canMakeQueries);
-      if(isLimitExpired) {
-        await Client.updateOne({ userId },{ $set: { "upgradePlanStatus.chatLimitExceeded": true }  });
+      // Open or create one conversation per widget session; limit applies only when creating a new thread.
+      let conversation = await ConversationController.getOpenConversation(
+        visitorId,
+        ownerUserId,
+        effectiveAgentId
+      );
+
+      if (!conversation) {
+        await Client.updateOne(
+          { userId: ownerUserId },
+          { $set: { "upgradePlanStatus.chatLimitExceeded": true } }
+        );
+        socket.emit("visitor-connect-response", {
+          conversationId: null,
+          chatMessages: [],
+          themeSettings,
+          aiChat: true,
+          conversationFeedback: null,
+          isLimitExpired: true,
+        });
+        return;
       }
 
-      // Fetch the visitor's conversation history  
+      const isLimitExpired = false;
+
+      // Fetch the visitor's conversation history
       let chatMessages = [];
       chatMessages = await ChatMessageController.getAllChatMessages(visitorId, effectiveAgentId);
 
-      // Get the conversation to check aiChat status
-      let conversation = await ConversationController.getOpenConversation(
-        visitorId,
-        userId,
-        effectiveAgentId
-      );
-      let aiChat = true; // Default to true (AI chat mode)
+      let aiChat = true;
 
       if (chatMessages.length <= 0) {
         const conversationId = conversation?._id || null;
@@ -269,7 +282,7 @@ const initializeVisitorEvents = (io, socket) => {
           visitorId,
           "system",
           themeSettings?.welcomeMessage,
-          userId,
+          ownerUserId,
           effectiveAgentId
         );
 
@@ -279,13 +292,9 @@ const initializeVisitorEvents = (io, socket) => {
         );
       }
 
-      // Get aiChat status from conversation
-      if (conversation) {
-        aiChat = conversation.aiChat !== undefined ? conversation.aiChat : true;
-        console.log('🔌 visitor-connect: aiChat status:', aiChat, 'for conversation:', conversation._id);
-      } else {
-        console.log('⚠️ visitor-connect: No conversation found, defaulting aiChat to true');
-      }
+      // aiChat from loaded conversation
+      aiChat = conversation.aiChat !== undefined ? conversation.aiChat : true;
+      console.log('🔌 visitor-connect: aiChat status:', aiChat, 'for conversation:', conversation._id);
 
       // Prepare conversation feedback data
       const conversationFeedback = conversation ? {
@@ -293,13 +302,13 @@ const initializeVisitorEvents = (io, socket) => {
         comment: conversation.comment
       } : null;
 
-      conversationRoom = `conversation-${conversation?._id}`;
+      conversationRoom = `conversation-${conversation._id}`;
       socket.join(conversationRoom);
 
       // Emit visitor-connect-response directly to the visitor.
       // socket.to(room) EXCLUDES the sender — the visitor would never receive it.
       io.to(conversationRoom).emit("visitor-connect-response", {
-        conversationId: conversation?._id,
+        conversationId: conversation._id,
         chatMessages,
         themeSettings,
         aiChat: aiChat,
@@ -337,17 +346,17 @@ const initializeVisitorEvents = (io, socket) => {
         agentId
         // socket.humanAgentId
       );
-      const conversationId = conversation?._id || null;
+      if (!conversation) {
+        await Client.updateOne({ userId }, { $set: { "upgradePlanStatus.chatLimitExceeded": true } });
+        socket.emit("visitor-connect-response-upgrade");
+        callback?.({ success: false });
+        return;
+      }
+      const conversationId = conversation._id;
       const messages = await ChatMessage.find({
         conversation_id: conversationId,
       });
       if (messages.length <= 1) {
-        const LimitAvailable = await checkPlanLimits(userId, "query");
-        if (!LimitAvailable.canMakeQueries) {
-          await Client.updateOne({ userId },{ $set: { "upgradePlanStatus.chatLimitExceeded": true }  });
-          socket.emit("visitor-connect-response-upgrade");
-          return;
-        }
         await Conversation.findByIdAndUpdate(conversationId, {
           is_started: true,
         });

@@ -3,7 +3,9 @@ const Client = require("../models/Client");
 const Plan = require("../models/Plan");
 const Agent = require("../models/Agent");
 const HumanAgent = require("../models/HumanAgent");
-const ChatMessage = require("../models/ChatMessage");
+const Conversation = require("../models/Conversation");
+const Visitor = require("../models/Visitor");
+const mongoose = require("mongoose");
 // const QdrantVectorStoreManager = require("./QdrantService");
 const {planUpgradeQueue} = require("./jobService");
 
@@ -255,10 +257,12 @@ class PlanService {
   }
 
   /**
-   * Visitor-authored messages (queries) in the current billing cycle — used vs max_queries.
-   * Excludes ai / humanAgent / client / system / agent-connect reply traffic.
+   * Billable conversations in the current billing cycle vs max_queries.
+   * Counts only when (1) chat has started — visitor sent at least one message (`is_started`),
+   * and (2) visitor submitted sign-in / pre-chat fields (`visitorDetails` non-empty).
+   * Opening the widget alone does not increment usage.
    */
-  static async countVisitorQueriesInBillingCycle(userId) {
+  static async countConversationsInBillingCycle(userId) {
     try {
       const client = await Client.findOne({ userId });
       if (!client) return 0;
@@ -266,15 +270,56 @@ class PlanService {
       const win = PlanService.computeBillingCycleWindowFromClient(client);
       if (!win) return 0;
 
-      return ChatMessage.countDocuments({
+      const convs = await Conversation.find({
         userId,
-        sender_type: "visitor",
+        is_started: true,
         createdAt: { $gte: win.cycleStart, $lt: win.cycleEnd },
-      });
+      })
+        .select({ visitor: 1 })
+        .lean();
+
+      if (!convs.length) return 0;
+
+      const objectIds = [];
+      const seen = new Set();
+      for (const c of convs) {
+        const v = c.visitor;
+        if (v == null || v === "") continue;
+        const s = String(v);
+        if (!mongoose.Types.ObjectId.isValid(s)) continue;
+        if (seen.has(s)) continue;
+        seen.add(s);
+        objectIds.push(new mongoose.Types.ObjectId(s));
+      }
+      if (!objectIds.length) return 0;
+
+      const visitors = await Visitor.find({ _id: { $in: objectIds } })
+        .select({ visitorDetails: 1 })
+        .lean();
+
+      const signedSet = new Set();
+      for (const v of visitors) {
+        const arr = v.visitorDetails;
+        if (Array.isArray(arr) && arr.length > 0) {
+          signedSet.add(String(v._id));
+        }
+      }
+
+      let count = 0;
+      for (const c of convs) {
+        if (!c.visitor || !signedSet.has(String(c.visitor))) continue;
+        count++;
+      }
+      return count;
     } catch (e) {
-      console.error("countVisitorQueriesInBillingCycle:", e);
+      console.error("countConversationsInBillingCycle:", e);
       return 0;
     }
+  }
+
+  /** @deprecated Use countConversationsInBillingCycle — same behavior (session-based count). */
+  static async countVisitorQueriesInBillingCycle(userId) {
+    return PlanService.countConversationsInBillingCycle(userId);
   }
 
   // Get plan usage statistics
@@ -291,8 +336,8 @@ class PlanService {
         totalHumanAgents = 0;
       }
 
-      // vs max_queries: visitor queries (messages), not conversations or replies
-      const totalChats = await PlanService.countVisitorQueriesInBillingCycle(userId);
+      // vs max_queries: conversation sessions in the billing cycle (not per visitor message)
+      const totalChats = await PlanService.countConversationsInBillingCycle(userId);
 
       return {
           totalAgents,
@@ -366,7 +411,7 @@ class PlanService {
           const maxQueries = limits.maxQueries;
           checks.canMakeQueries = usage.totalChats < maxQueries;
           if (!checks.canMakeQueries) {
-            checks.message = `Cannot make query. Limit: ${maxQueries}, Current: ${usage.totalChats}`;
+            checks.message = `Conversation limit reached. Limit: ${maxQueries}, Current: ${usage.totalChats}`;
             checks.upgradeSuggested = !limits.isCustom;
           }
           break;
