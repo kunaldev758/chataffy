@@ -790,6 +790,115 @@ Keep responses short, direct, friendly, and professional. Only use information e
     }
   }
 
+  /**
+   * Normalize for exact FAQ replay: strip HTML/tags, collapse whitespace, lowercase.
+   */
+  normalizeExactQuestion(text) {
+    return String(text || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
+
+  /**
+   * All revised_answer points for this user (scroll; typically a small set).
+   */
+  async fetchAllRevisedAnswerPayloads(collectionName, userIdString) {
+    if (!collectionName || !userIdString) return [];
+    try {
+      try {
+        await this.qdrantClient.createPayloadIndex(collectionName, {
+          field_name: "source_type",
+          field_schema: "keyword",
+        });
+      } catch (e) {
+        if (!e.message?.includes("already exists")) {
+          console.warn(
+            `[QueryController] source_type index (revised scroll): ${e.message}`
+          );
+        }
+      }
+
+      const filter = {
+        must: [
+          { key: "user_id", match: { value: userIdString.toString() } },
+          { key: "source_type", match: { value: "revised_answer" } },
+        ],
+      };
+
+      const payloads = [];
+      let nextPage = null;
+      let guard = 0;
+
+      while (guard++ < 200) {
+        const params = {
+          limit: 128,
+          filter,
+          with_payload: true,
+          ...(nextPage ? { offset: nextPage } : {}),
+        };
+
+        const res = await this.qdrantClient.scroll(collectionName, params);
+        const batch = res.points || [];
+        for (const pt of batch) {
+          if (pt.payload) payloads.push(pt.payload);
+        }
+        if (!res.next_page_offset || batch.length === 0) break;
+        nextPage = res.next_page_offset;
+      }
+
+      return payloads;
+    } catch (error) {
+      console.warn(
+        `[QueryController] fetchAllRevisedAnswerPayloads: ${error.message}`
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Applies only when the visitor repeats the exact same question (after normalize).
+   */
+  async tryReviseAnswerFromQdrant(collectionName, question, userIdString) {
+    if (!userIdString || question == null || question === "") return null;
+
+    const target = this.normalizeExactQuestion(question);
+    if (!target) return null;
+
+    const payloads = await this.fetchAllRevisedAnswerPayloads(
+      collectionName,
+      userIdString
+    );
+
+    for (const p of payloads) {
+      const orig = this.normalizeExactQuestion(p.original_question);
+      if (!orig || orig !== target) continue;
+
+      const text = String(p.text || "").trim();
+      if (!text) continue;
+
+      console.log(
+        "[QueryController] Revised answer: exact (normalized) question match"
+      );
+
+      return {
+        answer: text,
+        sources: [
+          {
+            type: 4,
+            title: p.title || "Revised Answer",
+            url: null,
+          },
+        ],
+      };
+    }
+
+    return null;
+  }
+
   async getAnswer(userId,agentId, question, conversationId, options = {}) {
     // Default threshold: 0.4 is reasonable for cosine similarity
     // Lower thresholds (0.2-0.3) may include irrelevant results
@@ -827,10 +936,34 @@ Keep responses short, direct, friendly, and professional. Only use information e
           ? agentData?.qdrantIndexName
           : agentData?.qdrantIndexNamePaid;
 
-      // 4. Intent detection to choose retrieval mode
-      const intent = this.detectIntent(question);
       const userIdString = userId?.toString();
-      const agentIdString = agentId?.toString();
+
+      // Revised answers only on normalized exact duplicate of the visitor question (no embeddings).
+      const revisedFromKb = await this.tryReviseAnswerFromQdrant(
+        collectionName,
+        question,
+        userIdString
+      );
+      if (revisedFromKb) {
+        return {
+          success: true,
+          answer: revisedFromKb.answer,
+          sources:
+            revisedFromKb.sources?.length > 0
+              ? revisedFromKb.sources
+              : undefined,
+          conversationId,
+          isAgentRequest: this.isAgentConnectionRequest(question),
+        };
+      }
+
+      const questionEmbedding = await this.embeddingModel.embedQuery(question);
+      if (!questionEmbedding) {
+        throw new Error("Failed to generate question embedding.");
+      }
+
+      // Intent detection to choose retrieval mode (list/show/… pages)
+      const intent = this.detectIntent(question);
 
       if (intent === "STRUCTURAL") {
         const keywords = this.extractKeywords(question);
@@ -913,11 +1046,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         );
       }
 
-      // 5. Semantic path: generate question embedding
-      const questionEmbedding = await this.embeddingModel.embedQuery(question);
-      if (!questionEmbedding) {
-        throw new Error("Failed to generate question embedding.");
-      }
+      // Semantic path: reuse embedding from above
 
       // 6. Query Qdrant (semantic)
       // Filter by user_id (owner) - Qdrant payload stores user_id, not agent_id, for filtering

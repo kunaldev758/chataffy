@@ -1,5 +1,6 @@
 // const commonHelper = require("../helpers/commonHelper.js");
 const Client = require("../models/Client");
+const PlanService = require("../services/PlanService.js");
 const Conversation = require("../models/Conversation.js");
 const ChatMessage = require("../models/ChatMessage.js");
 const Visitor = require("../models/Visitor.js")
@@ -7,30 +8,61 @@ const Agent = require("../models/Agent.js");
 const HumanAgent = require("../models/HumanAgent.js");
 
 const DashboardController = {};
+
+/**
+ * Open, engaged conversations — same basis as Chat Logs / `get-open-conversations-list`:
+ * `is_started` + `conversationOpenStatus: "open"`. Closed threads are excluded so the
+ * Live Traffic Map and Total Chats reflect live volume (e.g. 5), not open+closed (7).
+ */
+function liveDashboardChatPeriodMatch(userId, startDate, endDate, agentId) {
+  const q = {
+    userId,
+    createdAt: {
+      $gte: new Date(startDate),
+      $lte: new Date(endDate),
+    },
+    is_started: true,
+    conversationOpenStatus: "open",
+  };
+  if (agentId !== undefined && agentId !== null) {
+    q.agentId = agentId;
+  }
+  return q;
+}
+
+/** Counts per country from live chats in the period (matches totalChat). */
+async function buildLocationDataFromStartedChats(match) {
+  const conversations = await Conversation.find(match).select("visitor").lean();
+  if (!conversations.length) return transformData([]);
+
+  const visitorIds = [...new Set(conversations.map((c) => c.visitor).filter(Boolean))];
+  const visitors = await Visitor.find({ _id: { $in: visitorIds } })
+    .select("location")
+    .lean();
+
+  const idToLocation = new Map();
+  for (const v of visitors) {
+    idToLocation.set(String(v._id), v.location || "UNKNOWN");
+  }
+
+  const locationRows = conversations.map((c) => ({
+    location: idToLocation.get(String(c.visitor)) || "UNKNOWN",
+  }));
+  return transformData(locationRows);
+}
+
 DashboardController.getDashboardDataForAgent = async (dateRange, userId, agentId) => {
   try {
     const startDate = dateRange[0]; 
     const endDate  = dateRange[1];
-    const conversationCount = await Conversation.find({
-      createdAt: {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      },
-      userId:userId,
-      agentId: agentId,
-      is_started: true,
-    }).countDocuments();
+    const conversationCount = await Conversation.countDocuments(
+      liveDashboardChatPeriodMatch(userId, startDate, endDate, agentId)
+    );
 
-    const AiconversationCount = await Conversation.find({
-      createdAt: {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      },
+    const AiconversationCount = await Conversation.countDocuments({
+      ...liveDashboardChatPeriodMatch(userId, startDate, endDate, agentId),
       aiChat: true,
-      userId:userId,
-      agentId: agentId,
-      is_started: true,
-    }).countDocuments();
+    });
 
     const totalMessages = await ChatMessage.find({
       createdAt: {
@@ -41,16 +73,10 @@ DashboardController.getDashboardDataForAgent = async (dateRange, userId, agentId
       agentId: agentId,
     }).countDocuments();
 
-    const likedConversation = await Conversation.find({
+    const likedConversation = await Conversation.countDocuments({
+      ...liveDashboardChatPeriodMatch(userId, startDate, endDate, agentId),
       feedback: true,
-      createdAt: {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      },
-      userId:userId,
-      agentId: agentId,
-      is_started: true,
-    }).countDocuments();
+    });
 
     let csat = 0;
 
@@ -60,18 +86,9 @@ DashboardController.getDashboardDataForAgent = async (dateRange, userId, agentId
       csat = 0;
     }
 
-    const location = await Visitor.find(
-      {
-        userId: userId,
-        agentId: agentId,
-        createdAt: {
-          $gte: new Date(startDate),
-          $lte: new Date(endDate),
-        },
-      },
-      { location: 1, _id: 0 }
+    const locationData = await buildLocationDataFromStartedChats(
+      liveDashboardChatPeriodMatch(userId, startDate, endDate, agentId)
     );
-    const locationData = transformData(location);
 
    //total Agents
     const [totalHumanAgents, totalAiAgents] = await Promise.all([
@@ -80,48 +97,12 @@ DashboardController.getDashboardDataForAgent = async (dateRange, userId, agentId
     ]);
 
     let totalChatsInPlan = 0;
-
-      try {
-        const client = await Client.findOne({userId});
-      
-        if (!client) throw new Error("Client not found");
-      
-        // For free plan → start cycle from account creation date
-        const baseDate = (client.plan === "free") 
-          ? new Date(client.createdAt) 
-          : new Date(client.planPurchaseDate);
-      
-        const now = new Date();
-      
-        // Calculate how many full billing months have elapsed.
-        // A month is only "complete" once the current day-of-month has reached
-        // the billing day (e.g. created on the 27th → cycle renews on the 27th).
-        let monthsSinceBase = 
-          (now.getFullYear() * 12 + now.getMonth()) -
-          (baseDate.getFullYear() * 12 + baseDate.getMonth());
-
-        if (now.getDate() < baseDate.getDate()) {
-          monthsSinceBase -= 1;
-        }
-        if (monthsSinceBase < 0) monthsSinceBase = 0;
-      
-        let cycleStart = new Date(baseDate);
-        cycleStart.setMonth(baseDate.getMonth() + monthsSinceBase);
-      
-        let cycleEnd = new Date(cycleStart);
-        cycleEnd.setMonth(cycleStart.getMonth() + 1);
-      
-        // Count chats in the current cycle
-        totalChatsInPlan = await Conversation.countDocuments({
-          userId,
-          is_started: true,
-          createdAt: { $gte: cycleStart, $lt: cycleEnd }
-        });
-      
-      } catch (e) {
-        console.error(e);
-        totalChatsInPlan = 0;
-      }
+    try {
+      totalChatsInPlan = await PlanService.countVisitorQueriesInBillingCycle(userId);
+    } catch (e) {
+      console.error(e);
+      totalChatsInPlan = 0;
+    }
 
     return {
       totalChat: conversationCount,
@@ -143,24 +124,14 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
   try {
     const startDate = dateRange[0]; 
     const endDate  = dateRange[1];
-    const conversationCount = await Conversation.find({
-      createdAt: {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      },
-      userId:userId,
-      is_started: true,
-    }).countDocuments();
+    const conversationCount = await Conversation.countDocuments(
+      liveDashboardChatPeriodMatch(userId, startDate, endDate, undefined)
+    );
 
-    const AiconversationCount = await Conversation.find({
-      createdAt: {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      },
+    const AiconversationCount = await Conversation.countDocuments({
+      ...liveDashboardChatPeriodMatch(userId, startDate, endDate, undefined),
       aiChat: true,
-      userId:userId,
-      is_started: true,
-    }).countDocuments();
+    });
 
     const totalMessages = await ChatMessage.find({
       createdAt: {
@@ -170,15 +141,10 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
       userId:userId
     }).countDocuments();
 
-    const likedConversation = await Conversation.find({
+    const likedConversation = await Conversation.countDocuments({
+      ...liveDashboardChatPeriodMatch(userId, startDate, endDate, undefined),
       feedback: true,
-      createdAt: {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      },
-      userId:userId,
-      is_started: true,
-    }).countDocuments();
+    });
 
     let csat = 0;
 
@@ -188,65 +154,20 @@ DashboardController.getDashboardData = async (dateRange, userId) => {
       csat = 0;
     }
 
-  const location = await Visitor.find(
-    {
-      userId: userId,
-      agentId: agentId,
-      createdAt: {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      },
-    },
-    { location: 1, _id: 0 }
-  );
-  const locationData = transformData(location);
+    const locationData = await buildLocationDataFromStartedChats(
+      liveDashboardChatPeriodMatch(userId, startDate, endDate, undefined)
+    );
 
    //total Agents
     const totalHumanAgents = await HumanAgent.find({ userId: userId, isClient: false }).countDocuments();
 
     let totalChatsInPlan = 0;
-
-      try {
-        const client = await Client.findOne({userId});
-      
-        if (!client) throw new Error("Client not found");
-      
-        // For free plan → start cycle from account creation date
-        const baseDate = (client.plan === "free") 
-          ? new Date(client.createdAt) 
-          : new Date(client.planPurchaseDate);
-      
-        const now = new Date();
-      
-        // Calculate how many full billing months have elapsed.
-        // A month is only "complete" once the current day-of-month has reached
-        // the billing day (e.g. created on the 27th → cycle renews on the 27th).
-        let monthsSinceBase = 
-          (now.getFullYear() * 12 + now.getMonth()) -
-          (baseDate.getFullYear() * 12 + baseDate.getMonth());
-
-        if (now.getDate() < baseDate.getDate()) {
-          monthsSinceBase -= 1;
-        }
-        if (monthsSinceBase < 0) monthsSinceBase = 0;
-      
-        let cycleStart = new Date(baseDate);
-        cycleStart.setMonth(baseDate.getMonth() + monthsSinceBase);
-      
-        let cycleEnd = new Date(cycleStart);
-        cycleEnd.setMonth(cycleStart.getMonth() + 1);
-      
-        // Count chats in the current cycle
-        totalChatsInPlan = await Conversation.countDocuments({
-          userId,
-          is_started: true,
-          createdAt: { $gte: cycleStart, $lt: cycleEnd }
-        });
-      
-      } catch (e) {
-        console.error(e);
-        totalChatsInPlan = 0;
-      }
+    try {
+      totalChatsInPlan = await PlanService.countVisitorQueriesInBillingCycle(userId);
+    } catch (e) {
+      console.error(e);
+      totalChatsInPlan = 0;
+    }
 
     return {
       totalChat: conversationCount,

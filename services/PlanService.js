@@ -3,8 +3,7 @@ const Client = require("../models/Client");
 const Plan = require("../models/Plan");
 const Agent = require("../models/Agent");
 const HumanAgent = require("../models/HumanAgent");
-// const Chats = require("../models/Conversation");
-const Conversation = require("../models/Conversation");
+const ChatMessage = require("../models/ChatMessage");
 // const QdrantVectorStoreManager = require("./QdrantService");
 const {planUpgradeQueue} = require("./jobService");
 
@@ -222,6 +221,62 @@ class PlanService {
     }
   }
 
+  /**
+   * Billing window [cycleStart, cycleEnd) aligned with quota renewal (matches dashboard plan cycle).
+   * @returns {{ cycleStart: Date, cycleEnd: Date } | null}
+   */
+  static computeBillingCycleWindowFromClient(client) {
+    try {
+      if (!client) return null;
+      const baseDate =
+        client.plan === "free"
+          ? new Date(client.createdAt)
+          : new Date(client.planPurchaseDate);
+      const now = new Date();
+      let monthsSinceBase =
+        now.getFullYear() * 12 +
+        now.getMonth() -
+        (baseDate.getFullYear() * 12 + baseDate.getMonth());
+      if (now.getDate() < baseDate.getDate()) {
+        monthsSinceBase -= 1;
+      }
+      if (monthsSinceBase < 0) monthsSinceBase = 0;
+
+      let cycleStart = new Date(baseDate);
+      cycleStart.setMonth(baseDate.getMonth() + monthsSinceBase);
+
+      const cycleEnd = new Date(cycleStart);
+      cycleEnd.setMonth(cycleStart.getMonth() + 1);
+
+      return { cycleStart, cycleEnd };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Visitor-authored messages (queries) in the current billing cycle — used vs max_queries.
+   * Excludes ai / humanAgent / client / system / agent-connect reply traffic.
+   */
+  static async countVisitorQueriesInBillingCycle(userId) {
+    try {
+      const client = await Client.findOne({ userId });
+      if (!client) return 0;
+
+      const win = PlanService.computeBillingCycleWindowFromClient(client);
+      if (!win) return 0;
+
+      return ChatMessage.countDocuments({
+        userId,
+        sender_type: "visitor",
+        createdAt: { $gte: win.cycleStart, $lt: win.cycleEnd },
+      });
+    } catch (e) {
+      console.error("countVisitorQueriesInBillingCycle:", e);
+      return 0;
+    }
+  }
+
   // Get plan usage statistics
   static async getPlanUsage(userId) {
     try {
@@ -236,49 +291,8 @@ class PlanService {
         totalHumanAgents = 0;
       }
 
-      let totalChats = 0;
-
-      try {
-        const client = await Client.findOne({userId});
-      
-        if (!client) throw new Error("Client not found");
-      
-        // For free plan → start cycle from account creation date
-        const baseDate = (client.plan === "free") 
-          ? new Date(client.createdAt) 
-          : new Date(client.planPurchaseDate);
-      
-        const now = new Date();
-      
-        // Calculate how many full billing months have elapsed.
-        // A month is only "complete" once the current day-of-month has reached
-        // the billing day (e.g. created on the 27th → cycle renews on the 27th).
-        let monthsSinceBase = 
-          (now.getFullYear() * 12 + now.getMonth()) -
-          (baseDate.getFullYear() * 12 + baseDate.getMonth());
-
-        if (now.getDate() < baseDate.getDate()) {
-          monthsSinceBase -= 1;
-        }
-        if (monthsSinceBase < 0) monthsSinceBase = 0;
-      
-        let cycleStart = new Date(baseDate);
-        cycleStart.setMonth(baseDate.getMonth() + monthsSinceBase);
-      
-        let cycleEnd = new Date(cycleStart);
-        cycleEnd.setMonth(cycleStart.getMonth() + 1);
-      
-        // Count chats in the current cycle
-        totalChats = await Conversation.countDocuments({
-          userId,
-          is_started: true,
-          createdAt: { $gte: cycleStart, $lt: cycleEnd }
-        });
-      
-      } catch (e) {
-        console.error(e);
-        totalChats = 0;
-      }
+      // vs max_queries: visitor queries (messages), not conversations or replies
+      const totalChats = await PlanService.countVisitorQueriesInBillingCycle(userId);
 
       return {
           totalAgents,

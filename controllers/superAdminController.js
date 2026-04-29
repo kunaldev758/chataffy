@@ -329,7 +329,7 @@ async function enrichClientsPage(clients) {
         isClient: false,
       });
 
-      const totalConversations = await Conversation.countDocuments({ userId: client.userId });
+      const totalConversations = await PlanService.countVisitorQueriesInBillingCycle(client.userId);
 
       const currentDataUsed = client.currentDataSize;
 
@@ -588,10 +588,10 @@ module.exports.setCustomLimits = async (req, res) => {
     if (client.customLimits.isCustomLimits) {
       const userId = client.userId;
 
-      const [totalAiAgents, totalHumanAgents, totalConversations] = await Promise.all([
+      const [totalAiAgents, totalHumanAgents, visitorQueriesInCycle] = await Promise.all([
         Agent.countDocuments({ userId, isDeleted: { $ne: true } }),
         HumanAgent.countDocuments({ userId, isDeleted: false, isClient: false }),
-        Conversation.countDocuments({ userId }),
+        PlanService.countVisitorQueriesInBillingCycle(userId),
       ]);
 
       const cl = client.customLimits;
@@ -609,7 +609,7 @@ module.exports.setCustomLimits = async (req, res) => {
         upgradePlanStatus.humanAgentLimitExceeded = totalHumanAgents > effectiveMaxHumanAgents;
       }
       if (effectiveMaxQueries != null) {
-        upgradePlanStatus.chatLimitExceeded = totalConversations > effectiveMaxQueries;
+        upgradePlanStatus.chatLimitExceeded = visitorQueriesInCycle > effectiveMaxQueries;
       }
       if (effectiveMaxStorage != null) {
         upgradePlanStatus.storageLimitExceeded = client.currentDataSize > effectiveMaxStorage;
