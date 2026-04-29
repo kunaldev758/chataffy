@@ -76,6 +76,27 @@ const getVisitorEmail = (visitorDoc) => {
   return emailField?.value || "N/A";
 };
 
+const getMessageSenderName = (msg, visitorName = "Visitor") => {
+  const senderType = msg?.sender_type || "system";
+  const humanAgentName = msg?.humanAgentId?.name;
+  const agentName = msg?.agentId?.agentName;
+
+  if (senderType === "visitor") return visitorName || "Visitor";
+  if (senderType === "humanAgent" || senderType === "client") {
+    return humanAgentName || agentName || "Agent";
+  }
+
+  return (
+    (senderType === "ai" ? "AI Assistant" : null) ||
+    (senderType === "system" ? "System" : null) ||
+    humanAgentName ||
+    agentName ||
+    msg?.sender ||
+    senderType ||
+    "System"
+  );
+};
+
 const sendConversationTranscriptEmail = async (conversation) => {
   console.log(conversation ,"<----------- conversation");
   if (!conversation?.userId || !conversation?._id) return;
@@ -91,46 +112,66 @@ const sendConversationTranscriptEmail = async (conversation) => {
  
    const [visitorDoc, messages, widget] = await Promise.all([
      Visitor.findById(conversation.visitor).lean(),
-     ChatMessage.find({ conversation_id: conversation._id })
+     ChatMessage.find({
+       conversation_id: conversation._id,
+       is_note: { $ne: true },
+       sender_type: { $ne: "agent-connect" },
+     })
        .sort({ createdAt: 1 })
        .populate("humanAgentId", "name")
        .populate("agentId", "agentName")
+       .populate({
+         path: "replyTo",
+         select: "sender message createdAt sender_type humanAgentId agentId",
+         populate: [
+           { path: "humanAgentId", select: "name" },
+           { path: "agentId", select: "agentName" },
+         ],
+       })
        .lean(),
-     Widget.findOne({ userId: conversation.userId }).select("titleBar colorFields").lean(),
+     Widget.findOne({ userId: conversation.userId })
+       .select("titleBar colorFields")
+       .lean(),
    ]);
+  const visitorName = visitorDoc?.name || "Visitor";
+  const firstMessageAt = messages?.[0]?.createdAt || conversation.createdAt;
+  const lastMessageAt =
+    messages?.[messages.length - 1]?.createdAt ||
+    conversation.endedAt ||
+    conversation.updatedAt ||
+    new Date();
  
    const mappedMessages = messages
-   .filter((msg) => msg?.sender_type !== "agent-connect")
+  //  .filter((msg) => msg?.sender_type !== "agent-connect" && typeof msg?.is_note === "string" ? msg?.is_note !== "true" : msg?.is_note !== true)
    .map((msg) => {
      const senderType = msg?.sender_type || "system";
-     const humanAgentName = msg?.humanAgentId?.name;
-     const agentName = msg?.agentId?.agentName;
- 
-     const senderName =
-     (senderType === "ai" ? "AI Assistant" : null) ||
-     (senderType === "system" ? "System" : null) ||
-       humanAgentName ||
-       agentName ||
-       msg?.sender ||
-       senderType ||
-       "System";
+   const senderName = getMessageSenderName(msg, visitorName);
+    const replyTo = msg?.replyTo
+      ? {
+          sender: getMessageSenderName(msg.replyTo, visitorName),
+          sender_type: msg.replyTo?.sender_type || "system",
+          timestamp: formatTimestamp(msg.replyTo?.createdAt),
+          text: stripHtml(msg.replyTo?.message || ""),
+        }
+      : null;
  
      return {
        sender: senderName,
        sender_type: senderType,
        timestamp: formatTimestamp(msg?.createdAt),
        text: stripHtml(msg?.message || ""),
+      replyTo,
      };
    });
  
    const html = chatTranscriptTemplate({
      websiteName: widget?.titleBar || "Chataffy",
      conversationId: conversation._id.toString(),
-     visitorName: visitorDoc?.name || "Visitor",
+     visitorName,
      visitorEmail: getVisitorEmail(visitorDoc),
-     startedAt: formatTimestamp(conversation.createdAt),
-     endedAt: formatTimestamp(conversation.endedAt || conversation.updatedAt || new Date()),
-     duration: formatDuration(conversation.createdAt, conversation.endedAt || new Date()),
+     startedAt: formatTimestamp(firstMessageAt),
+     endedAt: formatTimestamp(lastMessageAt),
+     duration: formatDuration(firstMessageAt, lastMessageAt),
      messages: mappedMessages,
      colorFields: widget?.colorFields || [],
    });

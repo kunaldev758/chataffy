@@ -9,6 +9,10 @@ exports.chatTranscriptTemplate = (data) => {
       const isVisitor = msg.sender_type === "visitor";
       const displayName = isVisitor ? data.visitorName : msg.sender;
       const rowClass = isVisitor ? "chat-msg chat-msg--visitor" : "chat-msg chat-msg--agent";
+      const replyTo = msg.replyTo && (msg.replyTo.text || msg.replyTo.sender) ? msg.replyTo : null;
+      const replySenderName = replyTo
+        ? (replyTo.sender_type === "visitor" ? data.visitorName : (replyTo.sender || "Agent"))
+        : "";
       const initials = String(displayName || "?")
         .trim()
         .split(/\s+/)
@@ -22,11 +26,20 @@ exports.chatTranscriptTemplate = (data) => {
     <table class="${rowClass}" role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
       <tr>
         ${
-          isVisitor
+          !isVisitor
             ? `
         <td align="right" valign="top">
           <div class="chat-msg__inner">
             <div class="chat-msg__bubble">
+              ${
+                replyTo
+                  ? `
+              <div class="chat-msg__reply">
+                <div class="chat-msg__reply-sender">${replySenderName}</div>
+                <div class="chat-msg__reply-text">${replyTo.text || ""}</div>
+              </div>`
+                  : ""
+              }
               <div class="chat-msg__text">${msg.text}</div>
               <div class="chat-msg__meta">
                 <span class="chat-msg__name">${displayName}</span>
@@ -45,6 +58,15 @@ exports.chatTranscriptTemplate = (data) => {
         <td align="left" valign="top">
           <div class="chat-msg__inner">
             <div class="chat-msg__bubble">
+              ${
+                replyTo
+                  ? `
+              <div class="chat-msg__reply">
+                <div class="chat-msg__reply-sender">${replySenderName}</div>
+                <div class="chat-msg__reply-text">${replyTo.text || ""}</div>
+              </div>`
+                  : ""
+              }
               <div class="chat-msg__text">${msg.text}</div>
               <div class="chat-msg__meta">
                 <span class="chat-msg__name">${displayName}</span>
@@ -185,6 +207,25 @@ exports.chatTranscriptTemplate = (data) => {
           line-height: 1.45;
           white-space: pre-wrap;
           word-break: break-word;
+        }
+        .chat-msg__reply {
+          margin-bottom: 8px;
+          padding: 6px 8px;
+          border-left: 3px solid rgba(17, 27, 33, 0.25);
+          border-radius: 4px;
+          background: rgba(255, 255, 255, 0.35);
+        }
+        .chat-msg__reply-sender {
+          font-size: 11px;
+          font-weight: 700;
+          margin-bottom: 2px;
+        }
+        .chat-msg__reply-text {
+          font-size: 12px;
+          line-height: 1.35;
+          white-space: pre-wrap;
+          word-break: break-word;
+          opacity: 0.95;
         }
         .chat-msg__meta {
           margin-top: 4px;
