@@ -8,13 +8,34 @@ const emailService = require("../services/emailService");
 const ConversationController = {};
 
 //get all old conversation
-ConversationController.getAllOldConversations = async (visitor_id, agentId) => {
+ConversationController.getAllOldConversations = async (visitor_id, ip) => {
   try {
     if (!visitor_id) return [];
 
-    // Fetch all conversations for the visitor (open and closed)
+    // By default, fetch conversations for the current visitor id.
+    // If IP is provided, expand the query to include all visitors with the same
+    // IP for the same user/agent context.
+    let visitorIds = [visitor_id];
+    if (ip) {
+      const baseVisitor = await Visitor.findById(visitor_id).lean();
+      if (baseVisitor) {
+        const visitorsWithSameIp = await Visitor.find({
+          ip,
+          userId: baseVisitor.userId,
+          agentId: baseVisitor.agentId,
+        })
+          .select("_id")
+          .lean();
+        if (visitorsWithSameIp.length > 0) {
+          visitorIds = visitorsWithSameIp.map((v) => v._id);
+        }
+      }
+    }
+
+    // Fetch all conversations for matched visitors (open and closed)
     let conversations = await Conversation.find({
-      visitor: visitor_id,
+      visitor: { $in: visitorIds },
+      is_started: true,
     }).sort({ createdAt: -1 });
 
     // For each conversation, get the last message and add it to the `message` field

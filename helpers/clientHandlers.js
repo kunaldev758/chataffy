@@ -468,9 +468,9 @@ const initializeClientEvents = (io, socket) => {
     }
   });
 
-  socket.on("get-visitor-old-conversations", async ({ visitorId }, callback) => {
+  socket.on("get-visitor-old-conversations", async ({ visitorId, ip }, callback) => {
     try {
-      const conversations = await ConversationController.getAllOldConversations(visitorId);
+      const conversations = await ConversationController.getAllOldConversations(visitorId, ip);
       callback?.({ success: true, conversations: conversations });
     } catch (error) {
       console.error("get-visitor-old-conversations error:", error.message);
