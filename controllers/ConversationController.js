@@ -11,6 +11,7 @@ const ConversationController = {};
 ConversationController.getAllOldConversations = async (visitor_id, ip) => {
   try {
     if (!visitor_id) return [];
+    let visitorsMap = [];
 
     // By default, fetch conversations for the current visitor id.
     // If IP is provided, expand the query to include all visitors with the same
@@ -24,10 +25,11 @@ ConversationController.getAllOldConversations = async (visitor_id, ip) => {
           userId: baseVisitor.userId,
           agentId: baseVisitor.agentId,
         })
-          .select("_id")
+          .select("_id name")
           .lean();
         if (visitorsWithSameIp.length > 0) {
           visitorIds = visitorsWithSameIp.map((v) => v._id);
+          visitorsMap = new Map(visitorsWithSameIp.map((v) => [v._id.toString(), {_id: v._id, name: v.name}]));
         }
       }
     }
@@ -46,6 +48,7 @@ ConversationController.getAllOldConversations = async (visitor_id, ip) => {
 
         return {
           ...conv.toObject(),
+          visitor: visitorsMap.get(conv.visitor.toString()) || conv.visitor,
           message: lastMessage?.message || null, // Add message field
         };
       })
