@@ -22,14 +22,15 @@ function liveDashboardChatPeriodMatch(userId, startDate, endDate, agentId) {
       $lte: new Date(endDate),
     },
     is_started: true,
-    conversationOpenStatus: "open",
+    conversationOpenStatus: { $in: ["open", "close"] }, // 👈 change here
   };
+
   if (agentId !== undefined && agentId !== null) {
     q.agentId = agentId;
   }
+
   return q;
 }
-
 /** Counts per country from live chats in the period (matches totalChat). */
 async function buildLocationDataFromStartedChats(match) {
   const conversations = await Conversation.find(match).select("visitor").lean();
