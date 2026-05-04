@@ -91,6 +91,12 @@ AIAgentController.createAgent = async (req, res) => {
         humanAgent.name = commonHelper.clientHumanAgentNameFromAgent(agent);
         await humanAgent.save();
       }
+    }else if(user && user.isOnboarded) {
+      await HumanAgent.findOneAndUpdate(
+        { userId, isClient: true },
+        { $addToSet: { assignedAgents: agent._id } },
+        { new: true },
+      );
     }
 
     return res.status(200).json({
