@@ -129,12 +129,12 @@ const sendConversationTranscriptEmail = async (conversation) => {
          ],
        })
        .lean(),
-     Widget.findOne({ userId: conversation.userId })
+     Widget.findOne({ userId: conversation.userId, agentId: conversation.agentId })
        .select("titleBar colorFields")
        .lean(),
    ]);
   const visitorName = visitorDoc?.name || "Visitor";
-  const firstMessageAt = messages?.[0]?.createdAt || conversation.createdAt;
+  const firstMessageAt = messages?.[1]?.createdAt || conversation.createdAt;
   const lastMessageAt =
     messages?.[messages.length - 1]?.createdAt ||
     conversation.endedAt ||
@@ -433,8 +433,9 @@ const initializeVisitorEvents = (io, socket) => {
             io.to([agentRoom]).emit("agent-connection-notification", notificationData);
 
             // Create per-agent DB notifications (do NOT re-emit to agentRoom – already done above)
-            const agents = await HumanAgent.find({ agentId, status: 'approved', isActive: true }).lean();
+            const agents = await HumanAgent.find({ assignedAgents: agentId, status: 'approved', isActive: true }).lean();
             if (agents.length > 0) {
+              console.log("saving notifications for agents");
               for (const agent of agents) {
                 await NotificationController.createAgentConnectionNotification(
                   agent._id,
