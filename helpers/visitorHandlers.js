@@ -444,12 +444,26 @@ const initializeVisitorEvents = (io, socket) => {
               requestStartedAt,
             };
 
-            // Emit to client room and agent room (inbox receives from agentRoom)
-            // Note: emit to array deduplicates – sockets in both rooms only receive it once.
-            io.to([agentRoom]).emit("agent-connection-notification", notificationData);
+            const agents = await HumanAgent.find({
+              assignedAgents: agentId,
+              status: "approved",
+              isActive: true,
+            }).lean();
+
+            // Inbox listeners join user-<AI agent id>; human agents also join user-<HumanAgent id>.
+            // Include both so active, assigned humans get live notifications from any inbox view.
+            // io.to([agentRoom]).emit("agent-connection-notification", notificationData);
+            const notificationRooms = [
+              agentRoom,
+              ...agents.map((h) => `user-${h._id}`),
+            ];
+            io.to(notificationRooms).emit(
+              "agent-connection-notification",
+              notificationData
+            );
 
             // Create per-agent DB notifications (do NOT re-emit to agentRoom – already done above)
-            const agents = await HumanAgent.find({ assignedAgents: agentId, status: 'approved', isActive: true }).lean();
+            // const agents = await HumanAgent.find({ assignedAgents: agentId, status: 'approved', isActive: true }).lean();
             if (agents.length > 0) {
               console.log("saving notifications for agents");
               for (const agent of agents) {
