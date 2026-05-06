@@ -13,6 +13,7 @@ const { downgradeExpiredPlans } = require('./services/planCronService');
 const { initializeSocketController } = require("./socket");
 
 const cors = require("cors");
+const cookieParser = require("cookie-parser");
 dotenv.config();
 const app = express();
 const server = http.createServer(app);
@@ -29,7 +30,34 @@ if (!fs.existsSync(uploadsDir)) {
   console.log("Created uploads directory");
 }
 
-app.use(cors());
+const corsAllowList = (process.env.CORS_ORIGINS ||
+  "http://localhost:5173,http://127.0.0.1:5173")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) {
+        return callback(null, true);
+      }
+      if (corsAllowList.includes(origin)) {
+        return callback(null, true);
+      }
+      if (
+        process.env.NODE_ENV !== "production" &&
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)
+      ) {
+        return callback(null, true);
+      }
+      return callback(null, false);
+    },
+    credentials: true,
+  })
+);
+
+app.use(cookieParser());
 
 // Apply rate limit to all requests
 const limiter = rateLimit({

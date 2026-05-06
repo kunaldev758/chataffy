@@ -433,37 +433,13 @@ const initializeVisitorEvents = (io, socket) => {
             // Same start time for countdown + sessionStorage dismiss key on every replay (e.g. check-pending).
             const requestStartedAt = Date.now();
 
-            // Emit notification to client and agents with sound
-            const notificationData = {
-              conversationId,
-              visitorId,
-              agentId,
-              visitor: visitor,
-              message: "Visitor requested to connect to an agent",
-              timestamp: new Date(),
-              requestStartedAt,
-            };
-
             const agents = await HumanAgent.find({
               assignedAgents: agentId,
               status: "approved",
               isActive: true,
             }).lean();
 
-            // Inbox listeners join user-<AI agent id>; human agents also join user-<HumanAgent id>.
-            // Include both so active, assigned humans get live notifications from any inbox view.
-            // io.to([agentRoom]).emit("agent-connection-notification", notificationData);
-            const notificationRooms = [
-              agentRoom,
-              ...agents.map((h) => `user-${h._id}`),
-            ];
-            io.to(notificationRooms).emit(
-              "agent-connection-notification",
-              notificationData
-            );
-
-            // Create per-agent DB notifications (do NOT re-emit to agentRoom – already done above)
-            // const agents = await HumanAgent.find({ assignedAgents: agentId, status: 'approved', isActive: true }).lean();
+            // Persist per-human notifications first so clients that refetch immediately see correct isSeen.
             if (agents.length > 0) {
               console.log("saving notifications for agents");
               for (const agent of agents) {
@@ -477,6 +453,28 @@ const initializeVisitorEvents = (io, socket) => {
                 );
               }
             }
+
+            const notificationData = {
+              conversationId,
+              visitorId,
+              agentId,
+              visitor: visitor,
+              message: "Visitor requested to connect to an agent",
+              timestamp: new Date(),
+              requestStartedAt,
+              targetHumanAgentIds: agents.map((h) => h._id.toString()),
+            };
+
+            // Inbox listeners join user-<AI agent id>; human agents also join user-<HumanAgent id>.
+            // Include both so active, assigned humans get live notifications from any inbox view.
+            const notificationRooms = [
+              agentRoom,
+              ...agents.map((h) => `user-${h._id}`),
+            ];
+            io.to(notificationRooms).emit(
+              "agent-connection-notification",
+              notificationData
+            );
 
             // Set up 20-second timeout
             const timeoutId = setTimeout(async () => {
