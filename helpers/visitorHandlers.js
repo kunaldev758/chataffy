@@ -209,6 +209,8 @@ const initializeVisitorEvents = (io, socket) => {
   let agentRoom = "";
   let conversationRoom = "";
 
+    console.log(agentId ,"<----------- agentId");
+
     // userAgentRoom = `user-${agentId}-${humanAgentId}`;
     agentRoom = `user-${agentId}`;
     visitorRoom = `visitor-${agentId}-${visitorId}`;
@@ -433,8 +435,14 @@ const initializeVisitorEvents = (io, socket) => {
             // Same start time for countdown + sessionStorage dismiss key on every replay (e.g. check-pending).
             const requestStartedAt = Date.now();
 
-            // Emit notification to client and agents with sound
-            const notificationData = {
+            const agents = await HumanAgent.find({
+              assignedAgents: agentId,
+              status: "approved",
+              isActive: true,
+            }).lean();
+
+            // Emit notification to client (AI agent room). Per-human-agent emits happen below (include notificationId).
+            const baseNotificationData = {
               conversationId,
               visitorId,
               agentId,
@@ -444,36 +452,32 @@ const initializeVisitorEvents = (io, socket) => {
               requestStartedAt,
             };
 
-            const agents = await HumanAgent.find({
-              assignedAgents: agentId,
-              status: "approved",
-              isActive: true,
-            }).lean();
+            // io.to([agentRoom]).emit(
+            //   "agent-connection-notification",
+            //   baseNotificationData
+            // );
 
-            // Inbox listeners join user-<AI agent id>; human agents also join user-<HumanAgent id>.
-            // Include both so active, assigned humans get live notifications from any inbox view.
-            // io.to([agentRoom]).emit("agent-connection-notification", notificationData);
-            const notificationRooms = [
-              agentRoom,
-              ...agents.map((h) => `user-${h._id}`),
-            ];
-            io.to(notificationRooms).emit(
-              "agent-connection-notification",
-              notificationData
-            );
-
-            // Create per-agent DB notifications (do NOT re-emit to agentRoom – already done above)
-            // const agents = await HumanAgent.find({ assignedAgents: agentId, status: 'approved', isActive: true }).lean();
+            // Create per-agent DB notifications, then emit to each human agent room with notificationId
             if (agents.length > 0) {
               console.log("saving notifications for agents");
               for (const agent of agents) {
-                await NotificationController.createAgentConnectionNotification(
+                const notification =
+                  await NotificationController.createAgentConnectionNotification(
                   agent._id,
                   conversationId,
                   visitorId,
                   userId,
                   "Visitor requested to connect to an agent",
                   agentId
+                );
+
+                io.to([`user-${agent._id}`]).emit(
+                  "agent-connection-notification",
+                  {
+                    ...baseNotificationData,
+                    notificationId: notification?._id,
+                    humanAgentId: agent._id,
+                  }
                 );
               }
             }
