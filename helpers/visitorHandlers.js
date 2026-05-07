@@ -440,6 +440,7 @@ const initializeVisitorEvents = (io, socket) => {
               status: "approved",
               isActive: true,
             }).lean();
+<<<<<<< HEAD
 
             // Emit notification to client (AI agent room). Per-human-agent emits happen below (include notificationId).
             const baseNotificationData = {
@@ -458,6 +459,10 @@ const initializeVisitorEvents = (io, socket) => {
             // );
 
             // Create per-agent DB notifications, then emit to each human agent room with notificationId
+=======
+
+            // Persist per-human notifications first so clients that refetch immediately see correct isSeen.
+>>>>>>> 4ac516547131c2c5208230ae18abbef824412355
             if (agents.length > 0) {
               console.log("saving notifications for agents");
               for (const agent of agents) {
@@ -481,6 +486,28 @@ const initializeVisitorEvents = (io, socket) => {
                 );
               }
             }
+
+            const notificationData = {
+              conversationId,
+              visitorId,
+              agentId,
+              visitor: visitor,
+              message: "Visitor requested to connect to an agent",
+              timestamp: new Date(),
+              requestStartedAt,
+              targetHumanAgentIds: agents.map((h) => h._id.toString()),
+            };
+
+            // Inbox listeners join user-<AI agent id>; human agents also join user-<HumanAgent id>.
+            // Include both so active, assigned humans get live notifications from any inbox view.
+            const notificationRooms = [
+              agentRoom,
+              ...agents.map((h) => `user-${h._id}`),
+            ];
+            io.to(notificationRooms).emit(
+              "agent-connection-notification",
+              notificationData
+            );
 
             // Set up 20-second timeout
             const timeoutId = setTimeout(async () => {

@@ -107,9 +107,11 @@ router.post('/widget/validate-form', WidgetController.validatePreChatForm);
 
 // Public routes
 router.post('/superadmin/login', superAdminController.superAdminLogin);
+router.post('/superadmin/logout', superAdminController.superAdminLogout);
 router.post('/create', superAdminController.createSuperAdmin); // For initial setup only
 
 // Protected routes
+router.get('/superadmin/me', verifySuperAdminToken, superAdminController.superAdminMe);
 router.get('/superadmin/dashboard', verifySuperAdminToken, superAdminController.getDashboardData);
 router.get('/superadmin/clients', verifySuperAdminToken, superAdminController.getAllClients);
 router.get('/superadmin/clients/:clientId/agents', verifySuperAdminToken, superAdminController.getClientAgents);

@@ -9,6 +9,11 @@ const PlanService = require("../services/PlanService")
 const UsageTrackingService= require("../services/UsageTrackingService")
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const {
+  SUPERADMIN_TOKEN_COOKIE,
+  getSuperAdminCookieOptions,
+  getSuperAdminClearCookieOptions,
+} = require("../constants/superAdminCookie");
 
 // SuperAdmin login
 module.exports.superAdminLogin = async (req, res) => {
@@ -40,9 +45,14 @@ module.exports.superAdminLogin = async (req, res) => {
       { expiresIn: "7d" }
     );
 
+    res.cookie(
+      SUPERADMIN_TOKEN_COOKIE,
+      token,
+      getSuperAdminCookieOptions()
+    );
+
     res.json({
       message: "Login successful",
-      token,
       superAdmin: {
         id: superAdmin._id,
         name: superAdmin.name,
@@ -56,6 +66,42 @@ module.exports.superAdminLogin = async (req, res) => {
     console.error("SuperAdmin login error:", error);
     res.status(500).json({ message: "Server error" });
   }
+};
+
+module.exports.superAdminMe = async (req, res) => {
+  try {
+    const row = await SuperAdmin.findById(req.superAdmin.id).select(
+      "name email role isActive lastLogin"
+    );
+    if (!row || !row.isActive) {
+      return res.status(401).json({ message: "Invalid token or account deactivated." });
+    }
+    res.json({
+      superAdmin: {
+        id: row._id,
+        name: row.name,
+        email: row.email,
+        role: row.role,
+        isActive: row.isActive,
+        lastLogin: row.lastLogin,
+      },
+    });
+  } catch (error) {
+    console.error("SuperAdmin me error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+module.exports.superAdminLogout = (req, res) => {
+  res.clearCookie(SUPERADMIN_TOKEN_COOKIE, getSuperAdminClearCookieOptions());
+  /* remove tokens issued before cookie path was scoped to /api/superadmin */
+  res.clearCookie(SUPERADMIN_TOKEN_COOKIE, {
+    path: "/",
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+  });
+  res.json({ message: "Logged out" });
 };
 
 // Create SuperAdmin (for initial setup)

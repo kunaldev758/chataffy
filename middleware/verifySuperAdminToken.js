@@ -1,10 +1,15 @@
 const jwt = require('jsonwebtoken');
 const SuperAdmin = require('../models/SuperAdmin');
+const { SUPERADMIN_TOKEN_COOKIE } = require('../constants/superAdminCookie');
 
 const verifySuperAdminToken = async (req, res, next) => {
   try {
-    const token = req.header('Authorization')?.replace('Bearer ', '');
-    
+    let token = req.cookies?.[SUPERADMIN_TOKEN_COOKIE];
+    if (!token) {
+      const authHeader = req.header('Authorization');
+      token = authHeader?.replace(/^Bearer\s+/i, '').trim() || '';
+    }
+
     if (!token) {
       return res.status(401).json({ message: 'Access denied. No token provided.' });
     }
