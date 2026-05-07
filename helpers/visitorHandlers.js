@@ -440,7 +440,6 @@ const initializeVisitorEvents = (io, socket) => {
               status: "approved",
               isActive: true,
             }).lean();
-<<<<<<< HEAD
 
             // Emit notification to client (AI agent room). Per-human-agent emits happen below (include notificationId).
             const baseNotificationData = {
@@ -459,10 +458,6 @@ const initializeVisitorEvents = (io, socket) => {
             // );
 
             // Create per-agent DB notifications, then emit to each human agent room with notificationId
-=======
-
-            // Persist per-human notifications first so clients that refetch immediately see correct isSeen.
->>>>>>> 4ac516547131c2c5208230ae18abbef824412355
             if (agents.length > 0) {
               console.log("saving notifications for agents");
               for (const agent of agents) {
