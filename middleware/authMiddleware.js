@@ -2,19 +2,21 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Agent = require('../models/Agent');
 const HumanAgent = require('../models/HumanAgent');
+const ImpersonationSession = require('../models/ImpersonationSession');
 
 const ONE_DAY_IN_SECONDS = 24 * 60 * 60;
 const SEVEN_DAYS_IN_MS = 7 * 24 * 60 * 60 * 1000;
 module.exports = async (req, res, next) => {
   // Get the token from the request headers
-  const token = req.header('Authorization');
+  const rawAuth = req.header('Authorization');
+  const token = rawAuth?.replace(/^Bearer\s+/i, '').trim();
   // Check if a token was provided
   if (!token) {
     return res.status(401).json({ status_code: 401, error: 'Authentication failed. No token provided.' });
   }
   try {
     jwt.verify(token, process.env.JWT_SECRET_KEY, async (err, decoded) => {
-    if (err || !decoded._id) {
+    if (err || (!decoded?._id && !decoded?.id)) {
       if(decoded?.id){
         console.log("Here is bug")
       }
@@ -23,14 +25,36 @@ module.exports = async (req, res, next) => {
       return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
       }
     }
+    // Impersonation tokens: short-lived + validated against server-side session store.
+    if (decoded?.purpose === 'impersonation') {
+      if (!decoded?._id || !decoded?.jti) {
+        return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
+      }
+      const session = await ImpersonationSession.findOne({ jti: decoded.jti });
+      if (!session || session.revokedAt) {
+        return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
+      }
+      if (String(session.userId) !== String(decoded._id)) {
+        return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
+      }
+      if (session.expiresAt && session.expiresAt.getTime() <= Date.now()) {
+        return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
+      }
+
+      req.body.userId = decoded._id;
+      req.body.impersonatedBy = session.superAdminId;
+      req.body.isImpersonating = true;
+      return next();
+    }
+
     const userId = decoded._id;
-    const user = await User.findById(userId);
+    const user = userId ? await User.findById(userId) : null;
     if(user?.isDeleted){
       return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
     }
     // const agentId = decoded.id;
     // const agent = await Agent.findById(agentId);
-    const humanAgent = await HumanAgent.findById(decoded.id);
+    const humanAgent = decoded?.id ? await HumanAgent.findById(decoded.id) : null;
     // console.log("testing here", user);
     if(user && user.auth_token == token)
     {

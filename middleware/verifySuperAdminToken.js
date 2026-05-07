@@ -3,6 +3,8 @@ const SuperAdmin = require('../models/SuperAdmin');
 const { SUPERADMIN_TOKEN_COOKIE } = require('../constants/superAdminCookie');
 
 const verifySuperAdminToken = async (req, res, next) => {
+
+  console.log("super admin token middleware",req.path);
   try {
     let token = req.cookies?.[SUPERADMIN_TOKEN_COOKIE];
     if (!token) {
@@ -14,8 +16,11 @@ const verifySuperAdminToken = async (req, res, next) => {
       return res.status(401).json({ message: 'Access denied. No token provided.' });
     }
 
+
+    console.log(token,"<----------- token");
+
     const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
-    
+    console.log(decoded,"<----------- decoded");
     // Check if the token is for a superadmin
     // if (decoded.role !== 'superadmin') {
     //   return res.status(403).json({ message: 'Access denied. SuperAdmin privileges required.' });

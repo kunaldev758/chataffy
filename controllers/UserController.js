@@ -726,4 +726,71 @@ UserController.updateClientPassword = async (req, res) => {
   }
 };
 
+
+
+UserController.getClientByToken = async (req, res) => {
+
+  console.log("inside get client by token",req.params);
+  try {
+    const rawToken = req.params?.token;
+    if (!rawToken) {
+      return res.status(400).json({ status_code: 400, status: false, message: "Token is required" });
+    }
+
+    const token = decodeURIComponent(String(rawToken));
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
+
+      console.log("decoded data is :",decoded);
+    } catch (err) {
+      if (err?.name === "TokenExpiredError") {
+        return res.status(401).json({ status_code: 401, status: false, message: "Token expired" });
+      }
+      return res.status(401).json({ status_code: 401, status: false, message: "Invalid token" });
+    }
+
+    // Don't allow URL-based login with impersonation tokens.
+    // if (decoded?.purpose === "impersonation") {
+    //   return res.status(403).json({ status_code: 403, status: false, message: "Forbidden token type" });
+    // }
+
+    const userId = decoded?._id;
+    if (!userId) {
+      return res.status(401).json({ status_code: 401, status: false, message: "Invalid token payload" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ status_code: 404, status: false, message: "User not found" });
+    }
+
+    // Create a fresh app session token (so the caller doesn't need to keep using URL tokens).
+    const appToken = user.generateAuthToken();
+    user.auth_token = appToken;
+    await user.save();
+
+    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id agentName isActive');
+
+    if (req.io) {
+      req.io.emit('user-logged-in', { userId: user._id });
+    }
+
+    return res.status(200).json({
+      status_code: 200,
+      status: true,
+      token: appToken,
+      userId: user._id,
+      isOnboarded: user.isOnboarded,
+      agents,
+      message: "Signed in successfully",
+    });
+  } catch (error) {
+    console.error("Error getting client by token:", error);
+    res.status(500).json({ message: "Error getting client by token" });
+  }
+};
+
 module.exports = UserController;
+

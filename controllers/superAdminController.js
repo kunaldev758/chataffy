@@ -9,11 +9,14 @@ const PlanService = require("../services/PlanService")
 const UsageTrackingService= require("../services/UsageTrackingService")
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const {
   SUPERADMIN_TOKEN_COOKIE,
   getSuperAdminCookieOptions,
   getSuperAdminClearCookieOptions,
 } = require("../constants/superAdminCookie");
+const User = require("../models/User");
+const ImpersonationSession = require("../models/ImpersonationSession");
 
 // SuperAdmin login
 module.exports.superAdminLogin = async (req, res) => {
@@ -681,3 +684,70 @@ module.exports.setCustomLimits = async (req, res) => {
     res.status(500).json({ message: "Error setting custom limits" });
   }
 };
+
+
+// dirct client login 
+
+
+module.exports.directClientLogin = async (req, res) => {
+  try {
+    console.log("inside direct client login",req.params);
+    const { clientId } = req.params;
+    const client = await Client.findById(clientId);
+
+    if(!client){
+
+      return res.status(404).json({ message: "Client not found" });
+    }
+
+    // fetch user information 
+
+    const user = await User.findById(client.userId);
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const jti = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : crypto.randomBytes(16).toString("hex");
+
+    const expiresInSeconds = 15 * 60; // 15 minutes
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
+
+    await ImpersonationSession.create({
+      jti,
+      userId: user._id,
+      clientId: client._id,
+      superAdminId: req.superAdmin?.id,
+      expiresAt,
+    });
+
+    const tokenData = jwt.sign(
+      {
+        _id: user._id,
+        email: user.email,
+        role: user.role,
+        purpose: "impersonation",
+        jti,
+        impersonatedBy: req.superAdmin?.id,
+      },
+      process.env.JWT_SECRET_KEY,
+      { expiresIn: expiresInSeconds }
+    );
+
+
+    console.log("token data to send : ",tokenData);
+    return res.status(200).json({
+
+      success: true,
+      token: tokenData,
+      expiresAt,
+      message: "Client login successful",
+    });
+
+  } catch (error) {
+    console.error("Error direct client login:", error);
+    res.status(500).json({ message: "Error direct client login" });
+  }
+};
+

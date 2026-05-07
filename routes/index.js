@@ -121,6 +121,10 @@ router.get('/superadmin/cancel/sunscription/:clientId', verifySuperAdminToken, s
 router.put('/superadmin/clients/:clientId/custom-limits', verifySuperAdminToken, superAdminController.setCustomLimits);
 router.get('/superadmin/delete/:userId',verifySuperAdminToken, UserController.deleteUser);
 
+// direct client login route (for direct client login)
+
+router.get('/superadmin/clients/login/:clientId', verifySuperAdminToken, superAdminController.directClientLogin);
+
 
 router.get('/superadmin/plan',verifySuperAdminToken, PlanAdminController.getAllPlans);
 router.get('/superadmin/plan/stats',verifySuperAdminToken, PlanAdminController.getPlanStats.bind(PlanAdminController));
@@ -143,6 +147,13 @@ router.post('/client',middleware,UserController.getClient);
 router.post('/client/profile', middleware, UserController.getClientProfile);
 router.post('/client/profile/general', middleware, UserController.updateClientProfileGeneral);
 router.post('/client/profile/password', middleware, UserController.updateClientPassword);
+
+
+
+// token based fetching of data ----> 
+
+router.get('/direct-client-login/:token',UserController.getClientByToken);
+
 
 //Update Client Status (updates client's agent record)
 router.post('/clients/status',middleware,UserController.updateClientStatus);
