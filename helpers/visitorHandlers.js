@@ -209,6 +209,8 @@ const initializeVisitorEvents = (io, socket) => {
   let agentRoom = "";
   let conversationRoom = "";
 
+    console.log(agentId ,"<----------- agentId");
+
     // userAgentRoom = `user-${agentId}-${humanAgentId}`;
     agentRoom = `user-${agentId}`;
     visitorRoom = `visitor-${agentId}-${visitorId}`;
@@ -439,17 +441,43 @@ const initializeVisitorEvents = (io, socket) => {
               isActive: true,
             }).lean();
 
-            // Persist per-human notifications first so clients that refetch immediately see correct isSeen.
+            // Emit notification to client (AI agent room). Per-human-agent emits happen below (include notificationId).
+            const baseNotificationData = {
+              conversationId,
+              visitorId,
+              agentId,
+              visitor: visitor,
+              message: "Visitor requested to connect to an agent",
+              timestamp: new Date(),
+              requestStartedAt,
+            };
+
+            // io.to([agentRoom]).emit(
+            //   "agent-connection-notification",
+            //   baseNotificationData
+            // );
+
+            // Create per-agent DB notifications, then emit to each human agent room with notificationId
             if (agents.length > 0) {
               console.log("saving notifications for agents");
               for (const agent of agents) {
-                await NotificationController.createAgentConnectionNotification(
+                const notification =
+                  await NotificationController.createAgentConnectionNotification(
                   agent._id,
                   conversationId,
                   visitorId,
                   userId,
                   "Visitor requested to connect to an agent",
                   agentId
+                );
+
+                io.to([`user-${agent._id}`]).emit(
+                  "agent-connection-notification",
+                  {
+                    ...baseNotificationData,
+                    notificationId: notification?._id,
+                    humanAgentId: agent._id,
+                  }
                 );
               }
             }

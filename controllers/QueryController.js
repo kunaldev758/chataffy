@@ -48,6 +48,8 @@ class QuestionAnsweringSystem {
     this.qdrantClient = qdrantClient;
   }
 
+  // check 2 ----> 
+  
   async getChatHistory(conversationId) {
     try {
       if (!conversationId) {
@@ -898,6 +900,8 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
     return null;
   }
+
+  // check 1 --> 
 
   async getAnswer(userId,agentId, question, conversationId, options = {}) {
     // Default threshold: 0.4 is reasonable for cosine similarity
