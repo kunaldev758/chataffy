@@ -37,13 +37,36 @@ NotificationController.createAgentConnectionNotification = async (
 NotificationController.getByAgentId = async (req, res) => {
   try {
     const { agentId } = req.params;
-    // agentId param carries the humanAgentId value for per-agent notification lookup
+    const {page: pageQuery, limit: limitQuery = 20} = req.query;
+    
+    const limit = parseInt(limitQuery) || 20;
+    const page = parseInt(pageQuery) || 1;
+    const skip = (page - 1) * limit;
+
+    const total = await Notification.countDocuments({ humanAgentId: agentId });
     const notifications = await Notification.find({ humanAgentId: agentId })
       .populate("conversationId", "visitor aiChat conversationOpenStatus")
       .populate("visitorId", "visitorDetails")
       .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
       .lean();
-    res.json(notifications);
+    // agentId param carries the humanAgentId value for per-agent notification lookup
+    // const notifications = await Notification.find({ humanAgentId: agentId })
+    //   .populate("conversationId", "visitor aiChat conversationOpenStatus")
+    //   .populate("visitorId", "visitorDetails")
+    //   .sort({ createdAt: -1 })
+    //   .lean();
+    const totalPages = Math.ceil(total / limit);
+    const hasMore = page < totalPages;
+    res.json({
+      data: notifications,
+      total,
+      page,
+      limit,
+      totalPages,
+      hasMore,
+    });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch notifications" });
   }
