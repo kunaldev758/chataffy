@@ -72,7 +72,7 @@ module.exports = async (req, res, next) => {
         console.log("refreshing Token");
         res.cookie('token', refreshedToken, {
           httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
+          secure: process.env.ENVIRONMENT === 'production',
           sameSite: 'lax',
           maxAge: SEVEN_DAYS_IN_MS,
         });
