@@ -12,6 +12,8 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const {
   SUPERADMIN_TOKEN_COOKIE,
+  DEFAULT_SUPERADMIN_COOKIE_PATH,
+  getSuperAdminCookiePath,
   getSuperAdminCookieOptions,
   getSuperAdminClearCookieOptions,
 } = require("../constants/superAdminCookie");
@@ -96,13 +98,24 @@ module.exports.superAdminMe = async (req, res) => {
 };
 
 module.exports.superAdminLogout = (req, res) => {
+  const secure = process.env.NODE_ENV === "production";
+  const sameSite = "lax";
+  const httpOnly = true;
   res.clearCookie(SUPERADMIN_TOKEN_COOKIE, getSuperAdminClearCookieOptions());
+  if (getSuperAdminCookiePath() !== DEFAULT_SUPERADMIN_COOKIE_PATH) {
+    res.clearCookie(SUPERADMIN_TOKEN_COOKIE, {
+      path: DEFAULT_SUPERADMIN_COOKIE_PATH,
+      httpOnly,
+      secure,
+      sameSite,
+    });
+  }
   /* remove tokens issued before cookie path was scoped to /api/superadmin */
   res.clearCookie(SUPERADMIN_TOKEN_COOKIE, {
     path: "/",
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
+    httpOnly,
+    secure,
+    sameSite,
   });
   res.json({ message: "Logged out" });
 };
