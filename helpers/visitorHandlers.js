@@ -482,27 +482,27 @@ const initializeVisitorEvents = (io, socket) => {
               }
             }
 
-            const notificationData = {
-              conversationId,
-              visitorId,
-              agentId,
-              visitor: visitor,
-              message: "Visitor requested to connect to an agent",
-              timestamp: new Date(),
-              requestStartedAt,
-              targetHumanAgentIds: agents.map((h) => h._id.toString()),
-            };
+            // const notificationData = {
+            //   conversationId,
+            //   visitorId,
+            //   agentId,
+            //   visitor: visitor,
+            //   message: "Visitor requested to connect to an agent",
+            //   timestamp: new Date(),
+            //   requestStartedAt,
+            //   targetHumanAgentIds: agents.map((h) => h._id.toString()),
+            // };
 
-            // Inbox listeners join user-<AI agent id>; human agents also join user-<HumanAgent id>.
-            // Include both so active, assigned humans get live notifications from any inbox view.
-            const notificationRooms = [
-              agentRoom,
-              ...agents.map((h) => `user-${h._id}`),
-            ];
-            io.to(notificationRooms).emit(
-              "agent-connection-notification",
-              notificationData
-            );
+            // // Inbox listeners join user-<AI agent id>; human agents also join user-<HumanAgent id>.
+            // // Include both so active, assigned humans get live notifications from any inbox view.
+            // const notificationRooms = [
+            //   agentRoom,
+            //   ...agents.map((h) => `user-${h._id}`),
+            // ];
+            // io.to(notificationRooms).emit(
+            //   "agent-connection-notification",
+            //   notificationData
+            // );
 
             // Set up 20-second timeout
             const timeoutId = setTimeout(async () => {

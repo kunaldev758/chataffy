@@ -9,7 +9,7 @@ const apiRoutes = require("./routes/");
 const paymentsRouter = require('./routes/payments');
 const cron = require('node-cron');
 const { downgradeExpiredPlans } = require('./services/planCronService');
-
+const bigcommerceRoutes = require('./routes/bigcommerce');
 const { initializeSocketController } = require("./socket");
 
 const cors = require("cors");
@@ -31,7 +31,7 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 const corsAllowList = (process.env.CORS_ORIGINS ||
-  "http://localhost:5173,http://127.0.0.1:5173")
+  "http://localhost:5173,http://127.0.0.1:5173,http://localhost:9001")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -73,6 +73,7 @@ app.use(express.json());
 app.use("/uploads", express.static(uploadsDir));
 app.use("/api", apiRoutes);
 app.use('/api/paypal', paymentsRouter);
+app.use('/api/bigcommerce', bigcommerceRoutes);
 
 // Schedule the plan expiry check to run every day at midnight
 cron.schedule('0 0 * * *', () => {

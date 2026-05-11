@@ -26,7 +26,7 @@ const userSchema = new Schema(
     },
     provider: {
       type: String,
-      enum: ['local', 'google'],
+      enum: ['local', 'google', 'bigcommerce'],
       default: 'local',
     },
     googleId: {
