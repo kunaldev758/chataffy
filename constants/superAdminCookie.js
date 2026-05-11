@@ -20,6 +20,14 @@ const DEFAULT_SUPERADMIN_COOKIE_PATH =
     ? PROD_SUPERADMIN_COOKIE_PATH
     : LOCAL_SUPERADMIN_COOKIE_PATH;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const SUPERADMIN_API_SEGMENT = "/api/superadmin";
+
+function deriveSuperAdminCookiePathFromRequest(req) {
+  const url = req?.originalUrl || req?.url || "";
+  const idx = url.indexOf(SUPERADMIN_API_SEGMENT);
+  if (idx === -1) return null;
+  return url.slice(0, idx + SUPERADMIN_API_SEGMENT.length);
+}
 
 function normalizeSuperAdminCookiePath(raw) {
   const trimmed = (raw && String(raw).trim()) || DEFAULT_SUPERADMIN_COOKIE_PATH;
@@ -34,19 +42,21 @@ function getSuperAdminCookiePath() {
   return normalizeSuperAdminCookiePath(process.env.SUPERADMIN_COOKIE_PATH);
 }
 
-function getSuperAdminCookieOptions() {
+function getSuperAdminCookieOptions(req) {
+  const derived = deriveSuperAdminCookiePathFromRequest(req);
   return {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     maxAge: SEVEN_DAYS_MS,
-    path: getSuperAdminCookiePath(),
+    path: normalizeSuperAdminCookiePath(derived || process.env.SUPERADMIN_COOKIE_PATH),
   };
 }
 
-function getSuperAdminClearCookieOptions() {
+function getSuperAdminClearCookieOptions(req) {
+  const derived = deriveSuperAdminCookiePathFromRequest(req);
   return {
-    path: getSuperAdminCookiePath(),
+    path: normalizeSuperAdminCookiePath(derived || process.env.SUPERADMIN_COOKIE_PATH),
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
@@ -56,6 +66,8 @@ function getSuperAdminClearCookieOptions() {
 module.exports = {
   SUPERADMIN_TOKEN_COOKIE,
   DEFAULT_SUPERADMIN_COOKIE_PATH,
+  LOCAL_SUPERADMIN_COOKIE_PATH,
+  PROD_SUPERADMIN_COOKIE_PATH,
   getSuperAdminCookiePath,
   getSuperAdminCookieOptions,
   getSuperAdminClearCookieOptions,

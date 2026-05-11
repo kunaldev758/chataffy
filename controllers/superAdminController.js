@@ -13,6 +13,8 @@ const crypto = require("crypto");
 const {
   SUPERADMIN_TOKEN_COOKIE,
   DEFAULT_SUPERADMIN_COOKIE_PATH,
+  LOCAL_SUPERADMIN_COOKIE_PATH,
+  PROD_SUPERADMIN_COOKIE_PATH,
   getSuperAdminCookiePath,
   getSuperAdminCookieOptions,
   getSuperAdminClearCookieOptions,
@@ -53,7 +55,7 @@ module.exports.superAdminLogin = async (req, res) => {
     res.cookie(
       SUPERADMIN_TOKEN_COOKIE,
       token,
-      getSuperAdminCookieOptions()
+      getSuperAdminCookieOptions(req)
     );
 
     res.json({
@@ -101,14 +103,17 @@ module.exports.superAdminLogout = (req, res) => {
   const secure = process.env.NODE_ENV === "production";
   const sameSite = "lax";
   const httpOnly = true;
-  res.clearCookie(SUPERADMIN_TOKEN_COOKIE, getSuperAdminClearCookieOptions());
-  if (getSuperAdminCookiePath() !== DEFAULT_SUPERADMIN_COOKIE_PATH) {
-    res.clearCookie(SUPERADMIN_TOKEN_COOKIE, {
-      path: DEFAULT_SUPERADMIN_COOKIE_PATH,
-      httpOnly,
-      secure,
-      sameSite,
-    });
+  res.clearCookie(SUPERADMIN_TOKEN_COOKIE, getSuperAdminClearCookieOptions(req));
+  // Clear other possible paths to avoid “sticky” cookies after routing changes.
+  const pathsToClear = new Set([
+    DEFAULT_SUPERADMIN_COOKIE_PATH,
+    LOCAL_SUPERADMIN_COOKIE_PATH,
+    PROD_SUPERADMIN_COOKIE_PATH,
+    getSuperAdminCookiePath(),
+  ]);
+  for (const path of pathsToClear) {
+    if (!path) continue;
+    res.clearCookie(SUPERADMIN_TOKEN_COOKIE, { path, httpOnly, secure, sameSite });
   }
   /* remove tokens issued before cookie path was scoped to /api/superadmin */
   res.clearCookie(SUPERADMIN_TOKEN_COOKIE, {
