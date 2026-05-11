@@ -102,6 +102,7 @@ router.post('/oauth/google', UserController.googleOAuth);
 router.post('/agents/login', agentController.agentLogin);
 
 // Public widget routes (for embedded widgets)
+router.get('/widget/embed', WidgetController.resolveEmbedByOrigin);
 router.get('/widget/:widgetId/:widgetToken/settings', WidgetController.getPublicWidgetSettings);
 router.post('/widget/validate-form', WidgetController.validatePreChatForm);
 

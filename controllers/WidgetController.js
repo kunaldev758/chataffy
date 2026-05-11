@@ -2,6 +2,8 @@ const commonHelper = require("../helpers/commonHelper.js");
 const Widget = require('../models/Widget');
 const User = require('../models/User');
 const Client = require('../models/Client');
+const Agent = require('../models/Agent');
+const WebsiteData = require('../models/WebsiteData');
 const ObjectId = require('mongoose').Types.ObjectId;
 const path = require('path');
 const fs = require('fs');
@@ -19,6 +21,80 @@ async function getWidgetAndRawByQuery(query) {
 function legacyAlignFromRaw(raw) {
   const a = raw?.position?.align;
   return a === 'left' || a === 'right' ? a : null;
+}
+
+/** Normalize a URL or hostname to a bare hostname (no www.), lowercase. */
+function normalizeEmbedHost(input) {
+  if (input == null || input === '') return '';
+  const s = String(input).trim();
+  if (!s || s === 'null') return '';
+  try {
+    const url = s.includes('://') ? new URL(s) : new URL(`https://${s}`);
+    let host = url.hostname.toLowerCase();
+    if (host.startsWith('www.')) host = host.slice(4);
+    return host;
+  } catch {
+    const stripped = s.replace(/^https?:\/\//i, '').split('/')[0].toLowerCase();
+    if (!stripped) return '';
+    return stripped.startsWith('www.') ? stripped.slice(4) : stripped;
+  }
+}
+
+/** Treat localhost / 127.0.0.1 / ::1 as the same (Live Server vs bookmarked localhost). */
+const LOOPBACK_EMBED_CANONICAL = '__loopback__';
+
+function canonicalEmbedHost(input) {
+  const h = normalizeEmbedHost(input);
+  if (!h) return '';
+  if (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h === '[::1]' ||
+    h === '::1'
+  ) {
+    return LOOPBACK_EMBED_CANONICAL;
+  }
+  return h;
+}
+
+/**
+ * Canonical hosts for embed allow-list: theme website, agent URLs, scraped metadata.
+ * FAQ/doc-only onboarding often leaves onboardingWebsiteUrl empty — extractedUrls may still hold the site.
+ */
+function collectEmbedHostsForWidget(w, agent, websiteRows) {
+  const aid = w.agentId ? String(w.agentId) : '';
+  const uid = w.userId ? String(w.userId) : '';
+  /** @type {Set<string>} */
+  const hosts = new Set();
+
+  const add = (input) => {
+    const c = canonicalEmbedHost(input);
+    if (c) hosts.add(c);
+  };
+
+  if (w.website) add(w.website);
+
+  if (agent) {
+    if (agent.onboardingWebsiteUrl) add(agent.onboardingWebsiteUrl);
+    if (Array.isArray(agent.onboardingExtractedUrls)) {
+      for (let i = 0; i < agent.onboardingExtractedUrls.length; i++) {
+        add(agent.onboardingExtractedUrls[i]);
+      }
+    }
+    if (agent.website_name) add(agent.website_name);
+  }
+
+  for (let r = 0; r < websiteRows.length; r++) {
+    const row = websiteRows[r];
+    const rowAgent = row.agentId ? String(row.agentId) : '';
+    const rowUser = row.userId ? String(row.userId) : '';
+    if ((aid && rowAgent === aid) || (uid && rowUser === uid)) {
+      if (row.website_url) add(row.website_url);
+      if (row.domain) add(row.domain);
+    }
+  }
+
+  return hosts;
 }
 
 // File validation helper
@@ -448,6 +524,134 @@ WidgetController.validatePreChatForm = async (req, res) => {
     res.status(500).json({ 
       status: false, 
       message: "Something went wrong please try again!" 
+    });
+  }
+};
+
+/** GET /api/widget/embed?origin= — map parent page origin to widget credentials (short embed script). */
+WidgetController.resolveEmbedByOrigin = async (req, res) => {
+  try {
+    const originParam = req.query.origin;
+    const requestCanonical = canonicalEmbedHost(originParam);
+    const narrowWid = req.query.wid ? String(req.query.wid).trim() : '';
+
+    if (!requestCanonical) {
+      return res.status(400).json({
+        status_code: 400,
+        message: 'origin is required (full URL of the page, e.g. https://shop.example)',
+      });
+    }
+
+    const widgets = await Widget.find({ agentId: { $exists: true, $ne: null } })
+      .select('_id widgetToken agentId website userId')
+      .lean();
+
+    const agentObjectIds = widgets.map((w) => w.agentId).filter(Boolean);
+    const userObjectIds = widgets.map((w) => w.userId).filter(Boolean);
+
+    const agents = await Agent.find({ _id: { $in: agentObjectIds } })
+      .select('onboardingWebsiteUrl onboardingExtractedUrls website_name')
+      .lean();
+    const agentById = Object.fromEntries(agents.map((a) => [String(a._id), a]));
+
+    const websiteRows = await WebsiteData.find({
+      $or: [
+        { agentId: { $in: agentObjectIds } },
+        { userId: { $in: userObjectIds } },
+      ],
+    })
+      .select('userId agentId website_url domain')
+      .lean();
+
+    /** @type {typeof widgets} */
+    let matches = [];
+
+    for (const w of widgets) {
+      if (narrowWid && String(w._id) !== narrowWid) continue;
+      const ag = agentById[w.agentId ? String(w.agentId) : ''];
+      const hosts = collectEmbedHostsForWidget(w, ag, websiteRows);
+      for (const h of hosts) {
+        if (h && h === requestCanonical) {
+          matches.push(w);
+          break;
+        }
+      }
+    }
+
+    // Explicit ?wid= on loopback: always resolve (preview on Live Server / localhost even if training URL is production-only).
+    if (
+      matches.length === 0 &&
+      narrowWid &&
+      requestCanonical === LOOPBACK_EMBED_CANONICAL
+    ) {
+      const w = widgets.find((x) => String(x._id) === narrowWid);
+      if (w) {
+        matches = [w];
+      }
+    }
+
+    const isProduction = process.env.NODE_ENV === 'production';
+    const allowLooseLoopback =
+      process.env.WIDGET_EMBED_LOOPBACK_LOOSE === '1' || !isProduction;
+
+    if (
+      matches.length === 0 &&
+      requestCanonical === LOOPBACK_EMBED_CANONICAL &&
+      allowLooseLoopback
+    ) {
+      const candidates = widgets.filter((w) => {
+        if (narrowWid && String(w._id) !== narrowWid) return false;
+        const ag = agentById[w.agentId ? String(w.agentId) : ''];
+        const hosts = collectEmbedHostsForWidget(w, ag, websiteRows);
+        if (hosts.size === 0) return true;
+        return hosts.has(LOOPBACK_EMBED_CANONICAL);
+      });
+      if (candidates.length === 1) {
+        matches = candidates;
+      }
+    }
+
+    // Local dev (non-production): exactly one widget row in the DB — allow bare loader on loopback without ?wid=
+    if (
+      matches.length === 0 &&
+      allowLooseLoopback &&
+      requestCanonical === LOOPBACK_EMBED_CANONICAL &&
+      !narrowWid &&
+      widgets.length === 1
+    ) {
+      matches = [widgets[0]];
+    }
+
+    if (matches.length === 0) {
+      return res.status(404).json({
+        status_code: 404,
+        message:
+          'No widget matched this page. Add your widget id: script src=".../widget-loader.js?wid=YOUR_ID" (copy from Chataffy → Widget setup). Or use the full script with wid, token, and agent.',
+      });
+    }
+
+    if (matches.length > 1) {
+      return res.status(409).json({
+        status_code: 409,
+        message:
+          'Multiple widgets match; use the full embed URL with wid, token, and agent, or call /api/widget/embed?origin=...&wid=<your widget id>.',
+      });
+    }
+
+    const w = matches[0];
+    return res.status(200).json({
+      status_code: 200,
+      data: {
+        wid: String(w._id),
+        token: w.widgetToken,
+        agent: String(w.agentId),
+      },
+    });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({
+      status: false,
+      message: 'Something went wrong please try again!',
     });
   }
 };
