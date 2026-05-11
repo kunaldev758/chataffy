@@ -12,22 +12,10 @@ const SUPERADMIN_TOKEN_COOKIE = "superAdminToken";
  *
  * You can always override both via env `SUPERADMIN_COOKIE_PATH`.
  */
-const LOCAL_SUPERADMIN_COOKIE_PATH = "/api/superadmin";
-const PROD_SUPERADMIN_COOKIE_PATH = "/chataffy/chataffy/api/superadmin";
-
-const DEFAULT_SUPERADMIN_COOKIE_PATH =
-  process.env.NODE_ENV === "production"
-    ? PROD_SUPERADMIN_COOKIE_PATH
-    : LOCAL_SUPERADMIN_COOKIE_PATH;
+// Permanent, proxy-safe default: cookie applies to whole site.
+// This avoids breakage when a reverse proxy strips/rewrites URL prefixes (e.g. `/chataffy/...`).
+const DEFAULT_SUPERADMIN_COOKIE_PATH = "/";
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-const SUPERADMIN_API_SEGMENT = "/api/superadmin";
-
-function deriveSuperAdminCookiePathFromRequest(req) {
-  const url = req?.originalUrl || req?.url || "";
-  const idx = url.indexOf(SUPERADMIN_API_SEGMENT);
-  if (idx === -1) return null;
-  return url.slice(0, idx + SUPERADMIN_API_SEGMENT.length);
-}
 
 function normalizeSuperAdminCookiePath(raw) {
   const trimmed = (raw && String(raw).trim()) || DEFAULT_SUPERADMIN_COOKIE_PATH;
@@ -43,20 +31,18 @@ function getSuperAdminCookiePath() {
 }
 
 function getSuperAdminCookieOptions(req) {
-  const derived = deriveSuperAdminCookiePathFromRequest(req);
   return {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     maxAge: SEVEN_DAYS_MS,
-    path: normalizeSuperAdminCookiePath(derived || process.env.SUPERADMIN_COOKIE_PATH),
+    path: normalizeSuperAdminCookiePath(process.env.SUPERADMIN_COOKIE_PATH),
   };
 }
 
 function getSuperAdminClearCookieOptions(req) {
-  const derived = deriveSuperAdminCookiePathFromRequest(req);
   return {
-    path: normalizeSuperAdminCookiePath(derived || process.env.SUPERADMIN_COOKIE_PATH),
+    path: normalizeSuperAdminCookiePath(process.env.SUPERADMIN_COOKIE_PATH),
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
@@ -66,8 +52,6 @@ function getSuperAdminClearCookieOptions(req) {
 module.exports = {
   SUPERADMIN_TOKEN_COOKIE,
   DEFAULT_SUPERADMIN_COOKIE_PATH,
-  LOCAL_SUPERADMIN_COOKIE_PATH,
-  PROD_SUPERADMIN_COOKIE_PATH,
   getSuperAdminCookiePath,
   getSuperAdminCookieOptions,
   getSuperAdminClearCookieOptions,

@@ -13,8 +13,6 @@ const crypto = require("crypto");
 const {
   SUPERADMIN_TOKEN_COOKIE,
   DEFAULT_SUPERADMIN_COOKIE_PATH,
-  LOCAL_SUPERADMIN_COOKIE_PATH,
-  PROD_SUPERADMIN_COOKIE_PATH,
   getSuperAdminCookiePath,
   getSuperAdminCookieOptions,
   getSuperAdminClearCookieOptions,
@@ -105,12 +103,7 @@ module.exports.superAdminLogout = (req, res) => {
   const httpOnly = true;
   res.clearCookie(SUPERADMIN_TOKEN_COOKIE, getSuperAdminClearCookieOptions(req));
   // Clear other possible paths to avoid “sticky” cookies after routing changes.
-  const pathsToClear = new Set([
-    DEFAULT_SUPERADMIN_COOKIE_PATH,
-    LOCAL_SUPERADMIN_COOKIE_PATH,
-    PROD_SUPERADMIN_COOKIE_PATH,
-    getSuperAdminCookiePath(),
-  ]);
+  const pathsToClear = new Set([DEFAULT_SUPERADMIN_COOKIE_PATH, getSuperAdminCookiePath()]);
   for (const path of pathsToClear) {
     if (!path) continue;
     res.clearCookie(SUPERADMIN_TOKEN_COOKIE, { path, httpOnly, secure, sameSite });
