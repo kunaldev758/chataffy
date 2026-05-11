@@ -1,12 +1,24 @@
 /** HttpOnly cookie used for superadmin JWT (same name as legacy localStorage key). */
 const SUPERADMIN_TOKEN_COOKIE = "superAdminToken";
 /**
- * Default: path where Express mounts the API (`app.use("/api", ...)` + `/superadmin` routes).
- * If the browser calls a prefixed URL (e.g. `https://host/chataffy/api/superadmin/login`),
- * set env `SUPERADMIN_COOKIE_PATH` to that public prefix (e.g. `/chataffy/api/superadmin`).
- * The cookie Path must be a prefix of the request URL path or the browser will drop Set-Cookie.
+ * Default: public cookie path prefix for superadmin API routes.
+ *
+ * IMPORTANT: the cookie Path MUST be a prefix of the actual browser request path that
+ * returns `Set-Cookie`, otherwise browsers will drop the cookie.
+ *
+ * Locally, your API is typically served at `/api/*`.
+ * In production, your current public routing serves superadmin API under:
+ * `/chataffy/chataffy/api/superadmin/*`.
+ *
+ * You can always override both via env `SUPERADMIN_COOKIE_PATH`.
  */
-const DEFAULT_SUPERADMIN_COOKIE_PATH = "/api/superadmin";
+const LOCAL_SUPERADMIN_COOKIE_PATH = "/api/superadmin";
+const PROD_SUPERADMIN_COOKIE_PATH = "/chataffy/chataffy/api/superadmin";
+
+const DEFAULT_SUPERADMIN_COOKIE_PATH =
+  process.env.NODE_ENV === "production"
+    ? PROD_SUPERADMIN_COOKIE_PATH
+    : LOCAL_SUPERADMIN_COOKIE_PATH;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 function normalizeSuperAdminCookiePath(raw) {
