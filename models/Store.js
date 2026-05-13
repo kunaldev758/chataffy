@@ -17,6 +17,11 @@ const storeSchema = new mongoose.Schema({
         required: true,
         unique: true,
     },
+    platform: {
+        type: String,
+        enum: ['bigcommerce', 'shopify'],
+        default: 'bigcommerce',
+    },
     accessToken: {
         type: String,
         default: null,

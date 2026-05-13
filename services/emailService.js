@@ -1,5 +1,6 @@
 const nodemailer = require("nodemailer");
-const User = require("../models/User")
+const User = require("../models/User");
+const { generateInstallEmail } = require("../templates/app-install-template");
 
 // Create a transporter using SMTP
 const transporter = nodemailer.createTransport({
@@ -159,6 +160,37 @@ const sendEmailForLimitExpiry = async (userEmail, message, subject, visitorName,
   }
 };
 
+const sendWelcomeEmail = async (
+  userEmail,
+  platform,
+  storeName,
+  storeUrl,
+  ownerName,
+  dashboardUrl,
+) => {
+  const appName = process.env.APP_NAME || "Chataffy";
+  const subject = `Welcome to ${appName}`;
+  const mailOptions = {
+    from: `${appName} <${process.env.SMTP_FROM}>`,
+    to: userEmail,
+    subject: subject,
+    html: generateInstallEmail({
+      platform: platform,
+      storeName: storeUrl,
+      storeUrl: storeUrl,
+      ownerName: ownerName,
+      appName: appName,
+      dashboardUrl: dashboardUrl,
+    }),
+  };
+  try {
+    await transporter.sendMail(mailOptions);
+    return true;
+  } catch (error) {
+    console.error("Error sending welcome email:", error);
+    return false;
+  }
+};
 
 module.exports = {
   sendAgentApprovalEmail,
@@ -166,4 +198,5 @@ module.exports = {
   sendPlanDowngradeEmail,
   sendEmailForOfflineChat,
   sendEmailForLimitExpiry,
+  sendWelcomeEmail,
 };
