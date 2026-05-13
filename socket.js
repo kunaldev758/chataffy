@@ -19,6 +19,7 @@ const initializeSocketController = (server) => {
   // 4-arg: (userId, agentId, eventName, data) — emit to user-${userId} and/or user-${agentId} when ids are set
   // 3-arg: (roomId, eventName, data) — single room; training-event uses agentId as roomId → user-${agentId} only
   appEvents.on("userEvent", (...args) => {
+    console.log("args on user event : ", args);
     if (args.length >= 4) {
       const [userId, agentId, eventName, data] = args;
       if (userId != null && userId !== "") {

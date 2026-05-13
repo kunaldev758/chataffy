@@ -734,6 +734,10 @@ async bulkInsertUrls(userId,agentId, urls) {
       const TrainingModel = await PlanService.getTrainingModel(userId,agentId);
       const plan = await PlanService.getUserPlan(userId,agentId);
 
+      console.log("TrainingModel", TrainingModel);
+
+      console.log("plan", plan);
+
       const client = await Client.findOne({ userId });
       if (!client) {
         return res.status(404).json({

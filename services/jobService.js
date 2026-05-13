@@ -42,26 +42,35 @@ const extractWebsiteMetadata = ($, url) => {
     const h1 = $("h1").first().text().trim();
     const ogTitle = $('meta[property="og:title"]').attr("content")?.trim();
     const siteName = $('meta[property="og:site_name"]').attr("content")?.trim();
-    
+
     // Try to extract company name (remove common suffixes)
-    metadata.company_name = 
-      siteName || 
-      ogTitle || 
-      title.split("|")[0].split("-")[0].trim() || 
-      h1 || 
+    metadata.company_name =
+      siteName ||
+      ogTitle ||
+      title.split("|")[0].split("-")[0].trim() ||
+      h1 ||
       title;
 
     // Extract company type from meta tags or content
-    const keywords = $('meta[name="keywords"]').attr("content")?.toLowerCase() || "";
-    const description = $('meta[name="description"]').attr("content")?.toLowerCase() || "";
+    const keywords =
+      $('meta[name="keywords"]').attr("content")?.toLowerCase() || "";
+    const description =
+      $('meta[name="description"]').attr("content")?.toLowerCase() || "";
     const combinedText = (keywords + " " + description).toLowerCase();
 
     // Detect company type
     if (combinedText.includes("saas") || combinedText.includes("software")) {
       metadata.company_type = "SaaS company";
-    } else if (combinedText.includes("e-commerce") || combinedText.includes("online store") || combinedText.includes("shop")) {
+    } else if (
+      combinedText.includes("e-commerce") ||
+      combinedText.includes("online store") ||
+      combinedText.includes("shop")
+    ) {
       metadata.company_type = "e-commerce platform";
-    } else if (combinedText.includes("service") || combinedText.includes("consulting")) {
+    } else if (
+      combinedText.includes("service") ||
+      combinedText.includes("consulting")
+    ) {
       metadata.company_type = "service provider";
     } else if (combinedText.includes("agency")) {
       metadata.company_type = "agency";
@@ -71,16 +80,16 @@ const extractWebsiteMetadata = ($, url) => {
 
     // Extract industry
     const industryKeywords = {
-      "technology": ["tech", "software", "it", "saas", "platform"],
-      "healthcare": ["health", "medical", "hospital", "clinic", "wellness"],
+      technology: ["tech", "software", "it", "saas", "platform"],
+      healthcare: ["health", "medical", "hospital", "clinic", "wellness"],
       "real estate": ["real estate", "property", "realty", "housing", "realty"],
-      "finance": ["finance", "financial", "banking", "investment", "fintech"],
-      "education": ["education", "learning", "school", "university", "course"],
-      "retail": ["retail", "store", "shop", "e-commerce", "shopping"],
+      finance: ["finance", "financial", "banking", "investment", "fintech"],
+      education: ["education", "learning", "school", "university", "course"],
+      retail: ["retail", "store", "shop", "e-commerce", "shopping"],
     };
 
     for (const [industry, keywords] of Object.entries(industryKeywords)) {
-      if (keywords.some(keyword => combinedText.includes(keyword))) {
+      if (keywords.some((keyword) => combinedText.includes(keyword))) {
         metadata.industry = industry;
         break;
       }
@@ -89,29 +98,40 @@ const extractWebsiteMetadata = ($, url) => {
     // Extract founded year from footer or content
     const footerText = $("footer").text();
     const bodyText = $("body").text();
-    const yearMatch = (footerText + " " + bodyText).match(/(?:founded|established|since|©)\s*(?:in\s*)?(\d{4})/i);
+    const yearMatch = (footerText + " " + bodyText).match(
+      /(?:founded|established|since|©)\s*(?:in\s*)?(\d{4})/i,
+    );
     if (yearMatch) {
       metadata.founded_year = yearMatch[1];
     }
 
     // Extract services from navigation, services section, or meta tags
     const services = new Set();
-    
+
     // Check navigation links
     $("nav a, header a").each((_, el) => {
       const text = $(el).text().trim().toLowerCase();
-      if (text && !text.match(/^(home|about|contact|blog|login|sign up|sign in)$/i)) {
-        if (text.length < 50) { // Reasonable service name length
+      if (
+        text &&
+        !text.match(/^(home|about|contact|blog|login|sign up|sign in)$/i)
+      ) {
+        if (text.length < 50) {
+          // Reasonable service name length
           services.add($(el).text().trim());
         }
       }
     });
 
     // Check for services section
-    $('[class*="service"], [id*="service"], [class*="product"], [id*="product"]').each((_, el) => {
+    $(
+      '[class*="service"], [id*="service"], [class*="product"], [id*="product"]',
+    ).each((_, el) => {
       const text = $(el).text().trim();
-      const headings = $(el).find("h2, h3, h4").map((_, h) => $(h).text().trim()).get();
-      headings.forEach(heading => {
+      const headings = $(el)
+        .find("h2, h3, h4")
+        .map((_, h) => $(h).text().trim())
+        .get();
+      headings.forEach((heading) => {
         if (heading.length < 50 && heading.length > 3) {
           services.add(heading);
         }
@@ -122,14 +142,18 @@ const extractWebsiteMetadata = ($, url) => {
 
     // Extract value proposition from meta description or hero section
     const metaDesc = $('meta[name="description"]').attr("content")?.trim();
-    const heroText = $('[class*="hero"], [class*="banner"], [class*="headline"]').first().text().trim();
-    
+    const heroText = $(
+      '[class*="hero"], [class*="banner"], [class*="headline"]',
+    )
+      .first()
+      .text()
+      .trim();
+
     metadata.value_proposition = metaDesc || heroText.substring(0, 200) || "";
 
     // Extract "does not" list - this is harder to extract automatically
     // We'll leave it empty for now, can be manually filled or enhanced later
     metadata.does_not_list = [];
-
   } catch (error) {
     console.error("Error extracting website metadata:", error);
   }
@@ -149,7 +173,9 @@ const processWebPage = async (url, sourceCode, footerCache = {}) => {
       $('meta[name="description"]').attr("content")?.trim() || "";
 
     // ---- Remove unwanted elements ----
-    $("script, style, noscript, iframe, svg, canvas, form, input, button, select, textarea").remove();
+    $(
+      "script, style, noscript, iframe, svg, canvas, form, input, button, select, textarea",
+    ).remove();
     $(".ad, .advertisement, .popup, .modal").remove();
 
     // ---- Handle footer: scrape once per domain ----
@@ -225,14 +251,15 @@ const processWebPage = async (url, sourceCode, footerCache = {}) => {
     // Extract website metadata (from homepage-like URLs or we'll extract from first URL)
     let websiteMetadata = null;
     const urlPath = new URL(url).pathname;
-    const isHomepage = urlPath === '/' || 
-                      urlPath === '' || 
-                      urlPath.split('/').filter(p => p).length <= 1; // Root or one-level deep
-    
+    const isHomepage =
+      urlPath === "/" ||
+      urlPath === "" ||
+      urlPath.split("/").filter((p) => p).length <= 1; // Root or one-level deep
+
     // Always extract metadata (we'll decide whether to use it based on homepage status)
     const $meta = cheerio.load(sourceCode);
     websiteMetadata = extractWebsiteMetadata($meta, url);
-    
+
     // Mark if this is homepage for priority
     if (isHomepage) {
       websiteMetadata._isHomepage = true;
@@ -296,7 +323,7 @@ new Worker(
   {
     connection: redisConfig,
     concurrency: 2, // Limit concurrent processing
-  }
+  },
 );
 
 const urlProcessingQueue = new Queue("urlProcessingQueue", {
@@ -315,7 +342,16 @@ const urlProcessingQueue = new Queue("urlProcessingQueue", {
 new Worker(
   "urlProcessingQueue",
   async (job) => {
-    const { urls, userId,agentId, qdrantIndexName, plan, sitemapUrl, startTime, totalUrls } = job.data;
+    const {
+      urls,
+      userId,
+      agentId,
+      qdrantIndexName,
+      plan,
+      sitemapUrl,
+      startTime,
+      totalUrls,
+    } = job.data;
     try {
       const batchService = new batchTrainingService();
 
@@ -332,7 +368,10 @@ new Worker(
       let currentDataSize = 0;
       const footerCache = {};
       let metadataExtracted = false; // Track if metadata has been extracted
-      
+      let stoppedForStorageLimit = false;
+      let storageLimitEmitMessage = null;
+      let storageLimitEmitProgress = null;
+
       // Use startTime from job data or current time as fallback
       const scrapingStartTime = startTime ? new Date(startTime) : new Date();
       const totalUrlsCount = totalUrls || urls.length;
@@ -340,11 +379,18 @@ new Worker(
       const PROGRESS_EMIT_INTERVAL = 2000; // Emit progress every 2 seconds
 
       // Helper function to calculate and emit progress
-      const emitProgress = async (currentIndex, totalCount, isProcessing = true) => {
+      const emitProgress = async (
+        currentIndex,
+        totalCount,
+        isProcessing = true,
+      ) => {
         const now = Date.now();
-        const elapsedTime = Math.floor((now - scrapingStartTime.getTime()) / 1000); // seconds
-        const percentage = totalCount > 0 ? Math.round((currentIndex / totalCount) * 100) : 0;
-        
+        const elapsedTime = Math.floor(
+          (now - scrapingStartTime.getTime()) / 1000,
+        ); // seconds
+        const percentage =
+          totalCount > 0 ? Math.round((currentIndex / totalCount) * 100) : 0;
+
         // Calculate estimated time remaining
         let estimatedTimeRemaining = null;
         if (currentIndex > 0 && elapsedTime > 0) {
@@ -358,7 +404,7 @@ new Worker(
           const hrs = Math.floor(seconds / 3600);
           const mins = Math.floor((seconds % 3600) / 60);
           const secs = seconds % 60;
-          return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+          return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
         };
 
         // Emit progress update
@@ -370,7 +416,9 @@ new Worker(
             total: totalCount,
             elapsedTime: formatTime(elapsedTime),
             elapsedSeconds: elapsedTime,
-            estimatedTimeRemaining: estimatedTimeRemaining ? formatTime(estimatedTimeRemaining) : null,
+            estimatedTimeRemaining: estimatedTimeRemaining
+              ? formatTime(estimatedTimeRemaining)
+              : null,
             estimatedSecondsRemaining: estimatedTimeRemaining,
             isProcessing,
           },
@@ -383,14 +431,18 @@ new Worker(
       for (let i = 0; i < urls.length; i++) {
         const url = urls[i];
         try {
-          console.log("Processing URL :",url);
+          console.log("Processing URL :", url);
 
-           // Extend lock by updating progress
+          // Extend lock by updating progress
           await job.updateProgress({ current: i + 1, total: urls.length });
-          
+
           // Emit progress updates periodically (every 2 seconds or every URL)
           const now = Date.now();
-          if (now - lastProgressEmitTime >= PROGRESS_EMIT_INTERVAL || i === 0 || i === urls.length - 1) {
+          if (
+            now - lastProgressEmitTime >= PROGRESS_EMIT_INTERVAL ||
+            i === 0 ||
+            i === urls.length - 1
+          ) {
             await emitProgress(i + 1, totalUrlsCount, true);
             lastProgressEmitTime = now;
           }
@@ -405,7 +457,11 @@ new Worker(
 
           const sourceCode = response?.data;
 
-          const processResult = await processWebPage(url, sourceCode,footerCache);
+          const processResult = await processWebPage(
+            url,
+            sourceCode,
+            footerCache,
+          );
           if (!processResult.content) {
             await TrainingModel.create({
               userId,
@@ -420,27 +476,34 @@ new Worker(
               lastEdit: Date.now(),
             });
             await Url.updateOne(
-              { url:url, agentId:agentId },
+              { url: url, agentId: agentId },
               {
                 $set: {
                   trainStatus: 2,
                   error: "Failed to process/minify web page content",
                 },
-              }
+              },
             );
             continue;
           }
 
-          const { content, title, metaDescription, webPageURL, websiteMetadata } = processResult;
+          const {
+            content,
+            title,
+            metaDescription,
+            webPageURL,
+            websiteMetadata,
+          } = processResult;
 
           // Store website metadata if extracted
           // Priority: homepage > first URL > any URL with company_name
           if (websiteMetadata && !metadataExtracted) {
             // Prefer homepage metadata, but use first URL if no homepage found
-            const shouldStore = websiteMetadata._isHomepage || 
-                               (i === 0) || 
-                               (websiteMetadata.company_name && !metadataExtracted);
-            
+            const shouldStore =
+              websiteMetadata._isHomepage ||
+              i === 0 ||
+              (websiteMetadata.company_name && !metadataExtracted);
+
             if (shouldStore) {
               try {
                 let websiteData = await WebsiteData.getOrCreate({
@@ -455,9 +518,14 @@ new Worker(
                   domain: cleanMetadata.domain || new URL(url).hostname,
                 });
                 metadataExtracted = true; // Mark as extracted to avoid overwriting
-                console.log(`[jobService] Stored website metadata for user ${userId} from ${url}`);
+                console.log(
+                  `[jobService] Stored website metadata for user ${userId} from ${url}`,
+                );
               } catch (metadataError) {
-                console.error(`[jobService] Error storing website metadata:`, metadataError);
+                console.error(
+                  `[jobService] Error storing website metadata:`,
+                  metadataError,
+                );
                 // Don't fail the job if metadata storage fails
               }
             }
@@ -465,49 +533,71 @@ new Worker(
 
           const contentSize = Buffer.byteLength(content, "utf8");
 
-            let clientDoc = await Client.findOne({ userId });
-            currentDataSize = clientDoc?.currentDataSize || 0;
-            const maxStorage = (clientDoc.customLimits?.isCustomLimits && clientDoc.customLimits?.maxStorage != null)
+          let clientDoc = await Client.findOne({ userId });
+          currentDataSize = clientDoc?.currentDataSize || 0;
+          const maxStorage =
+            clientDoc.customLimits?.isCustomLimits &&
+            clientDoc.customLimits?.maxStorage != null
               ? clientDoc.customLimits.maxStorage
               : plan.limits.maxStorage;
+
+          console.log("clientDoc", clientDoc);
+
+          console.log("max storage is", maxStorage);
+          console.log(
+            "current data size + content size ",
+            currentDataSize + contentSize,
+          );
           // if (currentDataSize + contentSize > plan.limits.maxStorage) {
-            if (currentDataSize + contentSize > maxStorage) {
+          if (currentDataSize + contentSize > maxStorage) {
+
+
+            console.log("storage limit exceeded");
             await Client.updateOne(
               { userId },
-              { $set: { "upgradePlanStatus.storageLimitExceeded": true } }
+              { $set: { "upgradePlanStatus.storageLimitExceeded": true } },
             );
-            
+
             // Emit progress before stopping due to storage limit
-            const storageLimitElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
+            const storageLimitElapsedTime = Math.floor(
+              (Date.now() - scrapingStartTime.getTime()) / 1000,
+            );
             const formatTimeForLimit = (seconds) => {
               const hrs = Math.floor(seconds / 3600);
               const mins = Math.floor((seconds % 3600) / 60);
               const secs = seconds % 60;
-              return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+              return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
             };
-            
+
+            storageLimitEmitMessage =
+              "Storage limit exceeded. Scraping stopped. Upgrade your plan to continue.";
+            storageLimitEmitProgress = {
+              percentage:
+                totalUrlsCount > 0
+                  ? Math.round(((i + 1) / totalUrlsCount) * 100)
+                  : 0,
+              processed: i + 1,
+              total: totalUrlsCount,
+              elapsedTime: formatTimeForLimit(storageLimitElapsedTime),
+              elapsedSeconds: storageLimitElapsedTime,
+              estimatedTimeRemaining: null,
+              estimatedSecondsRemaining: null,
+              isProcessing: false,
+              stoppedReason: "storage_limit_exceeded",
+            };
+            stoppedForStorageLimit = true;
+
             appEvents.emit("userEvent", agentId, "training-event", {
               agent: await Agent.findOne({ _id: agentId }),
               client: await Client.findOne({ userId }),
-              message:
-                "Storage limit exceede scrapping Stopped Upgrage Plan to continue",
-              scrapingProgress: {
-                percentage: totalUrlsCount > 0 ? Math.round(((i + 1) / totalUrlsCount) * 100) : 0,
-                processed: i + 1,
-                total: totalUrlsCount,
-                elapsedTime: formatTimeForLimit(storageLimitElapsedTime),
-                elapsedSeconds: storageLimitElapsedTime,
-                estimatedTimeRemaining: null,
-                estimatedSecondsRemaining: null,
-                isProcessing: false,
-                stoppedReason: "storage_limit_exceeded",
-              },
+              message: storageLimitEmitMessage,
+              scrapingProgress: storageLimitEmitProgress,
             });
             break;
           } else {
             await Client.updateOne(
               { userId },
-              { $inc: { currentDataSize: contentSize } }
+              { $inc: { currentDataSize: contentSize } },
             );
 
             scrapedDocs.push({
@@ -530,51 +620,55 @@ new Worker(
               trainingStatus: 2, // Error
               lastEdit: Date.now(),
               error: error?.message,
-            }
+            },
           );
           await Agent.updateOne(
             { _id: agentId },
-            { $inc: { "pagesAdded.failed": 1 } }
+            { $inc: { "pagesAdded.failed": 1 } },
           );
           await Url.updateOne(
-            { url:url, agentId:agentId },
+            { url: url, agentId: agentId },
             {
               $set: {
                 trainStatus: 2,
                 error: "Failed to train",
               },
-            }
+            },
           );
         }
       }
 
       // Emit progress after all URLs are scraped (before training phase)
-      const scrapedElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
+      const scrapedElapsedTime = Math.floor(
+        (Date.now() - scrapingStartTime.getTime()) / 1000,
+      );
       const formatTimeAfterScrape = (seconds) => {
         const hrs = Math.floor(seconds / 3600);
         const mins = Math.floor((seconds % 3600) / 60);
         const secs = seconds % 60;
-        return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
       };
-      
-      await emitProgress(urls.length, totalUrlsCount, true);
-      
-      // Emit update indicating training phase is starting
-      if (scrapedDocs.length > 0) {
-        appEvents.emit("userEvent", agentId, "training-event", {
-          agent: await Agent.findOne({ _id: agentId }),
-          scrapingProgress: {
-            percentage: 100,
-            processed: urls.length,
-            total: totalUrlsCount,
-            elapsedTime: formatTimeAfterScrape(scrapedElapsedTime),
-            elapsedSeconds: scrapedElapsedTime,
-            estimatedTimeRemaining: null,
-            estimatedSecondsRemaining: null,
-            isProcessing: true,
-            phase: "training", // Indicates we're in training phase now
-          },
-        });
+
+      if (!stoppedForStorageLimit) {
+        await emitProgress(urls.length, totalUrlsCount, true);
+
+        // Emit update indicating training phase is starting
+        if (scrapedDocs.length > 0) {
+          appEvents.emit("userEvent", agentId, "training-event", {
+            agent: await Agent.findOne({ _id: agentId }),
+            scrapingProgress: {
+              percentage: 100,
+              processed: urls.length,
+              total: totalUrlsCount,
+              elapsedTime: formatTimeAfterScrape(scrapedElapsedTime),
+              elapsedSeconds: scrapedElapsedTime,
+              estimatedTimeRemaining: null,
+              estimatedSecondsRemaining: null,
+              isProcessing: true,
+              phase: "training", // Indicates we're in training phase now
+            },
+          });
+        }
       }
 
       //make this a queue
@@ -582,13 +676,16 @@ new Worker(
         scrapedDocs,
         userId,
         agentId,
-        qdrantIndexName
+        qdrantIndexName,
       );
-   
+
       // Handle training failure
       if (!result.success) {
         // Mark all documents as failed if training failed
-        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+        await Agent.updateOne(
+          { _id: agentId },
+          { $set: { dataTrainingStatus: 0 } },
+        );
         appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
           message: error?.message,
@@ -597,51 +694,51 @@ new Worker(
         // 3️⃣ Update training status in DB
         for (const doc of scrapedDocs) {
           const status = result?.failedUrls?.includes(doc.originalUrl) ? 2 : 1;
-          if(status == 1){
-          await TrainingModel.create({
-            userId,
-            agentId,
-            type: 0,
-            content: doc.content,
-            dataSize: doc.dataSize,
-            trainingStatus: status,
-            "webPage.url": doc.originalUrl,
-            chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
-            lastEdit: Date.now(),
-          });
-        }else if(status == 2){
-          await TrainingModel.create({
-            userId,
-            agentId,
-            type: 0,
-            content: doc.content,
-            dataSize: doc.dataSize,
-            trainingStatus: status,
-            error: "Failed to process/minify web page content",
-            "webPage.url": doc.originalUrl,
-            chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
-            lastEdit: Date.now(),
-          });
-          await Url.updateOne(
-            { url:doc.originalUrl, agentId:agentId },
-            {
-              $set: {
-                trainStatus: status,
-                error: "Failed to process/minify web page content",
+          if (status == 1) {
+            await TrainingModel.create({
+              userId,
+              agentId,
+              type: 0,
+              content: doc.content,
+              dataSize: doc.dataSize,
+              trainingStatus: status,
+              "webPage.url": doc.originalUrl,
+              chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
+              lastEdit: Date.now(),
+            });
+          } else if (status == 2) {
+            await TrainingModel.create({
+              userId,
+              agentId,
+              type: 0,
+              content: doc.content,
+              dataSize: doc.dataSize,
+              trainingStatus: status,
+              error: "Failed to process/minify web page content",
+              "webPage.url": doc.originalUrl,
+              chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
+              lastEdit: Date.now(),
+            });
+            await Url.updateOne(
+              { url: doc.originalUrl, agentId: agentId },
+              {
+                $set: {
+                  trainStatus: status,
+                  error: "Failed to process/minify web page content",
+                },
               },
-            }
-          );
-        }else{
-          await Url.updateOne(
-            { url:doc.originalUrl, agentId:agentId },
-            {
-              $set: {
-                trainStatus: status,
-                // error: "Failed to process/minify web page content",
+            );
+          } else {
+            await Url.updateOne(
+              { url: doc.originalUrl, agentId: agentId },
+              {
+                $set: {
+                  trainStatus: status,
+                  // error: "Failed to process/minify web page content",
+                },
               },
-            }
-          );
-        }
+            );
+          }
 
           await Agent.updateOne(
             { _id: agentId },
@@ -651,59 +748,94 @@ new Worker(
                   ? { "pagesAdded.success": 1 }
                   : { "pagesAdded.failed": 1 }),
               },
-            }
+            },
           );
         }
 
         if (sitemapUrl) {
-          await Agent.updateOne({ _id: agentId }, { $set: { isSitemapAdded: 1 } });
+          await Agent.updateOne(
+            { _id: agentId },
+            { $set: { isSitemapAdded: 1 } },
+          );
         }
       }
 
-      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0, scrapingStartTime: null,lastTrained: new Date() } });
-      
-      // Emit final progress (100%)
-      const finalElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
-      const formatTime = (seconds) => {
-        const hrs = Math.floor(seconds / 3600);
-        const mins = Math.floor((seconds % 3600) / 60);
-        const secs = seconds % 60;
-        return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-      };
-      
-      appEvents.emit("userEvent", agentId, "training-event", {
-        agent: await Agent.findOne({ _id: agentId }),
-        scrapingProgress: {
-          percentage: 100,
-          processed: totalUrlsCount,
-          total: totalUrlsCount,
-          elapsedTime: formatTime(finalElapsedTime),
-          elapsedSeconds: finalElapsedTime,
-          estimatedTimeRemaining: null,
-          estimatedSecondsRemaining: null,
-          isProcessing: false,
+      await Agent.updateOne(
+        { _id: agentId },
+        {
+          $set: {
+            dataTrainingStatus: 0,
+            scrapingStartTime: null,
+            lastTrained: new Date(),
+          },
         },
-      });
-    } catch (error) {
-      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0, scrapingStartTime: null } });
-      
-      // Calculate progress even on error
-      const errorElapsedTime = Math.floor((Date.now() - scrapingStartTime.getTime()) / 1000);
+      );
+
+      // Emit final progress (100%)
+      const finalElapsedTime = Math.floor(
+        (Date.now() - scrapingStartTime.getTime()) / 1000,
+      );
       const formatTime = (seconds) => {
         const hrs = Math.floor(seconds / 3600);
         const mins = Math.floor((seconds % 3600) / 60);
         const secs = seconds % 60;
-        return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
       };
-      
+
+      if (stoppedForStorageLimit && storageLimitEmitProgress) {
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
+          client: await Client.findOne({ userId }),
+          message: storageLimitEmitMessage,
+          scrapingProgress: storageLimitEmitProgress,
+        });
+      } else {
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
+          scrapingProgress: {
+            percentage: 100,
+            processed: totalUrlsCount,
+            total: totalUrlsCount,
+            elapsedTime: formatTime(finalElapsedTime),
+            elapsedSeconds: finalElapsedTime,
+            estimatedTimeRemaining: null,
+            estimatedSecondsRemaining: null,
+            isProcessing: false,
+          },
+        });
+      }
+    } catch (error) {
+      await Agent.updateOne(
+        { _id: agentId },
+        { $set: { dataTrainingStatus: 0, scrapingStartTime: null } },
+      );
+
+      // Calculate progress even on error
+      const errorElapsedTime = Math.floor(
+        (Date.now() - scrapingStartTime.getTime()) / 1000,
+      );
+      const formatTime = (seconds) => {
+        const hrs = Math.floor(seconds / 3600);
+        const mins = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+        return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+      };
+
       // Try to get current progress from URL count
-      const processedCount = await Url.countDocuments({ userId, agentId:agentId, trainStatus: { $in: [1, 2] } });
-      
+      const processedCount = await Url.countDocuments({
+        userId,
+        agentId: agentId,
+        trainStatus: { $in: [1, 2] },
+      });
+
       appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
         message: error?.message,
         scrapingProgress: {
-          percentage: totalUrlsCount > 0 ? Math.round((processedCount / totalUrlsCount) * 100) : 0,
+          percentage:
+            totalUrlsCount > 0
+              ? Math.round((processedCount / totalUrlsCount) * 100)
+              : 0,
           processed: processedCount,
           total: totalUrlsCount,
           elapsedTime: formatTime(errorElapsedTime),
@@ -717,7 +849,7 @@ new Worker(
       console.log(error);
     }
   },
-  { connection: redisConfig, concurrency: 1 }
+  { connection: redisConfig, concurrency: 1 },
 );
 
 // Delete training data queue - runs in background
@@ -737,7 +869,8 @@ const deleteTrainingDataQueue = new Queue("deleteTrainingDataQueue", {
 new Worker(
   "deleteTrainingDataQueue",
   async (job) => {
-    const { entries, userId, agentId, qdrantIndexName, TrainingModelName } = job.data;
+    const { entries, userId, agentId, qdrantIndexName, TrainingModelName } =
+      job.data;
     const QdrantVectorStoreManager = require("./QdrantService");
     const PlanService = require("./PlanService");
     const Client = require("../models/Client");
@@ -757,19 +890,23 @@ new Worker(
       let faqsDeleted = 0;
 
       // Delete vectors from Qdrant
-      const qdrantResult = await QdrantVectorStoreManager.deleteVectorsByTrainingEntries(
-        qdrantIndexName,
-        entries.map((e) => ({
-          userId: e.userId?.toString(),
-          agentId: e.agentId?.toString(),
-          type: e.type,
-          url: e.webPage?.url,
-          title: e.title,
-        }))
-      );
+      const qdrantResult =
+        await QdrantVectorStoreManager.deleteVectorsByTrainingEntries(
+          qdrantIndexName,
+          entries.map((e) => ({
+            userId: e.userId?.toString(),
+            agentId: e.agentId?.toString(),
+            type: e.type,
+            url: e.webPage?.url,
+            title: e.title,
+          })),
+        );
 
       if (qdrantResult.errors?.length > 0) {
-        console.warn("[deleteTrainingData] Qdrant delete warnings:", qdrantResult.errors);
+        console.warn(
+          "[deleteTrainingData] Qdrant delete warnings:",
+          qdrantResult.errors,
+        );
       }
 
       // Delete from MongoDB and aggregate stats
@@ -791,10 +928,14 @@ new Worker(
 
       // Update Agent counters
       const updateFields = {};
-      if (pagesSuccessDeleted > 0) updateFields["pagesAdded.success"] = -pagesSuccessDeleted;
-      if (pagesFailedDeleted > 0) updateFields["pagesAdded.failed"] = -pagesFailedDeleted;
+      if (pagesSuccessDeleted > 0)
+        updateFields["pagesAdded.success"] = -pagesSuccessDeleted;
+      if (pagesFailedDeleted > 0)
+        updateFields["pagesAdded.failed"] = -pagesFailedDeleted;
       if (pagesSuccessDeleted > 0 || pagesFailedDeleted > 0) {
-        updateFields["pagesAdded.total"] = -(pagesSuccessDeleted + pagesFailedDeleted);
+        updateFields["pagesAdded.total"] = -(
+          pagesSuccessDeleted + pagesFailedDeleted
+        );
       }
       if (filesDeleted > 0) updateFields.filesAdded = -filesDeleted;
       if (faqsDeleted > 0) updateFields.faqsAdded = -faqsDeleted;
@@ -806,13 +947,15 @@ new Worker(
         agent: await Agent.findOne({ _id: agentId }),
       });
 
-      console.log(`[deleteTrainingData] Deleted ${entries.length} training entries for user ${userId}`);
+      console.log(
+        `[deleteTrainingData] Deleted ${entries.length} training entries for user ${userId}`,
+      );
     } catch (error) {
       console.error("[deleteTrainingData] Job failed:", error);
       throw error;
     }
   },
-  { connection: redisConfig, concurrency: 2 }
+  { connection: redisConfig, concurrency: 2 },
 );
 
 // Retrain training data queue - only webpages (type 0)
@@ -832,7 +975,8 @@ const retrainTrainingDataQueue = new Queue("retrainTrainingDataQueue", {
 new Worker(
   "retrainTrainingDataQueue",
   async (job) => {
-    const { entries, userId, agentId, qdrantIndexName, TrainingModelName } = job.data;
+    const { entries, userId, agentId, qdrantIndexName, TrainingModelName } =
+      job.data;
     const batchService = new batchTrainingService();
     const Agent = require("../models/Agent");
 
@@ -842,7 +986,10 @@ new Worker(
         : require("../models/OpenaiTrainingList");
 
     try {
-      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 1 } });
+      await Agent.updateOne(
+        { _id: agentId },
+        { $set: { dataTrainingStatus: 1 } },
+      );
       appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
       });
@@ -868,9 +1015,15 @@ new Worker(
           const response = await axios.get(url, {
             timeout: 30000,
             maxContentLength: 50 * 1024 * 1024,
-            headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
+            headers: {
+              "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
+            },
           });
-          const processResult = await processWebPage(url, response?.data, footerCache);
+          const processResult = await processWebPage(
+            url,
+            response?.data,
+            footerCache,
+          );
 
           if (!processResult?.content) {
             await TrainingModel.updateOne(
@@ -881,7 +1034,7 @@ new Worker(
                   error: "Failed to process/minify web page content",
                   lastEdit: new Date(),
                 },
-              }
+              },
             );
             failCount++;
             continue;
@@ -911,7 +1064,7 @@ new Worker(
             [scrapedDoc],
             userId,
             agentId,
-            qdrantIndexName
+            qdrantIndexName,
           );
 
           if (!result.success) {
@@ -923,7 +1076,7 @@ new Worker(
                   error: result.error || "Failed to upsert vectors",
                   lastEdit: new Date(),
                 },
-              }
+              },
             );
             failCount++;
             continue;
@@ -941,13 +1094,13 @@ new Worker(
                 chunkCount: result.totalChunks || 0,
                 "webPage.url": url,
               },
-            }
+            },
           );
 
           // 6. Increment currentDataSize (delta: new - old)
           await Client.updateOne(
             { userId },
-            { $inc: { currentDataSize: dataSizeDelta } }
+            { $inc: { currentDataSize: dataSizeDelta } },
           );
 
           successCount++;
@@ -961,21 +1114,29 @@ new Worker(
                 error: err?.message || "Scraping failed",
                 lastEdit: new Date(),
               },
-            }
+            },
           );
           failCount++;
         }
       }
 
-      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+      await Agent.updateOne(
+        { _id: agentId },
+        { $set: { dataTrainingStatus: 0 } },
+      );
       appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
       });
 
-      console.log(`[retrainTrainingData] Completed: ${successCount} success, ${failCount} failed for user ${userId}`);
+      console.log(
+        `[retrainTrainingData] Completed: ${successCount} success, ${failCount} failed for user ${userId}`,
+      );
     } catch (error) {
       console.error("[retrainTrainingData] Job failed:", error);
-      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+      await Agent.updateOne(
+        { _id: agentId },
+        { $set: { dataTrainingStatus: 0 } },
+      );
       appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
         message: error?.message,
@@ -983,7 +1144,7 @@ new Worker(
       throw error;
     }
   },
-  { connection: redisConfig, concurrency: 1 }
+  { connection: redisConfig, concurrency: 1 },
 );
 
 const transcriptEmailQueue = new Queue("transcriptEmailQueue", {
@@ -1005,19 +1166,25 @@ new Worker(
     const { conversation } = job.data || {};
     try {
       if (!conversation?._id || !conversation?.userId) {
-        console.warn("[transcriptEmailQueue] Missing conversation data, skipping job");
+        console.warn(
+          "[transcriptEmailQueue] Missing conversation data, skipping job",
+        );
         return;
       }
 
-      const { sendConversationTranscriptEmail } = require("../helpers/visitorHandlers");
+      const {
+        sendConversationTranscriptEmail,
+      } = require("../helpers/visitorHandlers");
       await sendConversationTranscriptEmail(conversation);
-      console.log(`[transcriptEmailQueue] Transcript email sent for conversation ${conversation._id}`);
+      console.log(
+        `[transcriptEmailQueue] Transcript email sent for conversation ${conversation._id}`,
+      );
     } catch (error) {
       console.error("[transcriptEmailQueue] Job failed:", error);
       throw error;
     }
   },
-  { connection: redisConfig, concurrency: 2 }
+  { connection: redisConfig, concurrency: 2 },
 );
 
 module.exports = {
