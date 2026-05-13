@@ -9,7 +9,8 @@ const apiRoutes = require("./routes/");
 const paymentsRouter = require('./routes/payments');
 const cron = require('node-cron');
 const { downgradeExpiredPlans } = require('./services/planCronService');
-const bigcommerceRoutes = require('./routes/bigcommerce');
+const bigcommerceRoutes = require("./routes/bigcommerce");
+const shopifyRoutes = require("./routes/shopify");
 const { initializeSocketController } = require("./socket");
 
 const cors = require("cors");
@@ -69,11 +70,20 @@ const limiter = rateLimit({
 
 app.use(limiter); // apply to all requests
 
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      if (req.originalUrl?.startsWith("/api/shopify/webhooks")) {
+        req.rawBody = buf;
+      }
+    },
+  })
+);
 app.use("/uploads", express.static(uploadsDir));
 app.use("/api", apiRoutes);
 app.use('/api/paypal', paymentsRouter);
 app.use('/api/bigcommerce', bigcommerceRoutes);
+app.use("/api/shopify", shopifyRoutes);
 
 // Schedule the plan expiry check to run every day at midnight
 cron.schedule('0 0 * * *', () => {

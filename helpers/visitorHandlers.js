@@ -175,10 +175,11 @@ const sendConversationTranscriptEmail = async (conversation) => {
      colorFields: widget?.colorFields || [],
    });
  
+   const appName = process.env.APP_NAME || "Chataffy";
    const result = await Promise.allSettled(
     recipients.map((email) =>
       transcriptMailTransporter.sendMail({
-        from: process.env.SMTP_FROM,
+        from: `${appName} <${process.env.SMTP_FROM}>`,
         to: email,
         subject: `Chat Transcript`,
         html,
