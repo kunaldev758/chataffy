@@ -5,6 +5,7 @@ const VisitorController = require("../controllers/VisitorController");
 const ConversationController = require("../controllers/ConversationController");
 const ConversationTagController = require("../controllers/ConversationTagController");
 const DashboardController = require("../controllers/DashboardController");
+const NotificationController = require("../controllers/NotificationController");
 const Conversation = require("../models/Conversation");
 const Visitor = require("../models/Visitor");
 const Client = require("../models/Client");
@@ -307,6 +308,32 @@ const initializeClientEvents = (io, socket) => {
       );
     } catch (error) {
       console.error("update message-seen error:", error.message);
+      callback?.({ success: false, error: error.message });
+    }
+  });
+
+  // Mark every notification tied to this conversation as seen for the
+  // currently-authenticated human agent (fires when the agent opens the chat).
+  socket.on("mark-conversation-notifications-seen", async ({ conversationId }, callback) => {
+    try {
+      if (!conversationId) {
+        callback?.({ success: false, error: "conversationId is required" });
+        return;
+      }
+      const humanAgentId = socket.humanAgentId;
+      const modifiedCount = await NotificationController.markAsSeenByConversationId(
+        conversationId,
+        humanAgentId
+      );
+      // Notify this agent's other open tabs/sockets so their bells update in real time
+      if (modifiedCount > 0 && humanAgentId) {
+        io.to(`user-${humanAgentId}`).emit("conversation-notifications-seen", {
+          conversationId,
+        });
+      }
+      callback?.({ success: true, modifiedCount });
+    } catch (error) {
+      console.error("mark-conversation-notifications-seen error:", error.message);
       callback?.({ success: false, error: error.message });
     }
   });
