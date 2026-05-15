@@ -614,9 +614,20 @@ new Worker(
             });
           }
         } catch (error) {
+          // Upsert so every scrape failure appears in the training list (find-only updates missed new URLs).
+          const existingFailRow = await TrainingModel.findOne({
+            userId,
+            agentId,
+            "webPage.url": url,
+          })
+            .select("trainingStatus")
+            .lean();
+          const prevTrainStatus = existingFailRow?.trainingStatus;
+
           await TrainingModel.findOneAndUpdate(
             { userId, agentId, "webPage.url": url },
             {
+<<<<<<< HEAD
               trainingStatus: 2, // Error
               lastEdit: Date.now(),
               error: error?.message,
@@ -625,7 +636,28 @@ new Worker(
           await Agent.updateOne(
             { _id: agentId },
             { $inc: { "pagesAdded.failed": 1 } },
+=======
+              $set: {
+                userId,
+                agentId,
+                type: 0,
+                trainingStatus: 2,
+                lastEdit: Date.now(),
+                error: error?.message,
+                "webPage.url": url,
+              },
+            },
+            { upsert: true, setDefaultsOnInsert: true }
+>>>>>>> f8e794dd75eb59a9a2c9b732d3546059e878d434
           );
+
+          if (prevTrainStatus !== 2) {
+            const inc =
+              prevTrainStatus === 1
+                ? { "pagesAdded.success": -1, "pagesAdded.failed": 1 }
+                : { "pagesAdded.failed": 1 };
+            await Agent.updateOne({ _id: agentId }, { $inc: inc });
+          }
           await Url.updateOne(
             { url: url, agentId: agentId },
             {
@@ -998,9 +1030,23 @@ new Worker(
       let successCount = 0;
       let failCount = 0;
 
+      async function applyWebPagePagesAddedDelta(prevStatus, newStatus) {
+        if (prevStatus === newStatus) return;
+        const inc = {};
+        if (prevStatus === 1) inc["pagesAdded.success"] = -1;
+        else if (prevStatus === 2) inc["pagesAdded.failed"] = -1;
+        if (newStatus === 1) inc["pagesAdded.success"] = (inc["pagesAdded.success"] || 0) + 1;
+        else if (newStatus === 2) inc["pagesAdded.failed"] = (inc["pagesAdded.failed"] || 0) + 1;
+        const filtered = Object.fromEntries(Object.entries(inc).filter(([, v]) => v !== 0));
+        if (Object.keys(filtered).length === 0) return;
+        await Agent.updateOne({ _id: agentId }, { $inc: filtered });
+      }
+
       for (const entry of entries) {
         const url = entry.webPage?.url;
         if (!url) continue;
+
+        const prevStatus = entry.trainingStatus;
 
         try {
           // 1. Delete old vectors from Qdrant
@@ -1036,6 +1082,7 @@ new Worker(
                 },
               },
             );
+            await applyWebPagePagesAddedDelta(prevStatus, 2);
             failCount++;
             continue;
           }
@@ -1078,6 +1125,7 @@ new Worker(
                 },
               },
             );
+            await applyWebPagePagesAddedDelta(prevStatus, 2);
             failCount++;
             continue;
           }
@@ -1096,6 +1144,8 @@ new Worker(
               },
             },
           );
+
+          await applyWebPagePagesAddedDelta(prevStatus, 1);
 
           // 6. Increment currentDataSize (delta: new - old)
           await Client.updateOne(
@@ -1116,6 +1166,7 @@ new Worker(
               },
             },
           );
+          await applyWebPagePagesAddedDelta(prevStatus, 2);
           failCount++;
         }
       }

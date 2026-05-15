@@ -136,9 +136,19 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("get-agent-data", async () => {
     const agentData = await Agent.findOne({ _id: agentId });
+    let webPagesTrainingStats = null;
+    try {
+      webPagesTrainingStats = await ScrappingController.getWebPagesTrainingStats(
+        userId,
+        agentId
+      );
+    } catch (e) {
+      console.error("getWebPagesTrainingStats:", e);
+    }
     socket.emit("get-agent-data-response", {
       response: "Received data from message",
       agentData,
+      webPagesTrainingStats,
     });
   });
 
