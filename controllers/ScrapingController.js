@@ -1033,13 +1033,25 @@ async bulkInsertUrls(userId,agentId, urls) {
       if (filterType !== null) {
         query.type = filterType;
       }
+
+      const completedOrLegacy = {
+        $or: [{ trainingStatus: 1 }, { trainingStatus: { $exists: false } }],
+      };
+
+      const allStatusesOrLegacy = {
+        $or: [
+          { trainingStatus: { $in: [0, 1, 2] } },
+          { trainingStatus: { $exists: false } },
+        ],
+      };
+
       if (status !== null) {
         if (status === "success") {
-          query.trainingStatus = 1; // Completed
+          query.$or = completedOrLegacy.$or;
         } else if (status === "failed") {
-          query.trainingStatus = 2; // Failed, Insufficient Credits, Plan Upgrade Required
+          query.trainingStatus = 2;
         } else {
-          query.trainingStatus = { $in: [1, 2] };
+          query.$or = allStatusesOrLegacy.$or;
         }
       }
 
@@ -1075,6 +1087,28 @@ async bulkInsertUrls(userId,agentId, urls) {
     }
   }
 
+  /**
+   * Web page row counts from training storage (source of truth for the training table).
+   * Uses countDocuments (same casting as find()). Aggregation $match does NOT cast userId etc., which caused empty stats and a broken summary UI.
+   */
+  async getWebPagesTrainingStats(userId, agentId) {
+    const TrainingModel = await PlanService.getTrainingModel(userId);
+    const base = { userId, agentId, type: 0 };
+
+    const completedClause = {
+      $or: [{ trainingStatus: 1 }, { trainingStatus: { $exists: false } }],
+    };
+
+    const [synced, failed, pending, total] = await Promise.all([
+      TrainingModel.countDocuments({ ...base, ...completedClause }),
+      TrainingModel.countDocuments({ ...base, trainingStatus: 2 }),
+      TrainingModel.countDocuments({ ...base, trainingStatus: 0 }),
+      TrainingModel.countDocuments(base),
+    ]);
+
+    return { total, synced, failed, pending };
+  }
+
   async getScrapingHistoryBySocket(userId, agentId, skip, limit, type, status, search) {
     try {
       const TrainingModel = await PlanService.getTrainingModel(userId);
@@ -1103,27 +1137,53 @@ async bulkInsertUrls(userId,agentId, urls) {
       if (filterType !== null) {
         query.type = filterType;
       }
-      if (status !== null) {
-        if (status === "success") {
-          query.trainingStatus = 1; // Completed
-        } else if (status === "failed") {
-          query.trainingStatus = 2; // Failed, Insufficient Credits, Plan Upgrade Required
-        } else {
-          query.trainingStatus = { $in: [0, 1, 2] };
-        }
-      }
 
       const searchTerm =
         typeof search === "string" && search.trim() ? search.trim() : null;
+      let searchOr = null;
       if (searchTerm) {
         const escaped = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        query.$or = [
+        searchOr = [
           { title: { $regex: escaped, $options: "i" } },
           { "webPage.url": { $regex: escaped, $options: "i" } },
           { fileName: { $regex: escaped, $options: "i" } },
           { originalFileName: { $regex: escaped, $options: "i" } },
           { content: { $regex: escaped, $options: "i" } },
         ];
+      }
+
+      const completedOrLegacy = {
+        $or: [{ trainingStatus: 1 }, { trainingStatus: { $exists: false } }],
+      };
+
+      const allStatusesOrLegacy = {
+        $or: [
+          { trainingStatus: { $in: [0, 1, 2] } },
+          { trainingStatus: { $exists: false } },
+        ],
+      };
+
+      if (status !== null && status !== undefined && status !== "") {
+        if (status === "success") {
+          if (searchOr) {
+            query.$and = [completedOrLegacy, { $or: searchOr }];
+          } else {
+            query.$or = completedOrLegacy.$or;
+          }
+        } else if (status === "failed") {
+          query.trainingStatus = 2;
+          if (searchOr) {
+            query.$and = [{ trainingStatus: 2 }, { $or: searchOr }];
+          }
+        } else {
+          if (searchOr) {
+            query.$and = [allStatusesOrLegacy, { $or: searchOr }];
+          } else {
+            query.$or = allStatusesOrLegacy.$or;
+          }
+        }
+      } else if (searchOr) {
+        query.$or = searchOr;
       }
 
       const [entries, total] = await Promise.all([
