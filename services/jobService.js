@@ -627,16 +627,6 @@ new Worker(
           await TrainingModel.findOneAndUpdate(
             { userId, agentId, "webPage.url": url },
             {
-<<<<<<< HEAD
-              trainingStatus: 2, // Error
-              lastEdit: Date.now(),
-              error: error?.message,
-            },
-          );
-          await Agent.updateOne(
-            { _id: agentId },
-            { $inc: { "pagesAdded.failed": 1 } },
-=======
               $set: {
                 userId,
                 agentId,
@@ -648,7 +638,6 @@ new Worker(
               },
             },
             { upsert: true, setDefaultsOnInsert: true }
->>>>>>> f8e794dd75eb59a9a2c9b732d3546059e878d434
           );
 
           if (prevTrainStatus !== 2) {
