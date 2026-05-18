@@ -156,7 +156,7 @@ router.post('/client/profile/password', middleware, UserController.updateClientP
 router.get('/direct-client-login/:token',UserController.getClientByToken);
 
 
-router.get("/platform-redirection-login/:clientId",UserController.platformRedirectionLogin)
+router.get("/platform-redirection-login/:userId",UserController.platformRedirectionLogin)
 
 
 //Update Client Status (updates client's agent record)

@@ -1265,18 +1265,9 @@ UserController.platformRedirectionLogin = async (req, res) => {
 
   try{
 
-    const { clientId } = req.params;
-
-    if(!clientId){
-      return res.status(400).json({ message: "Client ID is required" });
-    }
-
-    const clientData = await Client.findById(clientId);
-
-    if(!clientData){
-      return res.status(404).json({ message: "Client not found" });
-    }
-    const user = await User.findById(clientData.userId);
+    const { userId } = req.params;
+    console.log("userId is :", userId);
+    const user = await User.findById(userId);
     if (!user || user.isDeleted) {
       return res.status(404).json({ message: "User not found" });
     } 
