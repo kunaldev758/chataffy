@@ -1,22 +1,27 @@
 require("dotenv").config();
-const mongoose = require('mongoose');
-const User = require('../models/User');
-const Client = require('../models/Client');
-const Widget = require('../models/Widget');
-const Agent = require('../models/Agent.js');
-const HumanAgent = require('../models/HumanAgent.js');
-const path = require('path');
-const fs = require('fs');
-const nodemailer = require('nodemailer');
-const smtpTransport = require('nodemailer-smtp-transport');
+const mongoose = require("mongoose");
+const User = require("../models/User");
+const Client = require("../models/Client");
+const Widget = require("../models/Widget");
+const Agent = require("../models/Agent.js");
+const HumanAgent = require("../models/HumanAgent.js");
+const path = require("path");
+const fs = require("fs");
+const nodemailer = require("nodemailer");
+const smtpTransport = require("nodemailer-smtp-transport");
 const commonHelper = require("../helpers/commonHelper.js");
-const PlanService = require('../services/PlanService');
-const crypto = require('crypto');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
+const PlanService = require("../services/PlanService");
+const crypto = require("crypto");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 const UserController = {};
-const https = require('https');
+const https = require("https");
 const { saveChatTranscriptSettings } = require("./ChatTranscriptController.js");
+
+const {
+  setAuthTokenCookie,
+  clearAuthTokenCookie,
+} = require("../constants/clientCookie.js");
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
@@ -27,14 +32,19 @@ const transporter = nodemailer.createTransport(
       user: process.env.EMAIL_USERNAME,
       pass: process.env.EMAIL_PASSWORD,
     },
-  })
+  }),
 );
 
 // Construct the path to the email template file
-const templateFilePath = path.join(__dirname, '..', '/public/email-templates', 'email-new-account-verification.html');
+const templateFilePath = path.join(
+  __dirname,
+  "..",
+  "/public/email-templates",
+  "email-new-account-verification.html",
+);
 
 // Read the HTML email template from the file
-const emailTemplate = fs.readFileSync(templateFilePath, 'utf-8');
+const emailTemplate = fs.readFileSync(templateFilePath, "utf-8");
 // Create a new user with email verification
 UserController.createUser = async (req, res) => {
   try {
@@ -44,10 +54,22 @@ UserController.createUser = async (req, res) => {
     // Check if the email is already registered as an agent
     const existingAgentForEmail = await Agent.findOne({ email });
     if (existingAgentForEmail) {
-      return res.status(400).json({ status_code: 201, status: false, message: 'Email already in use' });
+      return res
+        .status(400)
+        .json({
+          status_code: 201,
+          status: false,
+          message: "Email already in use",
+        });
     }
     if (existingUser) {
-      return res.status(400).json({ status_code: 201, status: false, message: 'Email already in use' });
+      return res
+        .status(400)
+        .json({
+          status_code: 201,
+          status: false,
+          message: "Email already in use",
+        });
     }
     const user = new User({ email, password, role });
     const emailVerificationToken = user.generateEmailVerificationToken();
@@ -60,17 +82,18 @@ UserController.createUser = async (req, res) => {
       _id: agentId,
       userId: userId,
       qdrantIndexName: `${userId}-${agentId}`,
-      qdrantIndexNamePaid: `${crypto.randomBytes(16).toString('hex')}-${agentId}`,
+      qdrantIndexNamePaid: `${crypto.randomBytes(16).toString("hex")}-${agentId}`,
     });
     await agent.save();
     // Generate client specific details
-    const client = new Client({userId});
+    const client = new Client({ userId });
     client.email = email;
     await client.save();
     await PlanService.seedCustomLimitsForNewClient(userId);
     // Generate widget token and insert in widget table
-    const widgetToken = crypto.randomBytes(8).toString('hex') + userId + agent._id;
-    const widget = new Widget({userId,widgetToken,agentId:agent._id});
+    const widgetToken =
+      crypto.randomBytes(8).toString("hex") + userId + agent._id;
+    const widget = new Widget({ userId, widgetToken, agentId: agent._id });
     await widget.save();
 
     // Create agent for client
@@ -78,29 +101,29 @@ UserController.createUser = async (req, res) => {
       // Check if agent already exists with this email (email is unique)
       const existingAgent = await HumanAgent.findOne({ email });
       if (!existingAgent) {
-        const humanAgentPassword = crypto.randomBytes(16).toString('hex');
+        const humanAgentPassword = crypto.randomBytes(16).toString("hex");
         const hashedPassword = await bcrypt.hash(humanAgentPassword, 10);
         const humanAgent = new HumanAgent({
           name: commonHelper.clientHumanAgentNameFromAgent(agent),
           email: email,
           password: hashedPassword,
           userId: userId,
-          status: 'approved',
+          status: "approved",
           isClient: true,
-          avatar: '',
-          assignedAgents: [agent._id] // Default avatar path
+          avatar: "",
+          assignedAgents: [agent._id], // Default avatar path
         });
         await humanAgent.save();
-      } 
+      }
     } catch (humanAgentError) {
       // Log error but don't fail client creation if agent creation fails
-      console.error('Error creating/updating client agent:', humanAgentError);
-      console.error('HumanAgent error details:', {
+      console.error("Error creating/updating client agent:", humanAgentError);
+      console.error("HumanAgent error details:", {
         message: humanAgentError.message,
         code: humanAgentError.code,
         keyPattern: humanAgentError.keyPattern,
         keyValue: humanAgentError.keyValue,
-        stack: humanAgentError.stack
+        stack: humanAgentError.stack,
       });
     }
 
@@ -110,34 +133,60 @@ UserController.createUser = async (req, res) => {
       [email],
       [email],
       [email],
-      '',
-      '',
-    )
+      "",
+      "",
+    );
     if (chatTranscript instanceof Error) {
-      console.error("Error creating chat transcript while creating user:", chatTranscript.message);
-    }else{
+      console.error(
+        "Error creating chat transcript while creating user:",
+        chatTranscript.message,
+      );
+    } else {
       console.log("Chat transcript created successfully:", chatTranscript);
     }
 
     const client_url = process.env.CLIENT_URL;
     const verificationLink = `${client_url}verify-email?token=${emailVerificationToken}`;
-    const emailContent = emailTemplate.replace(/VERIFY_LINK_HERE/g, verificationLink);
+    const emailContent = emailTemplate.replace(
+      /VERIFY_LINK_HERE/g,
+      verificationLink,
+    );
     const mailOptions = {
       from: process.env.SMTP_FROM,
       to: email,
-      subject: 'Email Verification',
+      subject: "Email Verification",
       html: emailContent, // Use the modified email content
     };
     transporter.sendMail(mailOptions, (error, info) => {
       if (error) {
-        return res.status(500).json({ status_code: 201, status: false, message: 'Verification email sending failed', error, info });
+        return res
+          .status(500)
+          .json({
+            status_code: 201,
+            status: false,
+            message: "Verification email sending failed",
+            error,
+            info,
+          });
       }
-      return res.status(200).json({ status_code: 200, status: true, message: 'User registered. Check your email for verification.' });
+      return res
+        .status(200)
+        .json({
+          status_code: 200,
+          status: true,
+          message: "User registered. Check your email for verification.",
+        });
     });
   } catch (error) {
     console.error("Error creating user:", error);
     commonHelper.logErrorToFile(error);
-    res.status(500).json({ status_code: 500, status: false, message: 'User creation failed' });
+    res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "User creation failed",
+      });
   }
 };
 // Verify email
@@ -147,7 +196,13 @@ UserController.verifyEmail = async (req, res) => {
   try {
     const user = await User.findOne({ verification_token });
     if (!user) {
-      return res.status(400).json({ status_code: 201, status: false, message: 'Invalid verification token' });
+      return res
+        .status(400)
+        .json({
+          status_code: 201,
+          status: false,
+          message: "Invalid verification token",
+        });
     }
 
     // First-time verification: link must be used within 15 minutes (JWT exp). Already-verified users can still use the stored link to sign in.
@@ -155,18 +210,27 @@ UserController.verifyEmail = async (req, res) => {
       try {
         jwt.verify(verification_token, process.env.JWT_SECRET_KEY);
       } catch (err) {
-        if (err.name === 'TokenExpiredError') {
+        if (err.name === "TokenExpiredError") {
           return res.status(400).json({
             status_code: 201,
             status: false,
-            message: 'Verification link has expired.',
+            message: "Verification link has expired.",
           });
         }
-        return res.status(400).json({ status_code: 201, status: false, message: 'Invalid verification token' });
+        return res
+          .status(400)
+          .json({
+            status_code: 201,
+            status: false,
+            message: "Invalid verification token",
+          });
       }
     }
 
-    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id agentName isActive');
+    const agents = await Agent.find({
+      userId: user._id,
+      isDeleted: false,
+    }).select("_id agentName isActive");
 
     // Already verified: still return a session so reopening the link (e.g. new tab) signs the user in
     if (user.email_verified) {
@@ -174,7 +238,7 @@ UserController.verifyEmail = async (req, res) => {
       user.auth_token = authToken;
       await user.save();
       if (req.io) {
-        req.io.emit('user-logged-in', { userId: user._id });
+        req.io.emit("user-logged-in", { userId: user._id });
       }
       return res.status(200).json({
         status_code: 200,
@@ -183,7 +247,7 @@ UserController.verifyEmail = async (req, res) => {
         userId: user._id,
         isOnboarded: user.isOnboarded,
         agents,
-        message: 'Signed in successfully',
+        message: "Signed in successfully",
       });
     }
 
@@ -193,7 +257,7 @@ UserController.verifyEmail = async (req, res) => {
     await user.save();
 
     if (req.io) {
-      req.io.emit('user-logged-in', { userId: user._id });
+      req.io.emit("user-logged-in", { userId: user._id });
     }
 
     return res.status(200).json({
@@ -203,69 +267,209 @@ UserController.verifyEmail = async (req, res) => {
       userId: user._id,
       isOnboarded: user.isOnboarded,
       agents,
-      message: 'Email verified successfully',
+      message: "Email verified successfully",
     });
   } catch (error) {
-    return res.status(500).json({ status_code: 500, status: false, message: 'Email verification failed' });
+    return res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "Email verification failed",
+      });
   }
 };
 // Login user
+// UserController.loginUser = async (req, res) => {
+//   try {
+//     const { email, password } = req.body;
+//     const user = await User.findOne({ email });
+//     if (!user || user.isDeleted || !(await user.comparePassword(password))) {
+//       return res
+//         .status(401)
+//         .json({
+//           status_code: 201,
+//           status: false,
+//           message: "Invalid email or password",
+//         });
+//     }
+
+//     console.log("User login attempt:", { email, userId: user._id });
+//     if (!user.email_verified) {
+//       return res
+//         .status(403)
+//         .json({
+//           status_code: 201,
+//           status: false,
+//           message: "Please verify your email address",
+//         });
+//     }
+//     // Generate an authentication token
+//     const token = user.generateAuthToken();
+//     user.auth_token = token;
+//     await user.save();
+
+//     // Fetch all AI agents for this user
+//     const agents = await Agent.find({
+//       userId: user._id,
+//       isDeleted: false,
+//     }).select("_id agentName isActive");
+
+//     if (req.io) {
+//       req.io.emit("user-logged-in", { userId: user._id });
+//     }
+
+//     res.cookie(TOKEN_KEYS["web"], token, getCookieOptions(req));
+
+//     res.json({
+//       status_code: 200,
+//       status: true,
+//       token,
+//       userId: user?._id,
+//       isOnboarded: user.isOnboarded,
+//       agents,
+//       message: "Login successful",
+//     });
+//   } catch (error) {
+//     commonHelper.logErrorToFile(error);
+//     res
+//       .status(500)
+//       .json({ status_code: 500, status: false, message: "Login failed" });
+//   }
+// };
+
+
 UserController.loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
+
+    // Validate input
+    if (!email || !password) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Email and password are required",
+      });
+    }
+
+    // Find user
     const user = await User.findOne({ email });
-    if (!user || user.isDeleted || !(await user.comparePassword(password))) {
-      return res.status(401).json({ status_code: 201, status: false, message: 'Invalid email or password' });
+
+    // Validate user and password
+    if (
+      !user ||
+      user.isDeleted ||
+      !(await user.comparePassword(password))
+    ) {
+      return res.status(401).json({
+        status_code: 401,
+        status: false,
+        message: "Invalid email or password",
+      });
     }
+
+    // Check email verification
     if (!user.email_verified) {
-      return res.status(403).json({ status_code: 201, status: false, message: 'Please verify your email address' });
+      return res.status(403).json({
+        status_code: 403,
+        status: false,
+        message: "Please verify your email address",
+      });
     }
-    // Generate an authentication token
+
+    // Generate token
     const token = user.generateAuthToken();
+
+    // Optional: store token in DB
     user.auth_token = token;
     await user.save();
 
-    // Fetch all AI agents for this user
-    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id agentName isActive');
+    // Fetch agents
+    const agents = await Agent.find({
+      userId: user._id,
+      isDeleted: false,
+    }).select("_id agentName isActive");
 
+    // Socket event
     if (req.io) {
-      req.io.emit('user-logged-in', { userId: user._id });
+      req.io.emit("user-logged-in", {
+        userId: user._id,
+      });
     }
-    
-    res.json({
+
+    const client = await Client.findOne({ userId: user._id })
+      .select("_id")
+      .lean();
+
+    setAuthTokenCookie(res, req, {
+      token,
+      platform: "web",
+      clientId: client?._id?.toString() || "default",
+      role: "client",
+    });
+
+    return res.status(200).json({
       status_code: 200,
       status: true,
       token,
-      userId: user?._id,
+      userId: user._id,
       isOnboarded: user.isOnboarded,
       agents,
-      message: 'Login successful'
+      message: "Login successful",
     });
+
   } catch (error) {
+
+
+    console.log("error is  : ",error);
     commonHelper.logErrorToFile(error);
-    res.status(500).json({ status_code: 500, status: false, message: 'Login failed' });
+
+    return res.status(500).json({
+      status_code: 500,
+      status: false,
+      message: "Login failed",
+    });
   }
 };
+
 // Delete user (soft delete)
 UserController.deleteUser = async (req, res) => {
   try {
     const userId = req.params.userId;
     if (!userId) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "User ID is required",
+        });
     }
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+      return res
+        .status(404)
+        .json({ status_code: 404, status: false, message: "User not found" });
     }
-    const client = await Client.findOne({userId});
+    const client = await Client.findOne({ userId });
     user.isDeleted = true;
     client.isDeleted = true;
     await client.save();
     await user.save();
-    res.json({ status_code: 200, status: true, message: 'User deleted successfully' });
+    res.json({
+      status_code: 200,
+      status: true,
+      message: "User deleted successfully",
+    });
   } catch (error) {
     commonHelper.logErrorToFile(error);
-    res.status(500).json({ status_code: 500, status: false, message: 'User deletion failed' });
+    res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "User deletion failed",
+      });
   }
 };
 
@@ -275,69 +479,111 @@ UserController.logoutUser = async (req, res) => {
     const userId = req.body.userId;
     const user = await User.findById(userId);
     if (user) {
-      //user.status = 'blank';
-      user.auth_token = '';
+      user.auth_token = "";
       await user.save();
-      res.json({ status_code: 200, status: true, message: 'Logout successful' });
+      clearAuthTokenCookie(res, req);
+      res.json({
+        status_code: 200,
+        status: true,
+        message: "Logout successful",
+      });
     } else {
-      return res.status(403).json({ status_code: 201, status: false, message: 'Invalid data please try agian' });
+      return res
+        .status(403)
+        .json({
+          status_code: 201,
+          status: false,
+          message: "Invalid data please try agian",
+        });
     }
-
   } catch (error) {
     commonHelper.logErrorToFile(error);
-    res.status(500).json({ status_code: 500, status: false, message: 'Logout failed' });
+    res
+      .status(500)
+      .json({ status_code: 500, status: false, message: "Logout failed" });
   }
 };
 
-UserController.getClient = async (req,res) => {
+UserController.getClient = async (req, res) => {
   try {
     const userId = req.params.userId || req.body.userId;
     if (!userId) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "User ID is required",
+        });
     }
 
     const client = await Client.findOne({ userId: userId });
     if (!client) {
-      return res.status(404).json({ status_code: 404, status: false, message: 'Client not found' });
+      return res
+        .status(404)
+        .json({ status_code: 404, status: false, message: "Client not found" });
     }
 
     // Also get the client's agent record (where isClient: true)
-    const Agent = require('../models/HumanAgent.js');
-    const clientAgent = await Agent.findOne({ userId: userId, isClient: true }).select('-password');
-    
+    const Agent = require("../models/HumanAgent.js");
+    const clientAgent = await Agent.findOne({
+      userId: userId,
+      isClient: true,
+    }).select("-password");
+
     // Include agent data in response if found
     const response = {
       status_code: 200,
       status: true,
-      client: client.toObject ? client.toObject() : client
+      client: client.toObject ? client.toObject() : client,
     };
-    
+
     if (clientAgent) {
-      response.clientAgent = clientAgent.toObject ? clientAgent.toObject() : clientAgent;
+      response.clientAgent = clientAgent.toObject
+        ? clientAgent.toObject()
+        : clientAgent;
     }
 
     res.json(response);
   } catch (error) {
-    res.status(500).json({ status_code: 500, status: false, message: 'Failed to retrieve client' });
+    res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "Failed to retrieve client",
+      });
   }
-}
+};
 
 // Update client status (online/offline) - updates the client's agent record
 UserController.updateClientStatus = async (req, res) => {
   try {
     const { isActive } = req.body;
     const userId = req.body.userId || req.user?.userId; // Get userId from request body or auth middleware
-    
+
     if (!userId) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "User ID is required",
+        });
     }
 
     // Find the client's agent record (where isClient: true)
-    const Agent = require('../models/HumanAgent.js');
+    const Agent = require("../models/HumanAgent.js");
     const clientAgent = await Agent.findOne({ userId: userId, isClient: true });
 
     if (!clientAgent) {
-      return res.status(404).json({ status_code: 404, status: false, message: 'Client agent not found' });
+      return res
+        .status(404)
+        .json({
+          status_code: 404,
+          status: false,
+          message: "Client agent not found",
+        });
     }
 
     clientAgent.isActive = isActive;
@@ -360,14 +606,34 @@ UserController.updateClientStatus = async (req, res) => {
 
     // Emit to the client's room (userId) so inbox can update
     if (clientAgent.userId) {
-      appEvents.emit("userEvent", clientAgent.userId.toString(), "client-status-updated", updatedClientData);
+      appEvents.emit(
+        "userEvent",
+        clientAgent.userId.toString(),
+        "client-status-updated",
+        updatedClientData,
+      );
       // Also emit agent-status-updated for consistency
-      appEvents.emit("userEvent", clientAgent.userId.toString(), "agent-status-updated", updatedClientData);
+      appEvents.emit(
+        "userEvent",
+        clientAgent.userId.toString(),
+        "agent-status-updated",
+        updatedClientData,
+      );
     }
 
     // Also emit to the agent's own room (agentId)
-    appEvents.emit("userEvent", clientAgent._id.toString(), "client-status-updated", updatedClientData);
-    appEvents.emit("userEvent", clientAgent._id.toString(), "agent-status-updated", updatedClientData);
+    appEvents.emit(
+      "userEvent",
+      clientAgent._id.toString(),
+      "client-status-updated",
+      updatedClientData,
+    );
+    appEvents.emit(
+      "userEvent",
+      clientAgent._id.toString(),
+      "agent-status-updated",
+      updatedClientData,
+    );
 
     res.json({
       status_code: 200,
@@ -377,7 +643,13 @@ UserController.updateClientStatus = async (req, res) => {
     });
   } catch (error) {
     console.error("Error updating client status:", error);
-    res.status(500).json({ status_code: 500, status: false, message: "Error updating client status" });
+    res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "Error updating client status",
+      });
   }
 };
 // Google OAuth exchange (login/signup)
@@ -385,25 +657,49 @@ UserController.googleOAuth = async (req, res) => {
   try {
     const token = req.body?.token;
     if (!token) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'Token is required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Token is required",
+        });
     }
 
     // Try to resolve Google profile using either id_token (tokeninfo) or access_token (userinfo)
     const profile = await resolveGoogleProfile(token);
     if (!profile || !profile.email) {
-      return res.status(401).json({ status_code: 401, status: false, message: 'Invalid Google token' });
+      return res
+        .status(401)
+        .json({
+          status_code: 401,
+          status: false,
+          message: "Invalid Google token",
+        });
     }
 
     const email = String(profile.email).toLowerCase();
     const googleId = profile.sub || profile.user_id || profile.id;
     if (!googleId) {
-      return res.status(401).json({ status_code: 401, status: false, message: 'Unable to extract Google ID' });
+      return res
+        .status(401)
+        .json({
+          status_code: 401,
+          status: false,
+          message: "Unable to extract Google ID",
+        });
     }
 
     // Check if email already exists in Agent (only block if agent is not a client agent)
     const existingAgent = await Agent.findOne({ email });
     if (existingAgent && !existingAgent.isClient) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'Email already in use' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Email already in use",
+        });
     }
 
     // Check if user already exists for login flow
@@ -413,12 +709,19 @@ UserController.googleOAuth = async (req, res) => {
     if (user) {
       // User exists - LOGIN flow
       if (user.isDeleted) {
-        return res.status(403).json({ status_code: 403, status: false, message: 'Account is deactivated' });
+        return res
+          .status(403)
+          .json({
+            status_code: 403,
+            status: false,
+            message: "Account is deactivated",
+          });
       }
 
       // Update user with Google info if not already set
       if (!user.googleId) user.googleId = googleId;
-      if (!user.provider || user.provider !== 'google') user.provider = 'google';
+      if (!user.provider || user.provider !== "google")
+        user.provider = "google";
       user.email_verified = true;
       await user.save();
 
@@ -427,12 +730,12 @@ UserController.googleOAuth = async (req, res) => {
       // User doesn't exist - SIGNUP flow
       user = new User({
         email,
-        role: 'client',
+        role: "client",
         email_verified: true,
-        provider: 'google',
+        provider: "google",
         googleId,
         // set a random password to satisfy schema if needed
-        password: crypto.randomBytes(16).toString('hex')
+        password: crypto.randomBytes(16).toString("hex"),
       });
 
       const userId = user.id;
@@ -442,45 +745,46 @@ UserController.googleOAuth = async (req, res) => {
         _id: agentId,
         userId: userId,
         qdrantIndexName: `${userId}-${agentId}`,
-        qdrantIndexNamePaid: `${crypto.randomBytes(16).toString('hex')}-${agentId}`,
+        qdrantIndexNamePaid: `${crypto.randomBytes(16).toString("hex")}-${agentId}`,
       });
       await agent.save();
 
       // Create related Client and Widget like in createUser
       const client = new Client({ userId });
-      
+
       client.email = email;
       await client.save();
       await PlanService.seedCustomLimitsForNewClient(userId);
 
-      const widgetToken = crypto.randomBytes(8).toString('hex') + userId + agent._id;
+      const widgetToken =
+        crypto.randomBytes(8).toString("hex") + userId + agent._id;
       const widget = new Widget({ userId, widgetToken, agentId: agent._id });
       await widget.save();
 
       // Create agent for client
       try {
-        const agentPassword = crypto.randomBytes(16).toString('hex');
+        const agentPassword = crypto.randomBytes(16).toString("hex");
         const hashedPassword = await bcrypt.hash(agentPassword, 10);
         const humanAgent = new HumanAgent({
           name: commonHelper.clientHumanAgentNameFromAgent(agent),
           email: email,
           password: hashedPassword,
           userId: userId,
-          status: 'approved',
+          status: "approved",
           isClient: true,
-          avatar: '', // Default avatar path
-          assignedAgents: [agent._id] // Default avatar path
+          avatar: "", // Default avatar path
+          assignedAgents: [agent._id], // Default avatar path
         });
         await humanAgent.save();
       } catch (humanAgentError) {
         // Log error but don't fail client creation if agent creation fails
-        console.error('Error creating client agent:', humanAgentError);
-        console.error('Agent error details:', {
+        console.error("Error creating client agent:", humanAgentError);
+        console.error("Agent error details:", {
           message: agentError.message,
           code: agentError.code,
           keyPattern: agentError.keyPattern,
           keyValue: agentError.keyValue,
-          stack: agentError.stack
+          stack: agentError.stack,
         });
       }
 
@@ -490,12 +794,15 @@ UserController.googleOAuth = async (req, res) => {
         [email],
         [email],
         [email],
-        '',
-        '',
-      )
+        "",
+        "",
+      );
       if (chatTranscript instanceof Error) {
-        console.error("Error creating chat transcript while creating user:", chatTranscript.message);
-      }else{
+        console.error(
+          "Error creating chat transcript while creating user:",
+          chatTranscript.message,
+        );
+      } else {
         console.log("Chat transcript created successfully:", chatTranscript);
       }
 
@@ -508,11 +815,25 @@ UserController.googleOAuth = async (req, res) => {
     await user.save();
 
     // Fetch all AI agents for this user
-    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id agentName isActive');
+    const agents = await Agent.find({
+      userId: user._id,
+      isDeleted: false,
+    }).select("_id agentName isActive");
 
     if (req.io) {
-      req.io.emit('user-logged-in', { userId: user._id });
+      req.io.emit("user-logged-in", { userId: user._id });
     }
+
+    const client = await Client.findOne({ userId: user._id })
+      .select("_id")
+      .lean();
+
+    setAuthTokenCookie(res, req, {
+      token: appToken,
+      platform: "web",
+      clientId: client?._id?.toString() || "default",
+      role: "client",
+    });
 
     return res.status(200).json({
       status_code: 200,
@@ -522,17 +843,23 @@ UserController.googleOAuth = async (req, res) => {
       userId: user?._id,
       isOnboarded: user.isOnboarded,
       agents,
-      isNewUser
+      isNewUser,
     });
   } catch (error) {
     commonHelper.logErrorToFile(error);
-    return res.status(500).json({ status_code: 500, status: false, message: 'Google OAuth failed' });
+    return res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "Google OAuth failed",
+      });
   }
 };
 
 async function resolveGoogleProfile(token) {
   // If token looks like a JWT, attempt tokeninfo id_token flow
-  const isJwt = typeof token === 'string' && token.split('.').length === 3;
+  const isJwt = typeof token === "string" && token.split(".").length === 3;
   if (isJwt) {
     const tokenInfoUrl = `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(token)}`;
     const info = await getJson(tokenInfoUrl);
@@ -540,7 +867,7 @@ async function resolveGoogleProfile(token) {
     if (info && info.email && info.sub) return info;
   }
   // Fallback to access_token userinfo flow
-  const userInfoUrl = 'https://www.googleapis.com/oauth2/v3/userinfo';
+  const userInfoUrl = "https://www.googleapis.com/oauth2/v3/userinfo";
   const info = await getJson(userInfoUrl, { Authorization: `Bearer ${token}` });
   return info;
 }
@@ -548,19 +875,23 @@ async function resolveGoogleProfile(token) {
 function getJson(url, headers = {}) {
   return new Promise((resolve) => {
     try {
-      const request = https.request(url, { method: 'GET', headers }, (response) => {
-        let data = '';
-        response.on('data', (chunk) => (data += chunk));
-        response.on('end', () => {
-          try {
-            const json = JSON.parse(data || '{}');
-            resolve(json);
-          } catch (_e) {
-            resolve(null);
-          }
-        });
-      });
-      request.on('error', () => resolve(null));
+      const request = https.request(
+        url,
+        { method: "GET", headers },
+        (response) => {
+          let data = "";
+          response.on("data", (chunk) => (data += chunk));
+          response.on("end", () => {
+            try {
+              const json = JSON.parse(data || "{}");
+              resolve(json);
+            } catch (_e) {
+              resolve(null);
+            }
+          });
+        },
+      );
+      request.on("error", () => resolve(null));
       request.end();
     } catch (_e) {
       resolve(null);
@@ -569,7 +900,7 @@ function getJson(url, headers = {}) {
 }
 
 function isStrongPassword(pw) {
-  if (typeof pw !== 'string' || pw.length < 8) return false;
+  if (typeof pw !== "string" || pw.length < 8) return false;
   if (!/[A-Z]/.test(pw)) return false;
   if (!/[0-9]/.test(pw)) return false;
   if (!/[^A-Za-z0-9]/.test(pw)) return false;
@@ -581,15 +912,34 @@ UserController.getClientProfile = async (req, res) => {
   try {
     const userId = req.body.userId;
     if (!userId) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "User ID is required",
+        });
     }
-    const user = await User.findById(userId).select('-password -verification_token -auth_token');
+    const user = await User.findById(userId).select(
+      "-password -verification_token -auth_token",
+    );
     if (!user || user.isDeleted) {
-      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+      return res
+        .status(404)
+        .json({ status_code: 404, status: false, message: "User not found" });
     }
-    const clientAgent = await HumanAgent.findOne({ userId, isClient: true }).select('-password');
+    const clientAgent = await HumanAgent.findOne({
+      userId,
+      isClient: true,
+    }).select("-password");
     if (!clientAgent) {
-      return res.status(404).json({ status_code: 404, status: false, message: 'Client profile not found' });
+      return res
+        .status(404)
+        .json({
+          status_code: 404,
+          status: false,
+          message: "Client profile not found",
+        });
     }
     return res.json({
       status_code: 200,
@@ -602,13 +952,19 @@ UserController.getClientProfile = async (req, res) => {
       },
       user: {
         email: user.email,
-        phone: user.phone || '',
-        provider: user.provider || 'local',
+        phone: user.phone || "",
+        provider: user.provider || "local",
       },
     });
   } catch (error) {
     commonHelper.logErrorToFile(error);
-    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to load profile' });
+    return res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "Failed to load profile",
+      });
   }
 };
 
@@ -618,31 +974,55 @@ UserController.updateClientProfileGeneral = async (req, res) => {
     const userId = req.body.userId;
     const { name, email, phone } = req.body;
     if (!userId) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "User ID is required",
+        });
     }
     const user = await User.findById(userId);
     if (!user || user.isDeleted) {
-      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+      return res
+        .status(404)
+        .json({ status_code: 404, status: false, message: "User not found" });
     }
     const clientAgent = await HumanAgent.findOne({ userId, isClient: true });
     if (!clientAgent) {
-      return res.status(404).json({ status_code: 404, status: false, message: 'Client profile not found' });
+      return res
+        .status(404)
+        .json({
+          status_code: 404,
+          status: false,
+          message: "Client profile not found",
+        });
     }
 
-    if (typeof name === 'string' && name.trim()) {
+    if (typeof name === "string" && name.trim()) {
       clientAgent.name = name.trim();
     }
 
     if (phone !== undefined) {
-      const p = phone === null || phone === '' ? undefined : String(phone).trim();
+      const p =
+        phone === null || phone === "" ? undefined : String(phone).trim();
       user.phone = p;
     }
 
     if (email !== undefined && String(email).trim()) {
       const normalized = String(email).toLowerCase().trim();
-      const emailTaken = await User.findOne({ email: normalized, _id: { $ne: userId } });
+      const emailTaken = await User.findOne({
+        email: normalized,
+        _id: { $ne: userId },
+      });
       if (emailTaken) {
-        return res.status(400).json({ status_code: 400, status: false, message: 'Email is already in use' });
+        return res
+          .status(400)
+          .json({
+            status_code: 400,
+            status: false,
+            message: "Email is already in use",
+          });
       }
       user.email = normalized;
       clientAgent.email = normalized;
@@ -660,17 +1040,27 @@ UserController.updateClientProfileGeneral = async (req, res) => {
       email: clientAgent.email,
       avatar: clientAgent.avatar,
       isClient: true,
-      phone: user.phone || '',
+      phone: user.phone || "",
     };
     if (clientAgent.userId) {
-      appEvents.emit("userEvent", clientAgent.userId.toString(), "client-profile-updated", profileSocketPayload);
+      appEvents.emit(
+        "userEvent",
+        clientAgent.userId.toString(),
+        "client-profile-updated",
+        profileSocketPayload,
+      );
     }
-    appEvents.emit("userEvent", clientAgent._id.toString(), "client-profile-updated", profileSocketPayload);
+    appEvents.emit(
+      "userEvent",
+      clientAgent._id.toString(),
+      "client-profile-updated",
+      profileSocketPayload,
+    );
 
     return res.json({
       status_code: 200,
       status: true,
-      message: 'Profile updated',
+      message: "Profile updated",
       clientAgent: {
         _id: clientAgent._id,
         name: clientAgent.name,
@@ -679,12 +1069,18 @@ UserController.updateClientProfileGeneral = async (req, res) => {
       },
       user: {
         email: user.email,
-        phone: user.phone || '',
+        phone: user.phone || "",
       },
     });
   } catch (error) {
     commonHelper.logErrorToFile(error);
-    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to update profile' });
+    return res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "Failed to update profile",
+      });
   }
 };
 
@@ -694,47 +1090,90 @@ UserController.updateClientPassword = async (req, res) => {
     const userId = req.body.userId;
     const { currentPassword, newPassword } = req.body;
     if (!userId) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "User ID is required",
+        });
     }
     if (!currentPassword || !newPassword) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'Current and new password are required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Current and new password are required",
+        });
     }
-    if (newPassword !== req.body.confirmPassword && req.body.confirmPassword !== undefined) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'New passwords do not match' });
+    if (
+      newPassword !== req.body.confirmPassword &&
+      req.body.confirmPassword !== undefined
+    ) {
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "New passwords do not match",
+        });
     }
     if (!isStrongPassword(newPassword)) {
       return res.status(400).json({
         status_code: 400,
         status: false,
-        message: 'Password must be at least 8 characters and include uppercase, number, and symbol',
+        message:
+          "Password must be at least 8 characters and include uppercase, number, and symbol",
       });
     }
     const user = await User.findById(userId);
     if (!user || user.isDeleted) {
-      return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
+      return res
+        .status(404)
+        .json({ status_code: 404, status: false, message: "User not found" });
     }
     const ok = await user.comparePassword(currentPassword);
     if (!ok) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'Current password is incorrect' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Current password is incorrect",
+        });
     }
     user.password = newPassword;
     await user.save();
-    return res.json({ status_code: 200, status: true, message: 'Password updated successfully' });
+    return res.json({
+      status_code: 200,
+      status: true,
+      message: "Password updated successfully",
+    });
   } catch (error) {
     commonHelper.logErrorToFile(error);
-    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to update password' });
+    return res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "Failed to update password",
+      });
   }
 };
 
-
-
 UserController.getClientByToken = async (req, res) => {
-
-  console.log("inside get client by token",req.params);
+  console.log("inside get client by token", req.params);
   try {
     const rawToken = req.params?.token;
     if (!rawToken) {
-      return res.status(400).json({ status_code: 400, status: false, message: "Token is required" });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Token is required",
+        });
     }
 
     const token = decodeURIComponent(String(rawToken));
@@ -743,12 +1182,16 @@ UserController.getClientByToken = async (req, res) => {
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
 
-      console.log("decoded data is :",decoded);
+      console.log("decoded data is :", decoded);
     } catch (err) {
       if (err?.name === "TokenExpiredError") {
-        return res.status(401).json({ status_code: 401, status: false, message: "Token expired" });
+        return res
+          .status(401)
+          .json({ status_code: 401, status: false, message: "Token expired" });
       }
-      return res.status(401).json({ status_code: 401, status: false, message: "Invalid token" });
+      return res
+        .status(401)
+        .json({ status_code: 401, status: false, message: "Invalid token" });
     }
 
     // Don't allow URL-based login with impersonation tokens.
@@ -758,12 +1201,20 @@ UserController.getClientByToken = async (req, res) => {
 
     const userId = decoded?._id;
     if (!userId) {
-      return res.status(401).json({ status_code: 401, status: false, message: "Invalid token payload" });
+      return res
+        .status(401)
+        .json({
+          status_code: 401,
+          status: false,
+          message: "Invalid token payload",
+        });
     }
 
     const user = await User.findById(userId);
     if (!user || user.isDeleted) {
-      return res.status(404).json({ status_code: 404, status: false, message: "User not found" });
+      return res
+        .status(404)
+        .json({ status_code: 404, status: false, message: "User not found" });
     }
 
     // Create a fresh app session token (so the caller doesn't need to keep using URL tokens).
@@ -771,11 +1222,25 @@ UserController.getClientByToken = async (req, res) => {
     user.auth_token = appToken;
     await user.save();
 
-    const agents = await Agent.find({ userId: user._id, isDeleted: false }).select('_id agentName isActive');
+    const agents = await Agent.find({
+      userId: user._id,
+      isDeleted: false,
+    }).select("_id agentName isActive");
 
     if (req.io) {
-      req.io.emit('user-logged-in', { userId: user._id });
+      req.io.emit("user-logged-in", { userId: user._id });
     }
+
+    const client = await Client.findOne({ userId: user._id })
+      .select("_id")
+      .lean();
+
+    setAuthTokenCookie(res, req, {
+      token: appToken,
+      platform: "web",
+      clientId: client?._id?.toString() || "default",
+      role: "client",
+    });
 
     return res.status(200).json({
       status_code: 200,
@@ -793,4 +1258,3 @@ UserController.getClientByToken = async (req, res) => {
 };
 
 module.exports = UserController;
-

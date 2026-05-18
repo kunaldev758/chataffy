@@ -6,7 +6,7 @@ const User = require("../models/User");
 const Client = require("../models/Client");
 const Agent = require("../models/Agent");
 const { provisionNewMerchantUser } = require("../services/CommerceMerchantProvisionService");
-const { getAuthCookieOptions } = require("../helpers/helper");
+const { setAuthTokenCookie } = require("../constants/clientCookie.js");
 const { sendWelcomeEmail } = require("../services/emailService");
 
 const router = express.Router();
@@ -177,9 +177,13 @@ router.get("/auth/load", async (req, res) => {
     userData.auth_token = token;
     await userData.save();
 
-    const cookieOptions = getAuthCookieOptions(req);
-    res.cookie("token", token, cookieOptions);
-    res.cookie("role", "client", cookieOptions);
+    setAuthTokenCookie(res, req, {
+      token,
+      platform: "bigcommerce",
+      clientId: store_hash,
+      role: "client",
+    });
+
     res.status(200).json({
       status: true,
       userId: userData._id,

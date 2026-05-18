@@ -3,17 +3,22 @@ const User = require('../models/User');
 const Agent = require('../models/Agent');
 const HumanAgent = require('../models/HumanAgent');
 const ImpersonationSession = require('../models/ImpersonationSession');
+const {
+  extractAuthToken,
+  setAuthTokenCookie,
+  resolvePlatform,
+  resolveClientId,
+} = require('../constants/clientCookie.js');
 
 const ONE_DAY_IN_SECONDS = 24 * 60 * 60;
-const SEVEN_DAYS_IN_MS = 7 * 24 * 60 * 60 * 1000;
+
 module.exports = async (req, res, next) => {
-  // Get the token from the request headers
-  const rawAuth = req.header('Authorization');
-  const token = rawAuth?.replace(/^Bearer\s+/i, '').trim();
-  // Check if a token was provided
+  const token = extractAuthToken(req);
+
   if (!token) {
     return res.status(401).json({ status_code: 401, error: 'Authentication failed. No token provided.' });
   }
+
   try {
     jwt.verify(token, process.env.JWT_SECRET_KEY, async (err, decoded) => {
     if (err || (!decoded?._id && !decoded?.id)) {
@@ -25,7 +30,6 @@ module.exports = async (req, res, next) => {
       return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
       }
     }
-    // Impersonation tokens: short-lived + validated against server-side session store.
     if (decoded?.purpose === 'impersonation') {
       if (!decoded?._id || !decoded?.jti) {
         return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
@@ -52,10 +56,7 @@ module.exports = async (req, res, next) => {
     if(user?.isDeleted){
       return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
     }
-    // const agentId = decoded.id;
-    // const agent = await Agent.findById(agentId);
     const humanAgent = decoded?.id ? await HumanAgent.findById(decoded.id) : null;
-    // console.log("testing here", user);
     if(user && user.auth_token == token)
     {
       req.body.userId = userId;
@@ -94,11 +95,13 @@ module.exports = async (req, res, next) => {
 
       if (refreshedToken) {
         console.log("refreshing Token");
-        res.cookie('token', refreshedToken, {
-          httpOnly: true,
-          secure: process.env.ENVIRONMENT === 'production',
-          sameSite: 'lax',
-          maxAge: SEVEN_DAYS_IN_MS,
+        const platform = resolvePlatform(req);
+        const clientId = resolveClientId(req, { platform });
+        setAuthTokenCookie(res, req, {
+          token: refreshedToken,
+          platform,
+          clientId,
+          role: humanAgent ? 'agent' : 'client',
         });
       }
     }
