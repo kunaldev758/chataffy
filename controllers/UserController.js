@@ -1257,4 +1257,75 @@ UserController.getClientByToken = async (req, res) => {
   }
 };
 
+
+
+// platform redirection Based Login ----> 
+
+UserController.platformRedirectionLogin = async (req, res) => {
+
+  try{
+
+    const { clientId } = req.params;
+
+    if(!clientId){
+      return res.status(400).json({ message: "Client ID is required" });
+    }
+
+    const clientData = await Client.findById(clientId);
+
+    if(!clientData){
+      return res.status(404).json({ message: "Client not found" });
+    }
+    const user = await User.findById(clientData.userId);
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ message: "User not found" });
+    } 
+
+    // Generate token
+    const token = user.generateAuthToken();
+
+    // Optional: store token in DB
+    user.auth_token = token;
+    await user.save();
+
+    // Fetch agents
+    const agents = await Agent.find({
+      userId: user._id,
+      isDeleted: false,
+    }).select("_id agentName isActive");
+
+    // Socket event
+    if (req.io) {
+      req.io.emit("user-logged-in", {
+        userId: user._id,
+      });
+    }
+
+    const client = await Client.findOne({ userId: user._id })
+      .select("_id")
+      .lean();
+
+    setAuthTokenCookie(res, req, {
+      token,
+      platform: "web",
+      clientId: client?._id?.toString() || "default",
+      role: "client",
+    });
+
+    return res.status(200).json({
+      status_code: 200,
+      status: true,
+      token,
+      userId: user._id,
+      isOnboarded: user.isOnboarded,
+      agents,
+      message: "Login successful",
+    });
+
+  }catch(error){
+
+    console.error("Error in platform redirection login:", error);
+    res.status(500).json({ message: "Error in platform redirection login" });
+  }
+}
 module.exports = UserController;
