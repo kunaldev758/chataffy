@@ -167,33 +167,80 @@ async function revokeSessionByToken(userId, rawToken) {
       { sessionId: decoded.sid, userId },
       { isActive: false },
     );
-    return;
+  }
+}
+
+/**
+ * Prefer tokens whose UserSession.platform matches (e.g. logout only the web redirect session).
+ */
+async function orderAuthTokensByPlatform(tokens, platform) {
+  if (!platform || tokens.length <= 1) {
+    return tokens;
   }
 
-  await UserSession.updateMany({ userId }, { isActive: false });
+  const ranked = await Promise.all(
+    tokens.map(async (token) => {
+      let decoded;
+      try {
+        decoded = jwt.decode(token);
+      } catch {
+        return { token, rank: 2 };
+      }
+
+      if (!decoded?.sid) {
+        return { token, rank: platform === "web" ? 0 : 2 };
+      }
+
+      const session = await UserSession.findOne({ sessionId: decoded.sid })
+        .select("platform")
+        .lean();
+
+      return {
+        token,
+        rank: session?.platform === platform ? 0 : 1,
+      };
+    }),
+  );
+
+  ranked.sort((a, b) => a.rank - b.rank);
+  return ranked.map((entry) => entry.token);
 }
 
 async function revokeSessionFromRequest(user, req, res) {
-  const token = extractAuthToken(req);
-  let decoded;
-  try {
-    decoded = jwt.decode(token);
-  } catch {
-    decoded = null;
+  const token = req.authToken || extractAuthToken(req);
+  const session = req.session;
+
+  if (session?.sessionId) {
+    await UserSession.updateOne(
+      { sessionId: session.sessionId, userId: user._id },
+      { isActive: false },
+    );
+  } else {
+    await revokeSessionByToken(user._id, token);
   }
 
-  await revokeSessionByToken(user._id, token);
+  if (res) {
+    let decoded;
+    try {
+      decoded = jwt.decode(token);
+    } catch {
+      decoded = null;
+    }
 
-  if (res && decoded?.sid) {
-    const session = await UserSession.findOne({
-      sessionId: decoded.sid,
-      userId: user._id,
-    }).lean();
+    const sessionId = session?.sessionId || decoded?.sid;
+    const dbSession =
+      session ||
+      (sessionId
+        ? await UserSession.findOne({
+            sessionId,
+            userId: user._id,
+          }).lean()
+        : null);
 
     clearSessionAuthCookie(res, req, {
-      platform: session?.platform || resolvePlatform(req),
-      clientId: session?.clientId || resolveClientId(req),
-      sessionId: decoded.sid,
+      platform: dbSession?.platform || resolvePlatform(req),
+      clientId: dbSession?.clientId || resolveClientId(req),
+      sessionId,
     });
   }
 }
@@ -222,6 +269,7 @@ module.exports = {
   validateUserSession,
   refreshSessionToken,
   revokeSessionByToken,
+  orderAuthTokensByPlatform,
   revokeSessionFromRequest,
   revokeAllUserSessions,
   listActiveSessions,

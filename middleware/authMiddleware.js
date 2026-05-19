@@ -12,15 +12,30 @@ const {
 const {
   validateUserSession,
   refreshSessionToken,
+  orderAuthTokensByPlatform,
 } = require('../services/userSessionService.js');
 
 const verifyJwt = util.promisify(jwt.verify);
 const ONE_DAY_IN_SECONDS = 24 * 60 * 60;
 
+function getPreferredAuthPlatform(req) {
+  return (
+    req?.headers?.['x-chataffy-platform'] ||
+    req?.body?.platform ||
+    req?.query?.platform ||
+    null
+  );
+}
+
 async function authenticateRequest(req, res) {
-  const tokens = extractAuthTokens(req);
+  let tokens = extractAuthTokens(req);
   if (!tokens.length) {
     return { ok: false, status: 401, error: 'Authentication failed. No token provided.' };
+  }
+
+  const preferredPlatform = getPreferredAuthPlatform(req);
+  if (preferredPlatform) {
+    tokens = await orderAuthTokensByPlatform(tokens, preferredPlatform);
   }
 
   let lastError = null;

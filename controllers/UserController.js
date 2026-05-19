@@ -476,9 +476,15 @@ UserController.logoutUser = async (req, res) => {
     const userId = req.body.userId;
     const user = await User.findById(userId);
     if (user) {
+      const token = req.authToken;
       await revokeSessionFromRequest(user, req, res);
-      user.auth_token = "";
-      await user.save();
+
+      // Only clear legacy auth_token when logging out that specific legacy token
+      if (!req.session && token && user.auth_token === token) {
+        user.auth_token = "";
+        await user.save();
+      }
+
       res.json({
         status_code: 200,
         status: true,
@@ -1256,7 +1262,7 @@ UserController.platformRedirectionLogin = async (req, res) => {
       user,
       req,
       res,
-      platform: resolvePlatform(req),
+      platform: "web",
       role: "client",
     });
 
