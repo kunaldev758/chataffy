@@ -9,7 +9,7 @@ const Agent = require("../models/Agent");
 const {
   provisionNewMerchantUser,
 } = require("../services/CommerceMerchantProvisionService");
-const { setAuthTokenCookie } = require("../constants/clientCookie.js");
+const { establishUserSession } = require("../services/userSessionService.js");
 const { sendWelcomeEmail } = require("../services/emailService");
 
 const router = express.Router();
@@ -336,12 +336,10 @@ router.get("/auth/load", async (req, res) => {
       req.io.emit("user-logged-in", { userId: userData._id });
     }
 
-    const token = userData.generateAuthToken();
-    userData.auth_token = token;
-    await userData.save();
-
-    setAuthTokenCookie(res, req, {
-      token,
+    await establishUserSession({
+      user: userData,
+      req,
+      res,
       platform: "shopify",
       clientId: shopDomain,
       role: "client",

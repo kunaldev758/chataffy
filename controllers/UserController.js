@@ -18,10 +18,11 @@ const UserController = {};
 const https = require("https");
 const { saveChatTranscriptSettings } = require("./ChatTranscriptController.js");
 
+const { resolvePlatform } = require("../constants/clientCookie.js");
 const {
-  setAuthTokenCookie,
-  clearAuthTokenCookie,
-} = require("../constants/clientCookie.js");
+  establishUserSession,
+  revokeSessionFromRequest,
+} = require("../services/userSessionService.js");
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
@@ -232,11 +233,14 @@ UserController.verifyEmail = async (req, res) => {
       isDeleted: false,
     }).select("_id agentName isActive");
 
-    // Already verified: still return a session so reopening the link (e.g. new tab) signs the user in
     if (user.email_verified) {
-      const authToken = user.generateAuthToken();
-      user.auth_token = authToken;
-      await user.save();
+      const { token: authToken } = await establishUserSession({
+        user,
+        req,
+        res,
+        platform: "web",
+        role: "client",
+      });
       if (req.io) {
         req.io.emit("user-logged-in", { userId: user._id });
       }
@@ -252,9 +256,15 @@ UserController.verifyEmail = async (req, res) => {
     }
 
     user.email_verified = true;
-    const token = user.generateAuthToken();
-    user.auth_token = token;
     await user.save();
+
+    const { token } = await establishUserSession({
+      user,
+      req,
+      res,
+      platform: "web",
+      role: "client",
+    });
 
     if (req.io) {
       req.io.emit("user-logged-in", { userId: user._id });
@@ -368,7 +378,6 @@ UserController.loginUser = async (req, res) => {
       });
     }
 
-    // Check email verification
     if (!user.email_verified) {
       return res.status(403).json({
         status_code: 403,
@@ -377,36 +386,24 @@ UserController.loginUser = async (req, res) => {
       });
     }
 
-    // Generate token
-    const token = user.generateAuthToken();
+    const { token } = await establishUserSession({
+      user,
+      req,
+      res,
+      platform: "web",
+      role: "client",
+    });
 
-    // Optional: store token in DB
-    user.auth_token = token;
-    await user.save();
-
-    // Fetch agents
     const agents = await Agent.find({
       userId: user._id,
       isDeleted: false,
     }).select("_id agentName isActive");
 
-    // Socket event
     if (req.io) {
       req.io.emit("user-logged-in", {
         userId: user._id,
       });
     }
-
-    const client = await Client.findOne({ userId: user._id })
-      .select("_id")
-      .lean();
-
-    setAuthTokenCookie(res, req, {
-      token,
-      platform: "web",
-      clientId: client?._id?.toString() || "default",
-      role: "client",
-    });
 
     return res.status(200).json({
       status_code: 200,
@@ -479,9 +476,9 @@ UserController.logoutUser = async (req, res) => {
     const userId = req.body.userId;
     const user = await User.findById(userId);
     if (user) {
+      await revokeSessionFromRequest(user, req, res);
       user.auth_token = "";
       await user.save();
-      clearAuthTokenCookie(res, req);
       res.json({
         status_code: 200,
         status: true,
@@ -809,12 +806,14 @@ UserController.googleOAuth = async (req, res) => {
       isNewUser = true;
     }
 
-    // Generate token for both login and signup
-    const appToken = user.generateAuthToken();
-    user.auth_token = appToken;
-    await user.save();
+    const { token: appToken } = await establishUserSession({
+      user,
+      req,
+      res,
+      platform: "web",
+      role: "client",
+    });
 
-    // Fetch all AI agents for this user
     const agents = await Agent.find({
       userId: user._id,
       isDeleted: false,
@@ -823,17 +822,6 @@ UserController.googleOAuth = async (req, res) => {
     if (req.io) {
       req.io.emit("user-logged-in", { userId: user._id });
     }
-
-    const client = await Client.findOne({ userId: user._id })
-      .select("_id")
-      .lean();
-
-    setAuthTokenCookie(res, req, {
-      token: appToken,
-      platform: "web",
-      clientId: client?._id?.toString() || "default",
-      role: "client",
-    });
 
     return res.status(200).json({
       status_code: 200,
@@ -1217,10 +1205,13 @@ UserController.getClientByToken = async (req, res) => {
         .json({ status_code: 404, status: false, message: "User not found" });
     }
 
-    // Create a fresh app session token (so the caller doesn't need to keep using URL tokens).
-    const appToken = user.generateAuthToken();
-    user.auth_token = appToken;
-    await user.save();
+    const { token: appToken } = await establishUserSession({
+      user,
+      req,
+      res,
+      platform: "web",
+      role: "client",
+    });
 
     const agents = await Agent.find({
       userId: user._id,
@@ -1230,17 +1221,6 @@ UserController.getClientByToken = async (req, res) => {
     if (req.io) {
       req.io.emit("user-logged-in", { userId: user._id });
     }
-
-    const client = await Client.findOne({ userId: user._id })
-      .select("_id")
-      .lean();
-
-    setAuthTokenCookie(res, req, {
-      token: appToken,
-      platform: "web",
-      clientId: client?._id?.toString() || "default",
-      role: "client",
-    });
 
     return res.status(200).json({
       status_code: 200,
@@ -1272,36 +1252,24 @@ UserController.platformRedirectionLogin = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     } 
 
-    // Generate token
-    const token = user.generateAuthToken();
+    const { token } = await establishUserSession({
+      user,
+      req,
+      res,
+      platform: resolvePlatform(req),
+      role: "client",
+    });
 
-    // Optional: store token in DB
-    user.auth_token = token;
-    await user.save();
-
-    // Fetch agents
     const agents = await Agent.find({
       userId: user._id,
       isDeleted: false,
     }).select("_id agentName isActive");
 
-    // Socket event
     if (req.io) {
       req.io.emit("user-logged-in", {
         userId: user._id,
       });
     }
-
-    const client = await Client.findOne({ userId: user._id })
-      .select("_id")
-      .lean();
-
-    setAuthTokenCookie(res, req, {
-      token,
-      platform: "web",
-      clientId: client?._id?.toString() || "default",
-      role: "client",
-    });
 
     return res.status(200).json({
       status_code: 200,

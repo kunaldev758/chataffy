@@ -32,7 +32,7 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 const corsAllowList = (process.env.CORS_ORIGINS ||
-  "http://localhost:5173,http://127.0.0.1:5173,http://localhost:9001")
+  "http://localhost:5173,http://127.0.0.1:5173,http://localhost:9001,https://chat-frontend.shares.zrok.io")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);

@@ -70,19 +70,19 @@ userSchema.pre("save", async function (next) {
   }
 });
 
-// Generate an authentication token
-userSchema.methods.generateAuthToken = function () {
-  const token = jwt.sign(
-    {
-      _id: this._id,
-      email: this.email,
-      role: this.role,
-    },
-    process.env.JWT_SECRET_KEY,
-    {
-      expiresIn: "7 days", // You can customize the expiration time
-    }
-  );
+// Generate an authentication token (optional sessionId for multi-platform sessions)
+userSchema.methods.generateAuthToken = function (sessionId) {
+  const payload = {
+    _id: this._id,
+    email: this.email,
+    role: this.role,
+  };
+  if (sessionId) {
+    payload.sid = sessionId;
+  }
+  const token = jwt.sign(payload, process.env.JWT_SECRET_KEY, {
+    expiresIn: "7 days",
+  });
   return token;
 };
 

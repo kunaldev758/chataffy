@@ -60,9 +60,13 @@ function getBaseTokenKey(platform = "web") {
 function getTokenCookieName({
   platform = "web",
   clientId = "default",
+  sessionId,
 } = {}) {
   const baseKey = getBaseTokenKey(platform);
   const safeClientId = sanitizeClientId(clientId);
+  if (sessionId) {
+    return `${baseKey}_${safeClientId}_${sanitizeClientId(sessionId)}`;
+  }
   return `${baseKey}_${safeClientId}`;
 }
 
@@ -177,39 +181,41 @@ function listAuthTokenCookieNames(req) {
 }
 
 /**
- * Read JWT from Authorization header or platform-scoped cookie.
+ * Collect candidate JWTs (Authorization + all auth cookies).
+ * Supports multiple concurrent sessions on the same platform.
  */
-function extractAuthToken(req) {
+function extractAuthTokens(req) {
+  const tokens = [];
   const rawAuth = req?.header?.("Authorization") ?? req?.headers?.authorization;
   const bearer = rawAuth?.replace(/^Bearer\s+/i, "").trim();
   if (bearer) {
-    return bearer;
+    tokens.push(bearer);
   }
 
-  const platform = resolvePlatform(req);
-  const clientId = resolveClientId(req, { platform });
-  const named = req?.cookies?.[getTokenCookieName({ platform, clientId })];
-  if (named) {
-    return named;
+  const cookies = req?.cookies || {};
+  if (cookies[LEGACY_TOKEN_COOKIE]) {
+    tokens.push(cookies[LEGACY_TOKEN_COOKIE]);
   }
 
-  if (req?.cookies?.[LEGACY_TOKEN_COOKIE]) {
-    return req.cookies[LEGACY_TOKEN_COOKIE];
-  }
-
-  for (const [name, value] of Object.entries(req?.cookies || {})) {
+  for (const [name, value] of Object.entries(cookies)) {
     if (value && isAuthTokenCookieName(name)) {
-      return value;
+      tokens.push(value);
     }
   }
 
-  return null;
+  return [...new Set(tokens)];
+}
+
+/** First candidate token (backward compatible). */
+function extractAuthToken(req) {
+  const tokens = extractAuthTokens(req);
+  return tokens[0] || null;
 }
 
 function setAuthTokenCookie(
   res,
   req,
-  { token, platform = "web", clientId, role } = {},
+  { token, platform = "web", clientId, sessionId, role } = {},
 ) {
   const resolvedPlatform = platform || resolvePlatform(req);
   const resolvedClientId = resolveClientId(req, {
@@ -220,10 +226,10 @@ function setAuthTokenCookie(
   const cookieName = getTokenCookieName({
     platform: resolvedPlatform,
     clientId: resolvedClientId,
+    sessionId,
   });
 
   res.cookie(cookieName, token, options);
-  res.cookie(LEGACY_TOKEN_COOKIE, token, options);
 
   if (role) {
     res.cookie(ROLE_COOKIE, role, options);
@@ -232,24 +238,41 @@ function setAuthTokenCookie(
   return cookieName;
 }
 
-function clearAuthTokenCookie(
+/** Clear only the current session cookie (other sessions stay logged in). */
+function clearSessionAuthCookie(
   res,
   req,
-  { platform, clientId } = {},
+  { platform, clientId, sessionId } = {},
 ) {
   const clearOptions = getClearCookieOptions(req);
-  const names = new Set(listAuthTokenCookieNames(req));
+  const resolvedPlatform = platform || resolvePlatform(req);
+  const resolvedClientId = resolveClientId(req, { platform: resolvedPlatform, clientId });
 
-  if (platform || clientId) {
-    names.add(
+  if (sessionId) {
+    res.clearCookie(
       getTokenCookieName({
-        platform: platform || resolvePlatform(req),
-        clientId: resolveClientId(req, { platform, clientId }),
+        platform: resolvedPlatform,
+        clientId: resolvedClientId,
+        sessionId,
       }),
+      clearOptions,
     );
   }
 
-  for (const name of names) {
+  res.clearCookie(
+    getTokenCookieName({ platform: resolvedPlatform, clientId: resolvedClientId }),
+    clearOptions,
+  );
+  res.clearCookie(LEGACY_TOKEN_COOKIE, clearOptions);
+}
+
+function clearAuthTokenCookie(res, req, opts = {}) {
+  if (opts.sessionId) {
+    return clearSessionAuthCookie(res, req, opts);
+  }
+
+  const clearOptions = getClearCookieOptions(req);
+  for (const name of listAuthTokenCookieNames(req)) {
     res.clearCookie(name, clearOptions);
   }
 }
@@ -267,7 +290,9 @@ module.exports = {
   getCookieOptions,
   getClearCookieOptions,
   extractAuthToken,
+  extractAuthTokens,
   setAuthTokenCookie,
+  clearSessionAuthCookie,
   clearAuthTokenCookie,
   listAuthTokenCookieNames,
 };

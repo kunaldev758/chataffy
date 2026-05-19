@@ -6,6 +6,7 @@ const Visitor = require("../models/Visitor");
 const VisitorController = require("../controllers/VisitorController");
 const Agent = require('../models/Agent');
 const HumanAgent = require('../models/HumanAgent');
+const { validateUserSession } = require('../services/userSessionService.js');
 
 const verifyToken = (token) => {
   return new Promise((resolve, reject) => {
@@ -45,9 +46,13 @@ const myMiddleware = async (socket, next) => {
         socket.type = "client";
         socket.agentId = agentId;
         socket.humanAgentId = humanAgent.id;
-        const user = await User.findById(decoded._id);
-        if (!user || user.auth_token !== token) {
-          throw new Error("User not found or token mismatch.");
+        const user = await User.findById(decoded._id || humanAgent.userId);
+        if (!user) {
+          throw new Error("User not found.");
+        }
+        const { valid } = await validateUserSession(user, decoded, token);
+        if (!valid) {
+          throw new Error("Invalid or expired session.");
         }
       } else {
         socket.userId = humanAgent.userId;
