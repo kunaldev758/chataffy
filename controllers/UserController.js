@@ -18,10 +18,11 @@ const UserController = {};
 const https = require("https");
 const { saveChatTranscriptSettings } = require("./ChatTranscriptController.js");
 
-const { resolvePlatform } = require("../constants/clientCookie.js");
+const { resolvePlatform, extractAuthToken } = require("../constants/clientCookie.js");
 const {
   establishUserSession,
   revokeSessionFromRequest,
+  refreshFromExpiredJwt,
 } = require("../services/userSessionService.js");
 
 const transporter = nodemailer.createTransport(
@@ -504,6 +505,61 @@ UserController.logoutUser = async (req, res) => {
     res
       .status(500)
       .json({ status_code: 500, status: false, message: "Logout failed" });
+  }
+};
+
+/** Public: re-issue JWT when expired but DB session is still active (cookie/body token). */
+UserController.refreshSession = async (req, res) => {
+  try {
+    const raw = extractAuthToken(req);
+    if (!raw) {
+      return res.status(401).json({
+        status_code: 401,
+        status: false,
+        error: "No token provided.",
+      });
+    }
+
+    try {
+      jwt.verify(raw, process.env.JWT_SECRET_KEY);
+      return res.status(200).json({
+        status_code: 200,
+        status: true,
+        refreshed: false,
+        message: "Token still valid.",
+      });
+    } catch (e) {
+      if (e.name !== "TokenExpiredError") {
+        return res.status(401).json({
+          status_code: 401,
+          status: false,
+          error: "Invalid token.",
+        });
+      }
+    }
+
+    const result = await refreshFromExpiredJwt(raw, req, res);
+    if (!result) {
+      return res.status(401).json({
+        status_code: 401,
+        status: false,
+        error: "Session refresh failed.",
+      });
+    }
+
+    return res.status(200).json({
+      status_code: 200,
+      status: true,
+      refreshed: true,
+      message: "Session refreshed.",
+    });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({
+      status_code: 500,
+      status: false,
+      message: "Session refresh failed.",
+    });
   }
 };
 

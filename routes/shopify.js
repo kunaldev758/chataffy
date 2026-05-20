@@ -12,6 +12,7 @@ const {
 const { establishUserSession } = require("../services/userSessionService.js");
 const { sendWelcomeEmail } = require("../services/emailService");
 const { getAuthCookieOptions } = require("../helpers/helper");
+const { consumeOAuthCodeOnce } = require("../helpers/oauthReplayGuard.js");
 
 const router = express.Router();
 
@@ -34,18 +35,13 @@ function verifyShopifyQueryHmac(query, secret) {
     .createHmac("sha256", secret)
     .update(message)
     .digest("hex");
-    console.log("generated ->>>>>>>> ", generated);
-    console.log("query.hmac ->>>>>>>> ", query.hmac);
-    
+
   try {
     const a = Buffer.from(generated, "utf8");
     const b = Buffer.from(String(query.hmac), "utf8");
     if (a.length !== b.length) return false;
-    console.log("a ->>>>>>>> ", generated);
-    console.log("returning true from QueryHmac");
     return crypto.timingSafeEqual(a, b);
   } catch {
-    console.log("returning false from QueryHmac");
     return false;
   }
 }
@@ -137,12 +133,21 @@ router.get("/auth/callback", async (req, res) => {
   if (!verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
     return res.status(403).send("Invalid HMAC");
   }
-  const cookieState = req.cookies?.shopify_oauth_state;
   if (!state) {
     return res.status(403).send("Missing OAuth state");
   }
-  if (cookieState && state !== cookieState) {
+  const relaxOauthState = process.env.OAUTH_RELAX_STATE === "true";
+  const cookieState = req.cookies?.shopify_oauth_state;
+  if (!relaxOauthState) {
+    if (!cookieState || state !== cookieState) {
+      return res.status(403).send("OAuth state mismatch");
+    }
+  } else if (cookieState && state !== cookieState) {
     return res.status(403).send("OAuth state mismatch");
+  }
+
+  if (!consumeOAuthCodeOnce(String(code))) {
+    return res.status(403).json({ message: "Authorization code already used or invalid." });
   }
 
   try {

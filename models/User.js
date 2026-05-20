@@ -71,15 +71,33 @@ userSchema.pre("save", async function (next) {
 });
 
 // Generate an authentication token (optional sessionId for multi-platform sessions)
-userSchema.methods.generateAuthToken = function (sessionId) {
+userSchema.methods.generateAuthToken = function (opts) {
+  const sessionId =
+    typeof opts === "string" || typeof opts === "number" ? String(opts) : opts?.sessionId;
+  const platform = typeof opts === "object" ? opts?.platform : undefined;
+  const storeHash = typeof opts === "object" ? opts?.storeHash : undefined;
+  const shopDomain = typeof opts === "object" ? opts?.shopDomain : undefined;
+  const clientId = typeof opts === "object" ? opts?.clientId : undefined;
+
   const payload = {
+    // Backward compatible keys
     _id: this._id,
     email: this.email,
     role: this.role,
+
+    // New explicit keys
+    userId: this._id,
   };
+
   if (sessionId) {
-    payload.sid = sessionId;
+    payload.sid = sessionId; // legacy
+    payload.sessionId = sessionId;
   }
+  if (platform) payload.platform = platform;
+  if (storeHash) payload.storeHash = storeHash;
+  if (shopDomain) payload.shopDomain = shopDomain;
+  if (clientId) payload.clientId = clientId;
+
   const token = jwt.sign(payload, process.env.JWT_SECRET_KEY, {
     expiresIn: "7 days",
   });

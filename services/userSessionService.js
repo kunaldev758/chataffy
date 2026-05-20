@@ -1,17 +1,22 @@
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
+const util = require("util");
 const UserSession = require("../models/UserSession.model.js");
 const Client = require("../models/Client");
+const User = require("../models/User.js");
 const {
   resolvePlatform,
   resolveClientId,
   sanitizeClientId,
+  getPlatformCookieName,
   setAuthTokenCookie,
   extractAuthToken,
   clearSessionAuthCookie,
 } = require("../constants/clientCookie.js");
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const verifyJwt = util.promisify(jwt.verify);
 
 function hashToken(token) {
   return crypto.createHash("sha256").update(String(token)).digest("hex");
@@ -48,7 +53,13 @@ async function createSessionAndToken(
         );
 
   const sessionId = generateSessionId();
-  const token = user.generateAuthToken(sessionId);
+  const token = user.generateAuthToken({
+    sessionId,
+    platform: resolvedPlatform,
+    clientId: resolvedClientId,
+    storeHash: resolvedPlatform === "bigcommerce" ? resolvedClientId : undefined,
+    shopDomain: resolvedPlatform === "shopify" ? resolvedClientId : undefined,
+  });
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
 
   await UserSession.create({
@@ -70,8 +81,13 @@ async function createSessionAndToken(
   };
 }
 
+function getSessionIdFromDecoded(decoded) {
+  return decoded?.sessionId || decoded?.sid || null;
+}
+
 /**
  * Login helper: create session, set cookies, return token metadata.
+ * Reuses an existing valid session when cookie/session matches the same user+platform+store.
  */
 async function establishUserSession({
   user,
@@ -81,6 +97,64 @@ async function establishUserSession({
   clientId,
   role = "client",
 }) {
+  // 1) Try reuse for same browser + same user + same platform/store
+  if (req && res) {
+    const resolvedPlatform = platform || resolvePlatform(req);
+    const resolvedClientId =
+      resolvedPlatform === "web"
+        ? await resolveWebClientId(user._id, clientId ?? resolveClientId(req, { platform: resolvedPlatform }))
+        : sanitizeClientId(clientId ?? resolveClientId(req, { platform: resolvedPlatform }));
+
+    const cookieName = getPlatformCookieName({
+      platform: resolvedPlatform,
+      clientId: resolvedClientId,
+      shopDomain: resolvedPlatform === "shopify" ? resolvedClientId : undefined,
+      storeHash: resolvedPlatform === "bigcommerce" ? resolvedClientId : undefined,
+    });
+    const rawToken = req?.cookies?.[cookieName] || req?.cookies?.token || null;
+
+    if (rawToken) {
+      try {
+        const decoded = await verifyJwt(rawToken, process.env.JWT_SECRET_KEY);
+        const decodedUserId = decoded?._id || decoded?.userId;
+        if (String(decodedUserId) === String(user._id)) {
+          const sid = getSessionIdFromDecoded(decoded);
+          const existing = sid ? await findActiveSession(sid, user._id) : null;
+          if (existing && existing.tokenHash === hashToken(rawToken)) {
+            // Reuse: do not mint a new JWT, do not create a new DB session, do not rewrite cookie.
+            return {
+              token: rawToken,
+              sessionId: existing.sessionId,
+              platform: existing.platform,
+              clientId: existing.clientId,
+              expiresAt: existing.expiresAt,
+              reused: true,
+            };
+          }
+        } else if (decodedUserId) {
+          // Different user in same browser cookie: revoke + clear and create new.
+          const sid = getSessionIdFromDecoded(decoded);
+          if (sid) {
+            await UserSession.updateOne(
+              { sessionId: sid, userId: decodedUserId },
+              { isActive: false },
+            );
+          }
+          clearSessionAuthCookie(res, req, {
+            platform: resolvedPlatform,
+            clientId: resolvedClientId,
+          });
+        }
+      } catch {
+        // Invalid token: clear cookie and fall through to create new.
+        clearSessionAuthCookie(res, req, {
+          platform: platform || resolvePlatform(req),
+          clientId: clientId || resolveClientId(req),
+        });
+      }
+    }
+  }
+
   const session = await createSessionAndToken(user, { platform, clientId, req });
 
   if (res) {
@@ -109,16 +183,21 @@ async function findActiveSession(sessionId, userId) {
   });
 }
 
+
+
 /**
  * Validate JWT against UserSession (supports legacy auth_token fallback).
  */
+
+
 async function validateUserSession(user, decoded, rawToken) {
   if (!user || !rawToken) {
     return { valid: false, session: null };
   }
 
-  if (decoded?.sid) {
-    const session = await findActiveSession(decoded.sid, user._id);
+  const sid = getSessionIdFromDecoded(decoded);
+  if (sid) {
+    const session = await findActiveSession(sid, user._id);
     if (!session) {
       return { valid: false, session: null };
     }
@@ -141,13 +220,88 @@ async function refreshSessionToken(user, session) {
     return user.generateAuthToken();
   }
 
-  const token = user.generateAuthToken(sessionId);
+  const token = user.generateAuthToken({
+    sessionId,
+    platform: session.platform,
+    clientId: session.clientId,
+    storeHash: session.platform === "bigcommerce" ? session.clientId : undefined,
+    shopDomain: session.platform === "shopify" ? session.clientId : undefined,
+  });
   session.tokenHash = hashToken(token);
   session.expiresAt = new Date(Date.now() + SESSION_TTL_MS);
   session.isActive = true;
   await session.save();
 
   return token;
+}
+
+/**
+ * JWT clock expired but DB session still active: verify signature (ignore exp),
+ * validate session + token hash, rotate JWT and set cookie.
+ */
+async function refreshFromExpiredJwt(rawToken, req, res) {
+  if (!rawToken || !process.env.JWT_SECRET_KEY) {
+    return null;
+  }
+
+  let decoded;
+  try {
+    decoded = await verifyJwt(rawToken, process.env.JWT_SECRET_KEY, {
+      ignoreExpiration: true,
+    });
+  } catch {
+    return null;
+  }
+
+  if (
+    decoded?.purpose === "impersonation" ||
+    decoded?.purpose === "email_verification"
+  ) {
+    return null;
+  }
+
+  const userId = decoded._id;
+  const sid = getSessionIdFromDecoded(decoded);
+  if (!userId || !sid) {
+    return null;
+  }
+
+  const user = await User.findById(userId);
+  if (!user || user.isDeleted) {
+    return null;
+  }
+
+  const { valid, session, legacy } = await validateUserSession(
+    user,
+    decoded,
+    rawToken,
+  );
+  if (!valid || legacy || !session) {
+    return null;
+  }
+
+  const refreshedToken = await refreshSessionToken(user, session);
+  let freshDecoded;
+  try {
+    freshDecoded = await verifyJwt(refreshedToken, process.env.JWT_SECRET_KEY);
+  } catch {
+    return null;
+  }
+
+  setAuthTokenCookie(res, req, {
+    token: refreshedToken,
+    platform: session.platform,
+    clientId: session.clientId,
+    sessionId: session.sessionId,
+    role: "client",
+  });
+
+  return {
+    user,
+    session,
+    token: refreshedToken,
+    decoded: freshDecoded,
+  };
 }
 
 async function revokeSessionByToken(userId, rawToken) {
@@ -268,6 +422,7 @@ module.exports = {
   findActiveSession,
   validateUserSession,
   refreshSessionToken,
+  refreshFromExpiredJwt,
   revokeSessionByToken,
   orderAuthTokensByPlatform,
   revokeSessionFromRequest,

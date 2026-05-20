@@ -8,11 +8,13 @@ const {
   setAuthTokenCookie,
   resolvePlatform,
   resolveClientId,
+  getRequestSessionPlatform,
 } = require('../constants/clientCookie.js');
 const {
   validateUserSession,
   refreshSessionToken,
   orderAuthTokensByPlatform,
+  refreshFromExpiredJwt,
 } = require('../services/userSessionService.js');
 
 const verifyJwt = util.promisify(jwt.verify);
@@ -27,6 +29,16 @@ function getPreferredAuthPlatform(req) {
   );
 }
 
+async function applyUserSessionSuccess(req, res, user, session, activeToken, decoded) {
+  req.body.userId = user._id;
+  req.session = session;
+  req.authToken = activeToken;
+
+  // IMPORTANT: reuse sessions without minting new JWTs on reload/redirect.
+  // Token rotation happens only via explicit refresh endpoint or expired-token refresh.
+  return { ok: true };
+}
+
 async function authenticateRequest(req, res) {
   let tokens = extractAuthTokens(req);
   if (!tokens.length) {
@@ -38,11 +50,45 @@ async function authenticateRequest(req, res) {
     tokens = await orderAuthTokensByPlatform(tokens, preferredPlatform);
   }
 
+  const strictPlatform = getRequestSessionPlatform(req);
   let lastError = null;
 
   for (const token of tokens) {
     try {
-      const decoded = await verifyJwt(token, process.env.JWT_SECRET_KEY);
+      let decoded;
+      let activeToken = token;
+
+      try {
+        decoded = await verifyJwt(token, process.env.JWT_SECRET_KEY);
+      } catch (err) {
+        if (err.name === 'TokenExpiredError') {
+          const refreshed = await refreshFromExpiredJwt(token, req, res);
+          if (!refreshed) {
+            lastError = err;
+            continue;
+          }
+
+          decoded = refreshed.decoded;
+          activeToken = refreshed.token;
+
+          const { session } = refreshed;
+          if (session && strictPlatform && session.platform !== strictPlatform) {
+            lastError = err;
+            continue;
+          }
+
+          return await applyUserSessionSuccess(
+            req,
+            res,
+            refreshed.user,
+            session,
+            activeToken,
+            decoded,
+          );
+        }
+        lastError = err;
+        continue;
+      }
 
       if (decoded?.purpose === 'impersonation') {
         if (!decoded?._id || !decoded?.jti) {
@@ -66,47 +112,19 @@ async function authenticateRequest(req, res) {
       const humanAgent = decoded?.id ? await HumanAgent.findById(decoded.id) : null;
 
       if (user) {
-        const { valid, session } = await validateUserSession(user, decoded, token);
+        const { valid, session, legacy } = await validateUserSession(user, decoded, activeToken);
         if (!valid) continue;
 
-        req.body.userId = userId;
-        req.session = session;
-        req.authToken = token;
-
-        const nowInSeconds = Math.floor(Date.now() / 1000);
-        const expiresInSeconds = typeof decoded.exp === 'number' ? decoded.exp - nowInSeconds : null;
-        const shouldRefreshToken =
-          typeof expiresInSeconds === 'number' &&
-          expiresInSeconds > 0 &&
-          expiresInSeconds <= ONE_DAY_IN_SECONDS;
-
-        if (shouldRefreshToken) {
-          const refreshedToken = session
-            ? await refreshSessionToken(user, session)
-            : user.generateAuthToken();
-
-          if (!session) {
-            user.auth_token = refreshedToken;
-            await user.save();
-          }
-
-          const platform = resolvePlatform(req);
-          const clientId = resolveClientId(req, { platform });
-          setAuthTokenCookie(res, req, {
-            token: refreshedToken,
-            platform: session?.platform || platform,
-            clientId: session?.clientId || clientId,
-            sessionId: session?.sessionId,
-            role: 'client',
-          });
+        if (session && !legacy && strictPlatform && session.platform !== strictPlatform) {
+          continue;
         }
 
-        return { ok: true };
+        return await applyUserSessionSuccess(req, res, user, session, activeToken, decoded);
       }
 
       if (humanAgent) {
         req.body.userId = humanAgent.userId;
-        req.authToken = token;
+        req.authToken = activeToken;
         return { ok: true };
       }
     } catch (err) {
@@ -123,7 +141,7 @@ async function authenticateRequest(req, res) {
   };
 }
 
-module.exports = async (req, res, next) => {
+const authMiddleware = async (req, res, next) => {
   try {
     const result = await authenticateRequest(req, res);
     if (!result.ok) {
@@ -135,3 +153,6 @@ module.exports = async (req, res, next) => {
     return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
   }
 };
+
+authMiddleware.authenticateRequest = authenticateRequest;
+module.exports = authMiddleware;

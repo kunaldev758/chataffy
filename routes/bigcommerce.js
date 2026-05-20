@@ -8,6 +8,7 @@ const Agent = require("../models/Agent");
 const { provisionNewMerchantUser } = require("../services/CommerceMerchantProvisionService");
 const { establishUserSession } = require("../services/userSessionService.js");
 const { sendWelcomeEmail } = require("../services/emailService");
+const { consumeOAuthCodeOnce } = require("../helpers/oauthReplayGuard.js");
 
 const router = express.Router();
 
@@ -41,6 +42,14 @@ router.get("/auth/callback", async (req, res) => {
     "context ---> ",
     context,
   );
+
+  if (!consumeOAuthCodeOnce(String(code))) {
+    return res.status(403).json({
+      status_code: 403,
+      status: false,
+      message: "Authorization code already used or invalid.",
+    });
+  }
 
   try {
     console.log("starting to get access token from bigcommerce");

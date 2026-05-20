@@ -10,10 +10,13 @@
 const { getAuthCookieOptions } = require("../helpers/helper.js");
 
 const TOKEN_KEYS = {
-  shopify: "SF_TOKEN",
+  shopify: "SP_TOKEN",
   bigcommerce: "BC_TOKEN",
-  web: "TOKEN",
+  web: "WEB_TOKEN",
 };
+
+/** Cookie base names from older builds — still read and cleared for migration */
+const LEGACY_COOKIE_BASE_KEYS = ["SF_TOKEN", "TOKEN"];
 
 const ROLE_COOKIE = "role";
 const LEGACY_TOKEN_COOKIE = "token";
@@ -21,7 +24,9 @@ const LEGACY_TOKEN_COOKIE = "token";
 const DEFAULT_COOKIE_PATH = "/";
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
-const TOKEN_PREFIXES = Object.values(TOKEN_KEYS);
+const TOKEN_PREFIXES = [
+  ...new Set([...Object.values(TOKEN_KEYS), ...LEGACY_COOKIE_BASE_KEYS]),
+];
 
 function sanitizeClientId(clientId) {
   const safe = String(clientId ?? "default")
@@ -49,25 +54,57 @@ function getBaseTokenKey(platform = "web") {
   return TOKEN_KEYS[platform] || TOKEN_KEYS.web;
 }
 
+function sanitizeShopDomain(shopDomain) {
+  const raw = String(shopDomain ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/.*$/, "");
+  return sanitizeClientId(raw.replace(/\.myshopify\.com$/i, "myshopifycom"));
+}
+
+/**
+ * Stable cookie names per platform/store.
+ *
+ * Web: WEB_TOKEN
+ * Shopify: SP_TOKEN_<sanitizedShopDomain>
+ * BigCommerce: BC_TOKEN_<storeHash>
+ */
+function getPlatformCookieName({ platform = "web", shopDomain, storeHash, clientId } = {}) {
+  const baseKey = getBaseTokenKey(platform);
+
+  if (platform === "web") {
+    return baseKey;
+  }
+
+  if (platform === "shopify") {
+    const safeShop = sanitizeShopDomain(shopDomain ?? clientId);
+    return `${baseKey}_${safeShop}`;
+  }
+
+  if (platform === "bigcommerce") {
+    const safeStore = sanitizeClientId(storeHash ?? clientId);
+    return `${baseKey}_${safeStore}`;
+  }
+
+  const safeClientId = sanitizeClientId(clientId);
+  return `${baseKey}_${safeClientId}`;
+}
+
 /**
  * Generate final cookie name
  *
  * Examples:
- * SF_TOKEN_store123
- * BC_TOKEN_client456
- * TOKEN_web
+ * SP_TOKEN_mystoremyshopifycom
+ * BC_TOKEN_abcd123
+ * WEB_TOKEN
  */
 function getTokenCookieName({
   platform = "web",
   clientId = "default",
-  sessionId,
+  sessionId, // ignored for cookie names (kept for backward compat callers)
 } = {}) {
-  const baseKey = getBaseTokenKey(platform);
-  const safeClientId = sanitizeClientId(clientId);
-  if (sessionId) {
-    return `${baseKey}_${safeClientId}_${sanitizeClientId(sessionId)}`;
-  }
-  return `${baseKey}_${safeClientId}`;
+  return getPlatformCookieName({ platform, clientId });
 }
 
 function isAuthTokenCookieName(name) {
@@ -97,6 +134,24 @@ function resolvePlatform(req) {
   }
 
   return "web";
+}
+
+/**
+ * When non-null, UserSession.platform must match (strict multi-platform routing).
+ * Returns null when the request does not declare a platform (legacy clients / generic APIs).
+ */
+function getRequestSessionPlatform(req) {
+  const explicit =
+    req?.headers?.["x-chataffy-platform"] ||
+    req?.body?.platform ||
+    req?.query?.platform;
+  if (explicit && TOKEN_KEYS[explicit]) {
+    return explicit;
+  }
+  const path = String(req?.originalUrl || req?.path || req?.url || "");
+  if (/\/shopify\b/i.test(path)) return "shopify";
+  if (/\/bigcommerce\b/i.test(path)) return "bigcommerce";
+  return null;
 }
 
 function resolveClientId(req, overrides = {}) {
@@ -181,10 +236,11 @@ function listAuthTokenCookieNames(req) {
 }
 
 /**
- * Collect candidate JWTs (Authorization + all auth cookies).
- * Supports multiple concurrent sessions on the same platform.
+ * Collect candidate JWTs (Authorization + legacy cookie + platform-scoped cookie).
+ *
+ * IMPORTANT: Never scan random token cookies; platform cookie must be explicit.
  */
-function extractAuthTokens(req) {
+function extractAuthTokens(req, { platform, shopDomain, storeHash, clientId } = {}) {
   const tokens = [];
   const rawAuth = req?.header?.("Authorization") ?? req?.headers?.authorization;
   const bearer = rawAuth?.replace(/^Bearer\s+/i, "").trim();
@@ -197,18 +253,24 @@ function extractAuthTokens(req) {
     tokens.push(cookies[LEGACY_TOKEN_COOKIE]);
   }
 
-  for (const [name, value] of Object.entries(cookies)) {
-    if (value && isAuthTokenCookieName(name)) {
-      tokens.push(value);
-    }
+  const resolvedPlatform = platform || resolvePlatform(req);
+  const resolvedClientId = clientId || resolveClientId(req, { platform: resolvedPlatform });
+  const cookieName = getPlatformCookieName({
+    platform: resolvedPlatform,
+    clientId: resolvedClientId,
+    shopDomain,
+    storeHash,
+  });
+  if (cookieName && cookies[cookieName]) {
+    tokens.push(cookies[cookieName]);
   }
 
   return [...new Set(tokens)];
 }
 
 /** First candidate token (backward compatible). */
-function extractAuthToken(req) {
-  const tokens = extractAuthTokens(req);
+function extractAuthToken(req, opts = {}) {
+  const tokens = extractAuthTokens(req, opts);
   return tokens[0] || null;
 }
 
@@ -223,10 +285,11 @@ function setAuthTokenCookie(
     clientId,
   });
   const options = getCookieOptions(req);
-  const cookieName = getTokenCookieName({
+  const cookieName = getPlatformCookieName({
     platform: resolvedPlatform,
     clientId: resolvedClientId,
-    sessionId,
+    shopDomain: resolvedPlatform === "shopify" ? resolvedClientId : undefined,
+    storeHash: resolvedPlatform === "bigcommerce" ? resolvedClientId : undefined,
   });
 
   res.cookie(cookieName, token, options);
@@ -248,19 +311,13 @@ function clearSessionAuthCookie(
   const resolvedPlatform = platform || resolvePlatform(req);
   const resolvedClientId = resolveClientId(req, { platform: resolvedPlatform, clientId });
 
-  if (sessionId) {
-    res.clearCookie(
-      getTokenCookieName({
-        platform: resolvedPlatform,
-        clientId: resolvedClientId,
-        sessionId,
-      }),
-      clearOptions,
-    );
-  }
-
   res.clearCookie(
-    getTokenCookieName({ platform: resolvedPlatform, clientId: resolvedClientId }),
+    getPlatformCookieName({
+      platform: resolvedPlatform,
+      clientId: resolvedClientId,
+      shopDomain: resolvedPlatform === "shopify" ? resolvedClientId : undefined,
+      storeHash: resolvedPlatform === "bigcommerce" ? resolvedClientId : undefined,
+    }),
     clearOptions,
   );
   res.clearCookie(LEGACY_TOKEN_COOKIE, clearOptions);
@@ -282,10 +339,13 @@ module.exports = {
   ROLE_COOKIE,
   LEGACY_TOKEN_COOKIE,
   getBaseTokenKey,
+  sanitizeShopDomain,
+  getPlatformCookieName,
   getTokenCookieName,
   sanitizeClientId,
   isAuthTokenCookieName,
   resolvePlatform,
+  getRequestSessionPlatform,
   resolveClientId,
   getCookieOptions,
   getClearCookieOptions,

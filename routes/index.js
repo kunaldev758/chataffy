@@ -99,6 +99,7 @@ router.post('/login', UserController.loginUser);
 router.post('/createUser', UserController.createUser);
 router.post('/verifyEmail', UserController.verifyEmail);
 router.post('/oauth/google', UserController.googleOAuth);
+router.post('/session/refresh', UserController.refreshSession);
 router.post('/agents/login', agentController.agentLogin);
 
 // Public widget routes (for embedded widgets)
