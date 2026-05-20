@@ -19,7 +19,7 @@ const TOKEN_KEYS = {
 const LEGACY_COOKIE_BASE_KEYS = ["SF_TOKEN", "TOKEN"];
 
 const ROLE_COOKIE = "role";
-const LEGACY_TOKEN_COOKIE = "token";
+const LEGACY_TOKEN_COOKIE = "WEB_TOKEN";
 
 const DEFAULT_COOKIE_PATH = "/";
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -245,7 +245,9 @@ function extractAuthTokens(req, { platform, shopDomain, storeHash, clientId } = 
   const rawAuth = req?.header?.("Authorization") ?? req?.headers?.authorization;
   const bearer = rawAuth?.replace(/^Bearer\s+/i, "").trim();
   if (bearer) {
-    tokens.push(bearer);
+    for (const part of bearer.split(",").map((s) => s.trim()).filter(Boolean)) {
+      tokens.push(part);
+    }
   }
 
   const cookies = req?.cookies || {};
