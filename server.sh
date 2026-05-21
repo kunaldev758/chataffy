@@ -94,6 +94,9 @@ echo "Nginx status:"
 sudo systemctl status nginx --no-pager || true
 
 echo ""
+echo "Production env: ensure server .env matches env.production.example"
+echo "  (BASE_URL, CLIENT_URL, AGENT_URL, AUTH_COOKIE_DOMAIN, CORS_ORIGINS)"
+echo ""
 echo "========================================"
 echo "Deployment Completed Successfully"
 echo "========================================"

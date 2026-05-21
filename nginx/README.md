@@ -26,7 +26,8 @@ sudo certbot certonly --nginx \
   -d dashboard.chataffy.com -d agent.chataffy.com
 ```
 
-3. Deploy backend (`server.sh`) then frontend (`cahtaffy_fe/server.sh`) with production env from `DEPLOY-SUBDOMAINS.md`.
+3. On EC2, set `.env` from `env.production.example` (backend + frontend).
+4. Deploy backend (`server.sh`) then frontend (`cahtaffy_fe/server.sh`).
 
 ## Verify
 
