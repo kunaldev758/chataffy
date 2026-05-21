@@ -336,12 +336,13 @@ router.get("/auth/load", async (req, res) => {
       req.io.emit("user-logged-in", { userId: userData._id });
     }
 
-    const token = userData.generateAuthToken();
-    userData.auth_token = token;
+    const token = userData.generateAuthToken('shopify');
+    userData.sf_token = token;
     await userData.save();
 
     const cookieOptions = getAuthCookieOptions(req);
-    res.cookie("token", token, cookieOptions);
+    res.cookie("sf_token", token, cookieOptions);
+    res.cookie("platform", "shopify", cookieOptions);
     res.cookie("role", "client", cookieOptions);
 
     return res.status(200).json({

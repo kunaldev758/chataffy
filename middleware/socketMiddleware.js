@@ -46,7 +46,12 @@ const myMiddleware = async (socket, next) => {
         socket.agentId = agentId;
         socket.humanAgentId = humanAgent.id;
         const user = await User.findById(decoded._id);
-        if (!user || user.auth_token !== token) {
+        const socketPlatform = decoded?.platform || 'local';
+        const socketTokenField =
+          socketPlatform === 'shopify'     ? 'sf_token'  :
+          socketPlatform === 'bigcommerce' ? 'bc_token'  :
+                                             'auth_token';
+        if (!user || user[socketTokenField] !== token) {
           throw new Error("User not found or token mismatch.");
         }
       } else {

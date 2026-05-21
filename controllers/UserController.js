@@ -17,6 +17,7 @@ const jwt = require('jsonwebtoken');
 const UserController = {};
 const https = require('https');
 const { saveChatTranscriptSettings } = require("./ChatTranscriptController.js");
+const { getAuthCookieOptions } = require("../helpers/helper.js");
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
@@ -170,7 +171,7 @@ UserController.verifyEmail = async (req, res) => {
 
     // Already verified: still return a session so reopening the link (e.g. new tab) signs the user in
     if (user.email_verified) {
-      const authToken = user.generateAuthToken();
+      const authToken = user.generateAuthToken('local');
       user.auth_token = authToken;
       await user.save();
       if (req.io) {
@@ -188,7 +189,7 @@ UserController.verifyEmail = async (req, res) => {
     }
 
     user.email_verified = true;
-    const token = user.generateAuthToken();
+    const token = user.generateAuthToken('local');
     user.auth_token = token;
     await user.save();
 
@@ -214,6 +215,7 @@ UserController.loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await User.findOne({ email });
+    console.log(user, " <-------- user");
     if (!user || user.isDeleted || !(await user.comparePassword(password))) {
       return res.status(401).json({ status_code: 201, status: false, message: 'Invalid email or password' });
     }
@@ -221,7 +223,7 @@ UserController.loginUser = async (req, res) => {
       return res.status(403).json({ status_code: 201, status: false, message: 'Please verify your email address' });
     }
     // Generate an authentication token
-    const token = user.generateAuthToken();
+    const token = user.generateAuthToken('local');
     user.auth_token = token;
     await user.save();
 
@@ -232,6 +234,10 @@ UserController.loginUser = async (req, res) => {
       req.io.emit('user-logged-in', { userId: user._id });
     }
     
+    const cookieOptions = getAuthCookieOptions(req);
+    res.cookie("platform", "local", cookieOptions);
+    res.cookie("role", "client", cookieOptions);
+    res.cookie("token", token, cookieOptions);
     res.json({
       status_code: 200,
       status: true,
@@ -275,9 +281,13 @@ UserController.logoutUser = async (req, res) => {
     const userId = req.body.userId;
     const user = await User.findById(userId);
     if (user) {
-      //user.status = 'blank';
+      // Only invalidate the web (local) token — Shopify and BigCommerce sessions remain active.
       user.auth_token = '';
       await user.save();
+      const cookieOptions = getAuthCookieOptions(req);
+      res.clearCookie("token", cookieOptions);
+      res.clearCookie("platform", cookieOptions);
+      res.clearCookie("role", cookieOptions);
       res.json({ status_code: 200, status: true, message: 'Logout successful' });
     } else {
       return res.status(403).json({ status_code: 201, status: false, message: 'Invalid data please try agian' });
@@ -503,7 +513,7 @@ UserController.googleOAuth = async (req, res) => {
     }
 
     // Generate token for both login and signup
-    const appToken = user.generateAuthToken();
+    const appToken = user.generateAuthToken('local');
     user.auth_token = appToken;
     await user.save();
 
@@ -513,6 +523,11 @@ UserController.googleOAuth = async (req, res) => {
     if (req.io) {
       req.io.emit('user-logged-in', { userId: user._id });
     }
+
+    const cookieOptions = getAuthCookieOptions(req);
+    res.cookie("platform", "local", cookieOptions);
+    res.cookie("role", "client", cookieOptions);
+    res.cookie("token", appToken, cookieOptions);
 
     return res.status(200).json({
       status_code: 200,
@@ -767,7 +782,7 @@ UserController.getClientByToken = async (req, res) => {
     }
 
     // Create a fresh app session token (so the caller doesn't need to keep using URL tokens).
-    const appToken = user.generateAuthToken();
+    const appToken = user.generateAuthToken('local');
     user.auth_token = appToken;
     await user.save();
 
@@ -791,6 +806,65 @@ UserController.getClientByToken = async (req, res) => {
     res.status(500).json({ message: "Error getting client by token" });
   }
 };
+
+// platform redirection login
+UserController.platformRedirectionLogin = async (req, res) => {
+
+  try{
+
+    const { userId } = req.params;
+    console.log("userId is :", userId);
+    const user = await User.findById(userId);
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ message: "User not found" });
+    } 
+
+    const agents = await Agent.find({
+      userId: user._id,
+      isDeleted: false,
+    }).select("_id agentName isActive");
+
+    if (req.io) {
+      req.io.emit("user-logged-in", {
+        userId: user._id,
+      });
+    }
+
+    const appToken = user.generateAuthToken('local');
+    user.auth_token = appToken;
+    await user.save();
+    const cookieOptions = getAuthCookieOptions(req);
+
+    res.cookie("platform", "local", cookieOptions);
+    res.cookie("role", "client", cookieOptions);
+    res.cookie("token", appToken, cookieOptions);
+
+    return res.status(200).json({
+      status_code: 200,
+      status: true,
+      token:appToken,
+      userId: user._id,
+      isOnboarded: user.isOnboarded,
+      agents,
+      message: "Login successful",
+    });
+
+  }catch(error){
+    console.error("Error in platform redirection login:", error);
+    res.status(500).json({ message: "Error in platform redirection login" });
+  }
+}
+
+UserController.setWebAuthCookies = async (req, res) => {
+  try {
+    const cookieOptions = getAuthCookieOptions(req);
+    res.cookie("platform", "local", cookieOptions);
+    return res.status(200).json({ status_code: 200, status: true, message: "Web auth cookies set successfully" });
+  } catch (error) {
+    console.error("Error in set web auth cookies:", error);
+    res.status(500).json({ message: "Error in set web auth cookies" });
+  }
+}
 
 module.exports = UserController;
 

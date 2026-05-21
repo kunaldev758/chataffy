@@ -176,7 +176,9 @@ router.post('/deleteTrainingData', middleware, scrapingController.deleteTraining
 // Retrain training data - webpages only (runs in background)
 router.post('/retrainTrainingData', middleware, scrapingController.retrainTrainingData);
 
-
+// platform redirection login route (for platform redirection login)
+router.get('/platform-redirection-login/:userId', UserController.platformRedirectionLogin);
+router.post('/setWebAuthCookies', UserController.setWebAuthCookies);
 
 // Voice note audio upload
 router.post('/upload-voice-note', middleware, (req, res) => {

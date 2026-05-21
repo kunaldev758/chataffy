@@ -9,7 +9,12 @@ const SEVEN_DAYS_IN_MS = 7 * 24 * 60 * 60 * 1000;
 module.exports = async (req, res, next) => {
   // Get the token from the request headers
   const rawAuth = req.header('Authorization');
-  const token = rawAuth?.replace(/^Bearer\s+/i, '').trim();
+  const platform = req.cookies?.platform || 'local';
+  const platformTokenField =
+    platform === 'shopify'     ? 'sf_token'   :
+    platform === 'bigcommerce' ? 'bc_token'    :
+                                 'token';
+  const token = req.cookies?.[platformTokenField] || rawAuth?.replace(/^Bearer\s+/i, '').trim();
   // Check if a token was provided
   if (!token) {
     return res.status(401).json({ status_code: 401, error: 'Authentication failed. No token provided.' });
@@ -56,10 +61,16 @@ module.exports = async (req, res, next) => {
     // const agent = await Agent.findById(agentId);
     const humanAgent = decoded?.id ? await HumanAgent.findById(decoded.id) : null;
     // console.log("testing here", user);
-    if(user && user.auth_token == token)
+    // Determine which stored token to validate against based on the platform claim.
+    const platform = decoded?.platform || 'local';
+    const platformTokenField =
+      platform === 'shopify'     ? 'sf_token'   :
+      platform === 'bigcommerce' ? 'bc_token'    :
+                                   'auth_token';
+    if (user && user[platformTokenField] === token)
     {
       req.body.userId = userId;
-      console.log(userId,req.body);
+      console.log(userId, req.body);
     }
     else if(humanAgent)
     {
@@ -81,8 +92,8 @@ module.exports = async (req, res, next) => {
       let refreshedToken = null;
 
       if (user) {
-        refreshedToken = user.generateAuthToken();
-        user.auth_token = refreshedToken;
+        refreshedToken = user.generateAuthToken(platform);
+        user[platformTokenField] = refreshedToken;
         await user.save();
       } else if (humanAgent) {
         refreshedToken = jwt.sign(
@@ -94,7 +105,11 @@ module.exports = async (req, res, next) => {
 
       if (refreshedToken) {
         console.log("refreshing Token");
-        res.cookie('token', refreshedToken, {
+        const platformCookieName =
+          platform === 'shopify'     ? 'sf_token' :
+          platform === 'bigcommerce' ? 'bc_token' :
+                                       'token';
+        res.cookie(platformCookieName, refreshedToken, {
           httpOnly: true,
           secure: process.env.ENVIRONMENT === 'production',
           sameSite: 'lax',

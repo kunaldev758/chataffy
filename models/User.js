@@ -38,6 +38,14 @@ const userSchema = new Schema(
     auth_token: {
       type: String,
     },
+    sf_token: {
+      type: String,
+      default: '',
+    },
+    bc_token: {
+      type: String,
+      default: '',
+    },
     isDeleted: {
       type: Boolean,
       default: false,
@@ -70,17 +78,19 @@ userSchema.pre("save", async function (next) {
   }
 });
 
-// Generate an authentication token
-userSchema.methods.generateAuthToken = function () {
+// Generate an authentication token.
+// platform: 'local' | 'shopify' | 'bigcommerce' (defaults to 'local')
+userSchema.methods.generateAuthToken = function (platform = 'local') {
   const token = jwt.sign(
     {
       _id: this._id,
       email: this.email,
       role: this.role,
+      platform,
     },
     process.env.JWT_SECRET_KEY,
     {
-      expiresIn: "7 days", // You can customize the expiration time
+      expiresIn: "7 days",
     }
   );
   return token;

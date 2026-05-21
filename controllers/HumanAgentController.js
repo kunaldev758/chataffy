@@ -10,6 +10,7 @@ const {checkPlanLimits} = require('../services/PlanService');
 const path = require('path');
 const fs = require('fs');
 const appEvents = require("../events");
+const { getAuthCookieOptions } = require("../helpers/helper");
 
 /** Build JSON-safe payload for socket.io (avoid BSON/ObjectId quirks on the client). */
 function serializeHumanAgentForSocket(humanAgentDoc) {
@@ -69,6 +70,10 @@ exports.agentLogin = async (req, res) => {
       );
     }
 
+    const cookieOptions = getAuthCookieOptions(req);
+    res.cookie("platform", "local", cookieOptions);
+    res.cookie("role", "agent", cookieOptions);
+    res.cookie("token", token, cookieOptions);
     res.json({
       message: "Login successful",
       token,

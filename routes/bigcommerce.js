@@ -173,12 +173,13 @@ router.get("/auth/load", async (req, res) => {
       req.io.emit("user-logged-in", { userId: userData._id });
     }
 
-    const token = userData.generateAuthToken();
-    userData.auth_token = token;
+    const token = userData.generateAuthToken('bigcommerce');
+    userData.bc_token = token;
     await userData.save();
 
     const cookieOptions = getAuthCookieOptions(req);
-    res.cookie("token", token, cookieOptions);
+    res.cookie("bc_token", token, cookieOptions);
+    res.cookie("platform", "bigcommerce", cookieOptions);
     res.cookie("role", "client", cookieOptions);
     res.status(200).json({
       status: true,
