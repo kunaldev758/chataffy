@@ -159,7 +159,11 @@ exports.createHumanAgent = async (req, res) => {
 
     await humanAgent.save();
 
-    const acceptUrl = `${process.env.CLIENT_URL}agent-accept-invite/?token=${inviteToken}`;
+    const agentBase = (process.env.AGENT_URL || process.env.CLIENT_URL || "").replace(
+      /\/$/,
+      "",
+    );
+    const acceptUrl = `${agentBase}/agent-accept-invite/?token=${inviteToken}`;
     await sendAgentApprovalEmail({ ...humanAgent.toObject() }, acceptUrl, password);
 
     res.status(201).json({

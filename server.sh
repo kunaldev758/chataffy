@@ -66,6 +66,35 @@ pm2 status
 
 echo ""
 echo "========================================"
+echo "Updating Nginx (subdomain config)"
+echo "========================================"
+
+NGINX_SRC="/var/www/html/chataffy/chataffy/nginx/nginx.conf"
+NGINX_DST="/etc/nginx/sites-available/default"
+
+if [ ! -f "\$NGINX_SRC" ]; then
+  echo "ERROR: \$NGINX_SRC not found. Aborting nginx update."
+  exit 1
+fi
+
+echo "Backing up current nginx site config..."
+sudo cp "\$NGINX_DST" "\$NGINX_DST.bak.\$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+
+echo "Installing nginx config from repo..."
+sudo cp "\$NGINX_SRC" "\$NGINX_DST"
+
+echo "Testing nginx configuration..."
+sudo nginx -t
+
+echo "Reloading nginx..."
+sudo systemctl reload nginx
+
+echo ""
+echo "Nginx status:"
+sudo systemctl status nginx --no-pager || true
+
+echo ""
+echo "========================================"
 echo "Deployment Completed Successfully"
 echo "========================================"
 
