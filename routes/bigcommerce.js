@@ -180,7 +180,6 @@ router.get("/auth/load", async (req, res) => {
     const cookieOptions = getAuthCookieOptions(req);
     res.cookie("bc_token", token, cookieOptions);
     res.cookie("platform", "bigcommerce", cookieOptions);
-    res.cookie("role", "client", cookieOptions);
     res.status(200).json({
       status: true,
       userId: userData._id,

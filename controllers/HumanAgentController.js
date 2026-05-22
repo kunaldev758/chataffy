@@ -10,7 +10,10 @@ const {checkPlanLimits} = require('../services/PlanService');
 const path = require('path');
 const fs = require('fs');
 const appEvents = require("../events");
-const { getAuthCookieOptions } = require("../helpers/helper");
+const {
+  setAgentSessionCookies,
+  clearAgentSessionCookies,
+} = require("../constants/authCookies");
 
 /** Build JSON-safe payload for socket.io (avoid BSON/ObjectId quirks on the client). */
 function serializeHumanAgentForSocket(humanAgentDoc) {
@@ -70,10 +73,7 @@ exports.agentLogin = async (req, res) => {
       );
     }
 
-    const cookieOptions = getAuthCookieOptions(req);
-    res.cookie("platform", "local", cookieOptions);
-    res.cookie("role", "agent", cookieOptions);
-    res.cookie("token", token, cookieOptions);
+    setAgentSessionCookies(res, req, token);
     res.json({
       message: "Login successful",
       token,
@@ -90,6 +90,16 @@ exports.agentLogin = async (req, res) => {
     });
   } catch (error) {
     console.error("Human agent login error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+exports.agentLogout = async (req, res) => {
+  try {
+    clearAgentSessionCookies(res, req);
+    res.json({ status_code: 200, status: true, message: "Logout successful" });
+  } catch (error) {
+    console.error("Human agent logout error:", error);
     res.status(500).json({ message: "Server error" });
   }
 };

@@ -1,126 +1,132 @@
-const jwt = require('jsonwebtoken');
-const User = require('../models/User');
-const Agent = require('../models/Agent');
-const HumanAgent = require('../models/HumanAgent');
-const ImpersonationSession = require('../models/ImpersonationSession');
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+const HumanAgent = require("../models/HumanAgent");
+const ImpersonationSession = require("../models/ImpersonationSession");
+const {
+  CLIENT_TOKEN,
+  AGENT_TOKEN,
+  collectAuthTokenCandidates,
+} = require("../constants/authCookies");
+const { getAuthCookieOptions } = require("../helpers/helper");
 
 const ONE_DAY_IN_SECONDS = 24 * 60 * 60;
-const SEVEN_DAYS_IN_MS = 7 * 24 * 60 * 60 * 1000;
-module.exports = async (req, res, next) => {
-  // Get the token from the request headers
-  const rawAuth = req.header('Authorization');
-  const platform = req.cookies?.platform || 'local';
+
+async function authenticateDecoded(req, res, decoded, token, cookieName) {
+  if (decoded?.purpose === "impersonation") {
+    if (!decoded?._id || !decoded?.jti) {
+      return null;
+    }
+    const session = await ImpersonationSession.findOne({ jti: decoded.jti });
+    if (!session || session.revokedAt) {
+      return null;
+    }
+    if (String(session.userId) !== String(decoded._id)) {
+      return null;
+    }
+    if (session.expiresAt && session.expiresAt.getTime() <= Date.now()) {
+      return null;
+    }
+    req.body.userId = decoded._id;
+    req.body.impersonatedBy = session.superAdminId;
+    req.body.isImpersonating = true;
+    req.authSession = { portal: "client", cookieName, token };
+    return true;
+  }
+
+  const userId = decoded._id;
+  const user = userId ? await User.findById(userId) : null;
+  if (user?.isDeleted) {
+    return null;
+  }
+
+  const humanAgent = decoded?.id ? await HumanAgent.findById(decoded.id) : null;
+  const isHumanAgentJwt =
+    decoded?.role === "human-agent" || (humanAgent && !userId);
+
+  const platform = decoded?.platform || "local";
   const platformTokenField =
-    platform === 'shopify'     ? 'sf_token'   :
-    platform === 'bigcommerce' ? 'bc_token'    :
-                                 'token';
-  const token = req.cookies?.[platformTokenField] || rawAuth?.replace(/^Bearer\s+/i, '').trim();
-  // Check if a token was provided
-  if (!token) {
-    return res.status(401).json({ status_code: 401, error: 'Authentication failed. No token provided.' });
+    platform === "shopify"
+      ? "sf_token"
+      : platform === "bigcommerce"
+        ? "bc_token"
+        : "auth_token";
+
+  if (user && user[platformTokenField] === token) {
+    req.body.userId = userId;
+    req.authSession = { portal: "client", cookieName, token };
+    await maybeRefreshClientToken(req, res, user, platform, platformTokenField);
+    return true;
   }
-  try {
-    jwt.verify(token, process.env.JWT_SECRET_KEY, async (err, decoded) => {
-    if (err || (!decoded?._id && !decoded?.id)) {
-      if(decoded?.id){
-        console.log("Here is bug")
-      }
-      else{
-      console.log("JWT not verified");
-      return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
-      }
-    }
-    // Impersonation tokens: short-lived + validated against server-side session store.
-    if (decoded?.purpose === 'impersonation') {
-      if (!decoded?._id || !decoded?.jti) {
-        return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
-      }
-      const session = await ImpersonationSession.findOne({ jti: decoded.jti });
-      if (!session || session.revokedAt) {
-        return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
-      }
-      if (String(session.userId) !== String(decoded._id)) {
-        return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
-      }
-      if (session.expiresAt && session.expiresAt.getTime() <= Date.now()) {
-        return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
-      }
 
-      req.body.userId = decoded._id;
-      req.body.impersonatedBy = session.superAdminId;
-      req.body.isImpersonating = true;
-      return next();
-    }
+  if (humanAgent && isHumanAgentJwt) {
+    req.body.userId = humanAgent.userId;
+    req.authSession = { portal: "agent", cookieName, token };
+    await maybeRefreshAgentToken(req, res, humanAgent);
+    return true;
+  }
 
-    const userId = decoded._id;
-    const user = userId ? await User.findById(userId) : null;
-    if(user?.isDeleted){
-      return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
-    }
-    // const agentId = decoded.id;
-    // const agent = await Agent.findById(agentId);
-    const humanAgent = decoded?.id ? await HumanAgent.findById(decoded.id) : null;
-    // console.log("testing here", user);
-    // Determine which stored token to validate against based on the platform claim.
-    const platform = decoded?.platform || 'local';
-    const platformTokenField =
-      platform === 'shopify'     ? 'sf_token'   :
-      platform === 'bigcommerce' ? 'bc_token'    :
-                                   'auth_token';
-    if (user && user[platformTokenField] === token)
-    {
-      req.body.userId = userId;
-      console.log(userId, req.body);
-    }
-    else if(humanAgent)
-    {
-      req.body.userId = humanAgent.userId;
-      console.log(userId,req.body);
-    }
-    else {
-      return res.status(401).json({ status_code: 401, error: 'Authentication failed. User not found.' });
-    }
+  return null;
+}
 
-    const nowInSeconds = Math.floor(Date.now() / 1000);
-    const expiresInSeconds = typeof decoded.exp === 'number' ? decoded.exp - nowInSeconds : null;
-    const shouldRefreshToken =
-      typeof expiresInSeconds === 'number' &&
-      expiresInSeconds > 0 &&
-      expiresInSeconds <= ONE_DAY_IN_SECONDS;
+async function maybeRefreshClientToken(req, res, user, platform, platformTokenField) {
+  const nowInSeconds = Math.floor(Date.now() / 1000);
+  const decoded = jwt.decode(user[platformTokenField]);
+  const expiresInSeconds =
+    typeof decoded?.exp === "number" ? decoded.exp - nowInSeconds : null;
+  const shouldRefresh =
+    typeof expiresInSeconds === "number" &&
+    expiresInSeconds > 0 &&
+    expiresInSeconds <= ONE_DAY_IN_SECONDS;
 
-    if (shouldRefreshToken) {
-      let refreshedToken = null;
+  if (!shouldRefresh) return;
 
-      if (user) {
-        refreshedToken = user.generateAuthToken(platform);
-        user[platformTokenField] = refreshedToken;
-        await user.save();
-      } else if (humanAgent) {
-        refreshedToken = jwt.sign(
-          { id: humanAgent._id, email: humanAgent.email, role: 'human-agent' },
-          process.env.JWT_SECRET_KEY,
-          { expiresIn: '7d' }
-        );
-      } 
+  const refreshedToken = user.generateAuthToken(platform);
+  user[platformTokenField] = refreshedToken;
+  await user.save();
 
-      if (refreshedToken) {
-        console.log("refreshing Token");
-        const platformCookieName =
-          platform === 'shopify'     ? 'sf_token' :
-          platform === 'bigcommerce' ? 'bc_token' :
-                                       'token';
-        res.cookie(platformCookieName, refreshedToken, {
-          httpOnly: true,
-          secure: process.env.ENVIRONMENT === 'production',
-          sameSite: 'lax',
-          maxAge: SEVEN_DAYS_IN_MS,
-        });
+  const platformCookieName =
+    platform === "shopify"
+      ? "sf_token"
+      : platform === "bigcommerce"
+        ? "bc_token"
+        : CLIENT_TOKEN;
+  const cookieOptions = getAuthCookieOptions(req);
+  res.cookie(platformCookieName, refreshedToken, cookieOptions);
+  if (platform === "local") {
+    res.cookie(CLIENT_TOKEN, refreshedToken, cookieOptions);
+  }
+}
+
+async function maybeRefreshAgentToken(req, res, humanAgent) {
+  const cookieOptions = getAuthCookieOptions(req);
+  const refreshedToken = jwt.sign(
+    { id: humanAgent._id, email: humanAgent.email, role: "human-agent" },
+    process.env.JWT_SECRET_KEY,
+    { expiresIn: "7d" },
+  );
+  res.cookie(AGENT_TOKEN, refreshedToken, cookieOptions);
+}
+
+module.exports = async (req, res, next) => {
+  const candidates = collectAuthTokenCandidates(req);
+
+  for (const { name, token } of candidates) {
+    if (!token) continue;
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
+      if (!decoded?._id && !decoded?.id) continue;
+
+      const ok = await authenticateDecoded(req, res, decoded, token, name);
+      if (ok) {
+        return next();
       }
+    } catch {
+      /* try next candidate */
     }
-    next();
+  }
+
+  return res.status(401).json({
+    status_code: 401,
+    error: "Authentication failed. No valid token provided.",
   });
-  } catch (error) {
-    console.log("auth middleware error ----> ", error);
-    return res.status(401).json({ status_code: 401, error: 'Authentication failed. Invalid token.' });
-  }
 };

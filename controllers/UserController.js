@@ -18,6 +18,11 @@ const UserController = {};
 const https = require('https');
 const { saveChatTranscriptSettings } = require("./ChatTranscriptController.js");
 const { getAuthCookieOptions } = require("../helpers/helper.js");
+const {
+  setClientSessionCookies,
+  clearClientSessionCookies,
+  clearAgentSessionCookies,
+} = require("../constants/authCookies");
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
@@ -234,10 +239,7 @@ UserController.loginUser = async (req, res) => {
       req.io.emit('user-logged-in', { userId: user._id });
     }
     
-    const cookieOptions = getAuthCookieOptions(req);
-    res.cookie("platform", "local", cookieOptions);
-    res.cookie("role", "client", cookieOptions);
-    res.cookie("token", token, cookieOptions);
+    setClientSessionCookies(res, req, token);
     res.json({
       status_code: 200,
       status: true,
@@ -278,17 +280,21 @@ UserController.deleteUser = async (req, res) => {
 // Login user
 UserController.logoutUser = async (req, res) => {
   try {
+    if (req.authSession?.portal === "agent") {
+      clearAgentSessionCookies(res, req);
+      return res.json({ status_code: 200, status: true, message: "Logout successful" });
+    }
+
     const userId = req.body.userId;
     const user = await User.findById(userId);
     if (user) {
       // Only invalidate the web (local) token — Shopify and BigCommerce sessions remain active.
-      user.auth_token = '';
+      user.auth_token = "";
       await user.save();
+      clearClientSessionCookies(res, req);
       const cookieOptions = getAuthCookieOptions(req);
-      res.clearCookie("token", cookieOptions);
       res.clearCookie("platform", cookieOptions);
-      res.clearCookie("role", cookieOptions);
-      res.json({ status_code: 200, status: true, message: 'Logout successful' });
+      res.json({ status_code: 200, status: true, message: "Logout successful" });
     } else {
       return res.status(403).json({ status_code: 201, status: false, message: 'Invalid data please try agian' });
     }
@@ -524,10 +530,7 @@ UserController.googleOAuth = async (req, res) => {
       req.io.emit('user-logged-in', { userId: user._id });
     }
 
-    const cookieOptions = getAuthCookieOptions(req);
-    res.cookie("platform", "local", cookieOptions);
-    res.cookie("role", "client", cookieOptions);
-    res.cookie("token", appToken, cookieOptions);
+    setClientSessionCookies(res, req, appToken);
 
     return res.status(200).json({
       status_code: 200,
@@ -833,11 +836,7 @@ UserController.platformRedirectionLogin = async (req, res) => {
     const appToken = user.generateAuthToken('local');
     user.auth_token = appToken;
     await user.save();
-    const cookieOptions = getAuthCookieOptions(req);
-
-    res.cookie("platform", "local", cookieOptions);
-    res.cookie("role", "client", cookieOptions);
-    res.cookie("token", appToken, cookieOptions);
+    setClientSessionCookies(res, req, appToken);
 
     return res.status(200).json({
       status_code: 200,

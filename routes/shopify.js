@@ -343,7 +343,6 @@ router.get("/auth/load", async (req, res) => {
     const cookieOptions = getAuthCookieOptions(req);
     res.cookie("sf_token", token, cookieOptions);
     res.cookie("platform", "shopify", cookieOptions);
-    res.cookie("role", "client", cookieOptions);
 
     return res.status(200).json({
       status: true,
