@@ -4,38 +4,62 @@ const User = require("../models/User");
 const Widget = require("../models/Widget");
 const Visitor = require("../models/Visitor");
 const VisitorController = require("../controllers/VisitorController");
-const Agent = require('../models/Agent');
-const HumanAgent = require('../models/HumanAgent');
+const Agent = require("../models/Agent");
+const HumanAgent = require("../models/HumanAgent");
 
 const verifyToken = (token) => {
   return new Promise((resolve, reject) => {
     jwt.verify(token, process.env.JWT_SECRET_KEY, (err, decoded) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(decoded);
-      }
+      if (err) reject(err);
+      else resolve(decoded);
     });
   });
 };
 
+async function resolveHumanAgentForSocket(decoded, humanAgentIdFromQuery) {
+  const isHumanAgentJwt = decoded?.role === "human-agent";
+  const queryId = humanAgentIdFromQuery || null;
+
+  if (queryId) {
+    const fromQuery = await HumanAgent.findOne({
+      _id: queryId,
+      isDeleted: { $ne: true },
+    });
+    if (fromQuery) return fromQuery;
+  }
+
+  if (isHumanAgentJwt && decoded?.id) {
+    const fromJwt = await HumanAgent.findOne({
+      _id: decoded.id,
+      isDeleted: { $ne: true },
+    });
+    if (fromJwt) return fromJwt;
+  }
+
+  if (decoded?._id) {
+    const clientRecord = await HumanAgent.findOne({
+      userId: decoded._id,
+      isClient: true,
+      isDeleted: { $ne: true },
+    });
+    if (clientRecord) return clientRecord;
+  }
+
+  return null;
+}
+
 const myMiddleware = async (socket, next) => {
   try {
-    const { token, visitorId, widgetId, widgetAuthToken,agentId,humanAgentId } =
+    const { token, visitorId, widgetId, widgetAuthToken, agentId, humanAgentId } =
       socket.handshake.query;
 
-    if (token && !widgetId) {
-      // Client or Human Agent Authentication
-      const decoded = await verifyToken(token);
+    const authToken = typeof token === "string" ? token.trim() : "";
+
+    if (authToken && !widgetId) {
+      const decoded = await verifyToken(authToken);
       if (!decoded) throw new Error("Invalid token.");
 
-      const isHumanAgentLogin = decoded.role === "human-agent";
-      const resolvedHumanAgentId = humanAgentId || (isHumanAgentLogin ? decoded.id : null);
-
-      const humanAgent = resolvedHumanAgentId
-        ? await HumanAgent.findById(resolvedHumanAgentId)
-        : null;
-
+      const humanAgent = await resolveHumanAgentForSocket(decoded, humanAgentId);
       if (!humanAgent) {
         throw new Error("Human agent not found.");
       }
@@ -43,35 +67,41 @@ const myMiddleware = async (socket, next) => {
       if (humanAgent.isClient) {
         socket.userId = humanAgent.userId;
         socket.type = "client";
-        socket.agentId = agentId;
-        socket.humanAgentId = humanAgent.id;
-        const user = await User.findById(decoded._id);
-        const socketPlatform = decoded?.platform || 'local';
+        socket.humanAgentId = humanAgent._id.toString();
+
+        const userId = decoded._id || humanAgent.userId;
+        const user = await User.findById(userId);
+        const socketPlatform = decoded?.platform || "local";
         const socketTokenField =
-          socketPlatform === 'shopify'     ? 'sf_token'  :
-          socketPlatform === 'bigcommerce' ? 'bc_token'  :
-                                             'auth_token';
-        if (!user || user[socketTokenField] !== token) {
+          socketPlatform === "shopify"
+            ? "sf_token"
+            : socketPlatform === "bigcommerce"
+              ? "bc_token"
+              : "auth_token";
+
+        if (!user || user[socketTokenField] !== authToken) {
           throw new Error("User not found or token mismatch.");
         }
       } else {
         socket.userId = humanAgent.userId;
         socket.type = "human-agent";
-        socket.agentId = agentId;
-        socket.humanAgentId = humanAgent.id;
+        socket.humanAgentId = humanAgent._id.toString();
       }
 
-      // Fallback: when agentId not in query, use first assigned agent or first Agent for this user
+      socket.agentId = agentId || undefined;
+
       if (!socket.agentId && socket.userId) {
         if (humanAgent.assignedAgents?.length > 0) {
-          socket.agentId = humanAgent.assignedAgents[0];
+          socket.agentId = humanAgent.assignedAgents[0].toString();
         } else {
-          const firstAgent = await Agent.findOne({ userId: socket.userId }).lean();
-          if (firstAgent) socket.agentId = firstAgent._id;
+          const firstAgent = await Agent.findOne({
+            userId: socket.userId,
+            isDeleted: { $ne: true },
+          }).lean();
+          if (firstAgent) socket.agentId = firstAgent._id.toString();
         }
       }
     } else if (visitorId && widgetId && widgetAuthToken) {
-      // Visitor Authentication
       const widget = await Widget.findOne({
         _id: widgetId,
         widgetToken: widgetAuthToken,
@@ -80,7 +110,6 @@ const myMiddleware = async (socket, next) => {
 
       socket.userId = widget.userId;
       socket.type = "visitor";
-      // Use agentId from query, fallback to Widget's agentId (for 2-segment widget URLs)
       socket.agentId = agentId || widget.agentId;
       socket.humanAgentId = humanAgentId;
 
@@ -89,13 +118,18 @@ const myMiddleware = async (socket, next) => {
         socket.visitorId =
           visitor && visitor.userId.toString() === socket.userId.toString()
             ? visitor._id
-            : (await VisitorController.createVisitor(socket.userId, socket.agentId, visitorId))
-                ._id;
+            : (
+                await VisitorController.createVisitor(
+                  socket.userId,
+                  socket.agentId,
+                  visitorId,
+                )
+              )._id;
       } else {
         const visitor = await VisitorController.createVisitor(
           socket.userId,
           socket.agentId,
-          visitorId
+          visitorId,
         );
         socket.visitorId = visitor._id;
       }
@@ -110,5 +144,5 @@ const myMiddleware = async (socket, next) => {
 };
 
 module.exports = {
-  myMiddleware
+  myMiddleware,
 };
