@@ -260,17 +260,17 @@ router.get("/auth/callback", async (req, res) => {
 
     res.clearCookie("shopify_oauth_state", { path: "/" });
 
-    const feLoad =
-      process.env.SHOPIFY_APP_LOAD_URL ||
-      process.env.CLIENT_URL;
-    if (feLoad) {
-      const base = feLoad.replace(/\/$/, "");
-      const qs = new URLSearchParams({
-        shop: shopDomain,
-        ...(req.query.host ? { host: String(req.query.host) } : {}),
-      });
-      return res.redirect(`${base}/load?${qs.toString()}`);
-    }
+    // const feLoad =
+    //   process.env.SHOPIFY_APP_LOAD_URL ||
+    //   process.env.CLIENT_URL;
+    // if (feLoad) {
+    //   const base = feLoad.replace(/\/$/, "");
+    //   const qs = new URLSearchParams({
+    //     shop: shopDomain,
+    //     ...(req.query.host ? { host: String(req.query.host) } : {}),
+    //   });
+    //   return res.redirect(`${base}/load?${qs.toString()}`);
+    // }
     return res.redirect(
       `https://${shopDomain}/admin/apps/${encodeURIComponent(SHOPIFY_CLIENT_ID)}`,
     );
