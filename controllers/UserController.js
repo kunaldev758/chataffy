@@ -32,9 +32,11 @@ const transporter = nodemailer.createTransport(
 
 // Construct the path to the email template file
 const templateFilePath = path.join(__dirname, '..', '/public/email-templates', 'email-new-account-verification.html');
+const forgotPasswordTemplatePath = path.join(__dirname, '..', '/public/email-templates', 'email-forgot-password.html');
 
 // Read the HTML email template from the file
 const emailTemplate = fs.readFileSync(templateFilePath, 'utf-8');
+const forgotPasswordTemplate = fs.readFileSync(forgotPasswordTemplatePath, 'utf-8');
 // Create a new user with email verification
 UserController.createUser = async (req, res) => {
   try {
@@ -209,6 +211,101 @@ UserController.verifyEmail = async (req, res) => {
     return res.status(500).json({ status_code: 500, status: false, message: 'Email verification failed' });
   }
 };
+
+// Request password reset email
+UserController.forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || !String(email).trim()) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'Email is required' });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const successMessage = 'Password Reset Link has been sent.';
+    const user = await User.findOne({ email: normalizedEmail });
+
+    if (!user || user.isDeleted) {
+      return res.status(200).json({ status_code: 200, status: true, message: successMessage });
+    }
+
+    const resetToken = user.generatePasswordResetToken();
+    user.password_reset_token = resetToken;
+    await user.save();
+
+    const client_url = process.env.CLIENT_URL;
+    const resetLink = `${client_url}reset-password?token=${encodeURIComponent(resetToken)}`;
+    const emailContent = forgotPasswordTemplate.replace(/RESET_LINK_HERE/g, resetLink);
+    const mailOptions = {
+      from: process.env.SMTP_FROM,
+      to: normalizedEmail,
+      subject: 'Reset Your Password',
+      html: emailContent,
+    };
+
+    transporter.sendMail(mailOptions, (error) => {
+      if (error) {
+        return res.status(500).json({ status_code: 500, status: false, message: 'Failed to send password reset email' });
+      }
+      return res.status(200).json({ status_code: 200, status: true, message: successMessage });
+    });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to process password reset request' });
+  }
+};
+
+// Reset password using token from email link
+UserController.resetPassword = async (req, res) => {
+  try {
+    const { token, newPassword, confirmPassword } = req.body;
+    if (!token) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'Reset token is required' });
+    }
+    if (!newPassword || !confirmPassword) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'New password and confirmation are required' });
+    }
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'Passwords do not match' });
+    }
+    if (!isStrongPassword(newPassword)) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: 'Password must be at least 8 characters and include uppercase, number, and symbol',
+      });
+    }
+
+    const resetToken = decodeURIComponent(String(token));
+    const user = await User.findOne({ password_reset_token: resetToken });
+    if (!user || user.isDeleted) {
+      return res.status(400).json({ status_code: 400, status: false, message: 'Invalid or expired reset link' });
+    }
+
+    try {
+      const decoded = jwt.verify(resetToken, process.env.JWT_SECRET_KEY);
+      if (decoded.purpose !== 'password_reset') {
+        return res.status(400).json({ status_code: 400, status: false, message: 'Invalid reset link' });
+      }
+    } catch (err) {
+      if (err.name === 'TokenExpiredError') {
+        user.password_reset_token = undefined;
+        await user.save();
+        return res.status(400).json({ status_code: 400, status: false, message: 'Reset link has expired. Please request a new one.' });
+      }
+      return res.status(400).json({ status_code: 400, status: false, message: 'Invalid reset link' });
+    }
+
+    user.password = newPassword;
+    user.password_reset_token = undefined;
+    await user.save();
+
+    return res.status(200).json({ status_code: 200, status: true, message: 'Password reset successfully. You can now sign in.' });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to reset password' });
+  }
+};
+
 // Login user
 UserController.loginUser = async (req, res) => {
   try {
