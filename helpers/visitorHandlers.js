@@ -439,7 +439,7 @@ const initializeVisitorEvents = (io, socket) => {
             const agents = await HumanAgent.find({
               assignedAgents: agentId,
               status: "approved",
-              isActive: true,
+              // isActive: true,
             }).lean();
 
             // Emit notification to client (AI agent room). Per-human-agent emits happen below (include notificationId).
