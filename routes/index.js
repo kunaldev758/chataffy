@@ -98,6 +98,8 @@ router.post('/agents/accept-invite/:token', agentController.acceptInviteHumanAge
 router.post('/login', UserController.loginUser);
 router.post('/createUser', UserController.createUser);
 router.post('/verifyEmail', UserController.verifyEmail);
+router.post('/forgot-password', UserController.forgotPassword);
+router.post('/reset-password', UserController.resetPassword);
 router.post('/oauth/google', UserController.googleOAuth);
 router.post('/agents/login', agentController.agentLogin);
 
