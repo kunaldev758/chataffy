@@ -102,6 +102,9 @@ router.post('/oauth/google', UserController.googleOAuth);
 router.post('/agents/login', agentController.agentLogin);
 router.post('/agents/logout', agentController.agentLogout);
 
+// validate token route (public)
+router.post('/validate-token', UserController.validateToken);
+
 // Public widget routes (for embedded widgets)
 router.get('/widget/embed', WidgetController.resolveEmbedByOrigin);
 router.get('/widget/:widgetId/:widgetToken/settings', WidgetController.getPublicWidgetSettings);
