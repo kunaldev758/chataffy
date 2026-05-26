@@ -37,6 +37,30 @@ const forgotPasswordTemplatePath = path.join(__dirname, '..', '/public/email-tem
 // Read the HTML email template from the file
 const emailTemplate = fs.readFileSync(templateFilePath, 'utf-8');
 const forgotPasswordTemplate = fs.readFileSync(forgotPasswordTemplatePath, 'utf-8');
+
+/** Issue a fresh 15-minute verification link and email it to the user. */
+async function sendVerificationEmail(user) {
+  const emailVerificationToken = user.generateEmailVerificationToken();
+  user.verification_token = emailVerificationToken;
+  await user.save();
+
+  const client_url = process.env.CLIENT_URL;
+  const verificationLink = `${client_url}verify-email?token=${emailVerificationToken}`;
+  const emailContent = emailTemplate.replace(/VERIFY_LINK_HERE/g, verificationLink);
+  const mailOptions = {
+    from: process.env.SMTP_FROM,
+    to: user.email,
+    subject: 'Email Verification',
+    html: emailContent,
+  };
+
+  return new Promise((resolve, reject) => {
+    transporter.sendMail(mailOptions, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
 // Create a new user with email verification
 UserController.createUser = async (req, res) => {
   try {
@@ -52,8 +76,6 @@ UserController.createUser = async (req, res) => {
       return res.status(400).json({ status_code: 201, status: false, message: 'Email already in use' });
     }
     const user = new User({ email, password, role });
-    const emailVerificationToken = user.generateEmailVerificationToken();
-    user.verification_token = emailVerificationToken; // Store the token in the user document (expires in 15m)
     const userId = user.id;
     await user.save();
     //create agent — set qdrant fields before first save (they are required)
@@ -121,21 +143,12 @@ UserController.createUser = async (req, res) => {
       console.log("Chat transcript created successfully:", chatTranscript);
     }
 
-    const client_url = process.env.CLIENT_URL;
-    const verificationLink = `${client_url}verify-email?token=${emailVerificationToken}`;
-    const emailContent = emailTemplate.replace(/VERIFY_LINK_HERE/g, verificationLink);
-    const mailOptions = {
-      from: process.env.SMTP_FROM,
-      to: email,
-      subject: 'Email Verification',
-      html: emailContent, // Use the modified email content
-    };
-    transporter.sendMail(mailOptions, (error, info) => {
-      if (error) {
-        return res.status(500).json({ status_code: 201, status: false, message: 'Verification email sending failed', error, info });
-      }
+    try {
+      await sendVerificationEmail(user);
       return res.status(200).json({ status_code: 200, status: true, message: 'User registered. Check your email for verification.' });
-    });
+    } catch (error) {
+      return res.status(500).json({ status_code: 201, status: false, message: 'Verification email sending failed', error });
+    }
   } catch (error) {
     console.error("Error creating user:", error);
     commonHelper.logErrorToFile(error);
@@ -309,13 +322,40 @@ UserController.resetPassword = async (req, res) => {
 // Login user
 UserController.loginUser = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, resendVerification } = req.body;
     const user = await User.findOne({ email });
     if (!user || user.isDeleted || !(await user.comparePassword(password))) {
       return res.status(401).json({ status_code: 201, status: false, message: 'Invalid email or password' });
     }
     if (!user.email_verified) {
-      return res.status(403).json({ status_code: 201, status: false, message: 'Please verify your email address' });
+      if (resendVerification) {
+        try {
+          await sendVerificationEmail(user);
+          return res.status(403).json({
+            status_code: 201,
+            status: false,
+            requires_email_verification: true,
+            verification_email_sent: true,
+            message: 'Verification email sent. Please check your inbox.',
+          });
+        } catch (error) {
+          commonHelper.logErrorToFile(error);
+          return res.status(500).json({
+            status_code: 201,
+            status: false,
+            requires_email_verification: true,
+            verification_email_sent: false,
+            message: 'Failed to send verification email.',
+          });
+        }
+      }
+      return res.status(403).json({
+        status_code: 201,
+        status: false,
+        requires_email_verification: true,
+        verification_email_sent: false,
+        message: 'Please verify your email address',
+      });
     }
     // Generate an authentication token
     const token = user.generateAuthToken();
