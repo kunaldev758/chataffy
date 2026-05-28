@@ -109,14 +109,17 @@ NotificationController.markAllAsSeenByAgentId = async (req, res) => {
 };
 
 /**
- * Mark notifications for a conversation as seen (e.g. when agent accepts)
+ * Mark notifications for a conversation as seen (e.g. when agent accepts).
+ * If humanAgentId is supplied, scopes the update to that specific agent's
+ * notifications so other agents who can see the same conversation are unaffected.
+ * Returns the number of notifications that were actually flipped to seen.
  */
-NotificationController.markAsSeenByConversationId = async (conversationId) => {
+NotificationController.markAsSeenByConversationId = async (conversationId, humanAgentId) => {
   try {
-    await Notification.updateMany(
-      { conversationId, type: "agent-connection-request" },
-      { isSeen: true }
-    );
+    const filter = { conversationId, isSeen: false };
+    if (humanAgentId) filter.humanAgentId = humanAgentId;
+    const result = await Notification.updateMany(filter, { isSeen: true });
+    return result?.modifiedCount ?? 0;
   } catch (error) {
     throw error;
   }
