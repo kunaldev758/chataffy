@@ -35,6 +35,9 @@ const userSchema = new Schema(
     verification_token: {
       type: String,
     },
+    password_reset_token: {
+      type: String,
+    },
     auth_token: {
       type: String,
     },
@@ -104,6 +107,19 @@ userSchema.methods.generateEmailVerificationToken = function () {
       email: this.email,
       role: this.role,
       purpose: "email_verification",
+    },
+    process.env.JWT_SECRET_KEY,
+    { expiresIn: "15m" }
+  );
+};
+
+/** Short-lived JWT for password reset links (expiry checked in resetPassword). */
+userSchema.methods.generatePasswordResetToken = function () {
+  return jwt.sign(
+    {
+      _id: this._id,
+      email: this.email,
+      purpose: "password_reset",
     },
     process.env.JWT_SECRET_KEY,
     { expiresIn: "15m" }
