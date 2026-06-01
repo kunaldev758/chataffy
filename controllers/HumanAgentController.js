@@ -6,9 +6,9 @@ const { sendAgentApprovalEmail } = require("../services/emailService");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
-const {checkPlanLimits} = require('../services/PlanService');
-const path = require('path');
-const fs = require('fs');
+const { checkPlanLimits } = require("../services/PlanService");
+const path = require("path");
+const fs = require("fs");
 const appEvents = require("../events");
 const {
   setAgentSessionCookies,
@@ -18,7 +18,9 @@ const {
 /** Build JSON-safe payload for socket.io (avoid BSON/ObjectId quirks on the client). */
 function serializeHumanAgentForSocket(humanAgentDoc) {
   if (!humanAgentDoc) return null;
-  const ha = humanAgentDoc.toObject ? humanAgentDoc.toObject() : { ...humanAgentDoc };
+  const ha = humanAgentDoc.toObject
+    ? humanAgentDoc.toObject()
+    : { ...humanAgentDoc };
   const oid = (v) => {
     if (v == null) return v;
     if (typeof v.toString === "function") return v.toString();
@@ -35,7 +37,9 @@ function serializeHumanAgentForSocket(humanAgentDoc) {
     avatar: ha.avatar,
     userId: ha.userId != null ? oid(ha.userId) : ha.userId,
     assignedAgents: Array.isArray(ha.assignedAgents)
-      ? ha.assignedAgents.map((x) => oid(typeof x === "object" && x && x._id ? x._id : x))
+      ? ha.assignedAgents.map((x) =>
+          oid(typeof x === "object" && x && x._id ? x._id : x),
+        )
       : [],
     isClient: !!ha.isClient,
   };
@@ -50,7 +54,9 @@ exports.agentLogin = async (req, res) => {
       return res.status(400).json({ message: "Invalid email or password" });
     }
     if (humanAgent.status !== "approved") {
-      return res.status(403).json({ message: "Your invitation is not yet accepted or approved." });
+      return res
+        .status(403)
+        .json({ message: "Your invitation is not yet accepted or approved." });
     }
 
     const isMatch = await bcrypt.compare(password, humanAgent.password);
@@ -62,14 +68,14 @@ exports.agentLogin = async (req, res) => {
     const token = jwt.sign(
       { id: humanAgent._id, email: humanAgent.email, role: "human-agent" },
       process.env.JWT_SECRET_KEY,
-      { expiresIn: "7d" }
+      { expiresIn: "7d" },
     );
 
     if (humanAgent?.isActive) {
       humanAgent.lastActive = new Date();
       await HumanAgent.updateOne(
         { _id: humanAgent._id },
-        { $set: { lastActive: humanAgent.lastActive } }
+        { $set: { lastActive: humanAgent.lastActive } },
       );
     }
 
@@ -105,8 +111,9 @@ exports.agentLogout = async (req, res) => {
 };
 
 async function generateRandomPassword(length = 10) {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let password = '';
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let password = "";
   for (let i = 0; i < length; i++) {
     password += chars.charAt(Math.floor(Math.random() * chars.length));
   }
@@ -118,22 +125,31 @@ exports.createHumanAgent = async (req, res) => {
   try {
     const { name, email, userId, agentId, assignedAgents } = req.body;
 
-    const checkLimit = await checkPlanLimits(userId, 'add_human_agent');
+    const checkLimit = await checkPlanLimits(userId, "add_human_agent");
 
     if (!checkLimit.canAddHumanAgents) {
-      await Client.updateOne({ userId }, { $set: { "upgradePlanStatus.humanAgentLimitExceeded": true } });
+      await Client.updateOne(
+        { userId },
+        { $set: { "upgradePlanStatus.humanAgentLimitExceeded": true } },
+      );
       return res.status(403).json({
-        message: "Human agent limit reached. Please upgrade your plan to add more human agents.",
-        upgradeSuggested: true
+        message:
+          "Human agent limit reached. Please upgrade your plan to add more human agents.",
+        upgradeSuggested: true,
       });
     }
 
     // assignedAgents (AI agent/website IDs) - required; human agent can only take chats for these agents
-    const agentIds = Array.isArray(assignedAgents) && assignedAgents.length > 0
-      ? assignedAgents
-      : (agentId ? [agentId] : []);
+    const agentIds =
+      Array.isArray(assignedAgents) && assignedAgents.length > 0
+        ? assignedAgents
+        : agentId
+          ? [agentId]
+          : [];
     if (agentIds.length === 0) {
-      return res.status(400).json({ message: "At least one agent (website) must be assigned" });
+      return res
+        .status(400)
+        .json({ message: "At least one agent (website) must be assigned" });
     }
 
     // Check if agent already exists
@@ -159,9 +175,9 @@ exports.createHumanAgent = async (req, res) => {
       name: name,
       email: email,
       password: hashedPassword,
-      status: 'pending',
+      status: "pending",
       isClient: false,
-      avatar: '',
+      avatar: "",
       assignedAgents: agentIds,
       inviteToken: inviteToken,
       inviteTokenExpires: inviteTokenExpires,
@@ -169,12 +185,17 @@ exports.createHumanAgent = async (req, res) => {
 
     await humanAgent.save();
 
-    const agentBase = (process.env.AGENT_URL || process.env.CLIENT_URL || "").replace(
-      /\/$/,
-      "",
-    );
+    const agentBase = (
+      process.env.AGENT_URL ||
+      process.env.CLIENT_URL ||
+      ""
+    ).replace(/\/$/, "");
     const acceptUrl = `${agentBase}/agent-accept-invite/?token=${inviteToken}`;
-    await sendAgentApprovalEmail({ ...humanAgent.toObject() }, acceptUrl, password);
+    await sendAgentApprovalEmail(
+      { ...humanAgent.toObject() },
+      acceptUrl,
+      password,
+    );
 
     res.status(201).json({
       message: "Human agent created successfully",
@@ -186,7 +207,7 @@ exports.createHumanAgent = async (req, res) => {
         isActive: humanAgent.isActive,
         inviteToken: inviteToken,
         inviteTokenExpires: inviteTokenExpires,
-        userId:humanAgent.userId,
+        userId: humanAgent.userId,
         avatar: humanAgent.avatar,
         assignedAgents: humanAgent.assignedAgents,
       },
@@ -245,7 +266,7 @@ exports.getHumanAgent = async (req, res) => {
 // Update agent
 exports.updateHumanAgent = async (req, res) => {
   try {
-    const { name, currentPassword, newPassword , assignedAgents} = req.body;
+    const { name, currentPassword, newPassword, assignedAgents } = req.body;
     const humanAgent = await HumanAgent.findById(req.params.id);
 
     if (!humanAgent) {
@@ -255,15 +276,22 @@ exports.updateHumanAgent = async (req, res) => {
     // If password change is requested
     if (newPassword) {
       if (!currentPassword) {
-        return res.status(400).json({ message: "Current password is required" });
+        return res
+          .status(400)
+          .json({ message: "Current password is required" });
       }
-      
+
       // Verify current password (adjust based on your auth setup)
-      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, humanAgent.password);
+      const isCurrentPasswordValid = await bcrypt.compare(
+        currentPassword,
+        humanAgent.password,
+      );
       if (!isCurrentPasswordValid) {
-        return res.status(400).json({ message: "Current password is incorrect" });
+        return res
+          .status(400)
+          .json({ message: "Current password is incorrect" });
       }
-      
+
       // Hash and update new password
       const hashedNewPassword = await bcrypt.hash(newPassword, 10);
       humanAgent.password = hashedNewPassword;
@@ -279,8 +307,18 @@ exports.updateHumanAgent = async (req, res) => {
     const updatedAgentData = serializeHumanAgentForSocket(humanAgent);
 
     if (humanAgent.userId) {
-      appEvents.emit("userEvent", humanAgent.userId.toString(), "human-agent-status-updated", updatedAgentData);
-      appEvents.emit("userEvent", humanAgent.userId.toString(), "agent-status-updated", updatedAgentData);
+      appEvents.emit(
+        "userEvent",
+        humanAgent.userId.toString(),
+        "human-agent-status-updated",
+        updatedAgentData,
+      );
+      appEvents.emit(
+        "userEvent",
+        humanAgent.userId.toString(),
+        "agent-status-updated",
+        updatedAgentData,
+      );
     }
 
     if (humanAgent.isClient) {
@@ -295,9 +333,19 @@ exports.updateHumanAgent = async (req, res) => {
         assignedAgents: updatedAgentData.assignedAgents,
       };
       if (humanAgent.userId) {
-        appEvents.emit("userEvent", humanAgent.userId.toString(), "client-status-updated", clientPayload);
+        appEvents.emit(
+          "userEvent",
+          humanAgent.userId.toString(),
+          "client-status-updated",
+          clientPayload,
+        );
       }
-      appEvents.emit("userEvent", humanAgent._id.toString(), "client-status-updated", clientPayload);
+      appEvents.emit(
+        "userEvent",
+        humanAgent._id.toString(),
+        "client-status-updated",
+        clientPayload,
+      );
     }
 
     res.json({
@@ -333,11 +381,101 @@ exports.deleteHumanAgent = async (req, res) => {
   }
 };
 
+exports.resendInviteMailToHumanAgent = async (req, res) => {
+  try {
+    const userId = req.body.userId;
+    if (!userId) {
+      return res.status(401).json({
+        status: false,
+        status_code: 401,
+        message: "Authentication required",
+      });
+    }
+
+    const humanAgent = await HumanAgent.findById(req.params.id);
+    if (!humanAgent) {
+      return res.status(404).json({
+        status: false,
+        status_code: 404,
+        message: "Human agent not found",
+      });
+    }
+
+    if (String(humanAgent.userId) !== String(userId)) {
+      return res.status(403).json({
+        status: false,
+        status_code: 403,
+        message: "Not authorized to resend invitation for this agent",
+      });
+    }
+
+    if (humanAgent.isClient) {
+      return res.status(400).json({
+        status: false,
+        status_code: 400,
+        message: "Cannot resend invitation for a client account",
+      });
+    }
+
+    if (humanAgent.status === "approved") {
+      return res.status(400).json({
+        status: false,
+        status_code: 400,
+        message: "Human agent is already approved",
+      });
+    }
+
+    const password = await generateRandomPassword();
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const inviteToken = crypto.randomBytes(32).toString("hex");
+    const inviteTokenExpires = Date.now() + 1000 * 60 * 60 * 24; // 24 hours
+
+    humanAgent.password = hashedPassword;
+    humanAgent.inviteToken = inviteToken;
+    humanAgent.inviteTokenExpires = inviteTokenExpires;
+    await humanAgent.save();
+
+    const agentBase = (
+      process.env.AGENT_URL ||
+      process.env.CLIENT_URL ||
+      ""
+    ).replace(/\/$/, "");
+    const acceptUrl = `${agentBase}/agent-accept-invite/?token=${inviteToken}`;
+
+    const emailSent = await sendAgentApprovalEmail(
+      { ...humanAgent.toObject() },
+      acceptUrl,
+      password,
+    );
+
+    if (!emailSent) {
+      return res.status(500).json({
+        status: false,
+        status_code: 500,
+        message: "Failed to send invitation email. Please try again.",
+      });
+    }
+
+    res.status(200).json({
+      status: true,
+      status_code: 200,
+      message: "Invitation email resent successfully",
+    });
+  } catch (error) {
+    console.error("Error resending invitation email to human agent:", error);
+    res.status(500).json({
+      status: false,
+      status_code: 500,
+      message: "Error resending invitation email to human agent",
+    });
+  }
+};
+
 // Approve agent
 exports.acceptInviteHumanAgent = async (req, res) => {
   try {
     const { token } = req.params;
-    console.log(token,"token")
+    console.log(token, "token");
     const humanAgent = await HumanAgent.findOne({
       inviteToken: token,
       inviteTokenExpires: { $gt: Date.now() },
@@ -351,9 +489,13 @@ exports.acceptInviteHumanAgent = async (req, res) => {
     humanAgent.inviteToken = undefined;
     humanAgent.inviteTokenExpires = undefined;
     await humanAgent.save();
-    res.status(200).json({ message: "Invitation accepted, human agent approved!" });
+    res
+      .status(200)
+      .json({ message: "Invitation accepted, human agent approved!" });
   } catch (error) {
-    res.status(500).json({ message: "Error accepting invitation for human agent" });
+    res
+      .status(500)
+      .json({ message: "Error accepting invitation for human agent" });
   }
 };
 
@@ -376,8 +518,18 @@ exports.updateHumanAgentStatus = async (req, res) => {
 
     // Emit to the account room (tenant userId). Sockets join user-${userId}, so avoid duplicate emits to user-${humanAgentId}.
     if (humanAgent.userId) {
-      appEvents.emit("userEvent", humanAgent.userId.toString(), "human-agent-status-updated", updatedAgentData);
-      appEvents.emit("userEvent", humanAgent.userId.toString(), "agent-status-updated", updatedAgentData);
+      appEvents.emit(
+        "userEvent",
+        humanAgent.userId.toString(),
+        "human-agent-status-updated",
+        updatedAgentData,
+      );
+      appEvents.emit(
+        "userEvent",
+        humanAgent.userId.toString(),
+        "agent-status-updated",
+        updatedAgentData,
+      );
     }
 
     // Client agent (isClient): same events as UserController.updateClientStatus for inbox / profile menu
@@ -393,9 +545,19 @@ exports.updateHumanAgentStatus = async (req, res) => {
         assignedAgents: updatedAgentData.assignedAgents,
       };
       if (humanAgent.userId) {
-        appEvents.emit("userEvent", humanAgent.userId.toString(), "client-status-updated", clientPayload);
+        appEvents.emit(
+          "userEvent",
+          humanAgent.userId.toString(),
+          "client-status-updated",
+          clientPayload,
+        );
       }
-      appEvents.emit("userEvent", humanAgent._id.toString(), "client-status-updated", clientPayload);
+      appEvents.emit(
+        "userEvent",
+        humanAgent._id.toString(),
+        "client-status-updated",
+        clientPayload,
+      );
     }
 
     res.json({
@@ -412,41 +574,44 @@ exports.updateHumanAgentStatus = async (req, res) => {
 exports.uploadHumanAgentAvatar = async (req, res) => {
   try {
     const humanAgentId = req.params.id;
-    
+
     if (!humanAgentId) {
-      return res.status(400).json({ 
-        status_code: 400, 
-        message: "Human agent ID is required" 
+      return res.status(400).json({
+        status_code: 400,
+        message: "Human agent ID is required",
       });
     }
-    
+
     if (!req.file) {
-      return res.status(400).json({ 
-        status_code: 400, 
-        message: "No file uploaded" 
+      return res.status(400).json({
+        status_code: 400,
+        message: "No file uploaded",
       });
     }
-    
+
     // Validate file type
-    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png'];
-    const allowedExtensions = ['.jpg', '.jpeg', '.png'];
+    const allowedTypes = ["image/jpeg", "image/jpg", "image/png"];
+    const allowedExtensions = [".jpg", ".jpeg", ".png"];
     const fileExtension = path.extname(req.file.originalname).toLowerCase();
-    
-    if (!allowedTypes.includes(req.file.mimetype) || !allowedExtensions.includes(fileExtension)) {
+
+    if (
+      !allowedTypes.includes(req.file.mimetype) ||
+      !allowedExtensions.includes(fileExtension)
+    ) {
       // Delete uploaded file if validation fails
       if (req.file.path) {
         try {
           fs.unlinkSync(req.file.path);
         } catch (deleteError) {
-          console.error('Error deleting invalid file:', deleteError);
+          console.error("Error deleting invalid file:", deleteError);
         }
       }
-      return res.status(400).json({ 
-        status_code: 400, 
-        message: "Invalid file type. Only JPG and PNG files are allowed." 
+      return res.status(400).json({
+        status_code: 400,
+        message: "Invalid file type. Only JPG and PNG files are allowed.",
       });
     }
-    
+
     // Check file size (5MB limit)
     if (req.file.size > 5 * 1024 * 1024) {
       // Delete uploaded file if too large
@@ -454,15 +619,15 @@ exports.uploadHumanAgentAvatar = async (req, res) => {
         try {
           fs.unlinkSync(req.file.path);
         } catch (deleteError) {
-          console.error('Error deleting file:', deleteError);
+          console.error("Error deleting file:", deleteError);
         }
       }
-      return res.status(400).json({ 
-        status_code: 400, 
-        message: "File too large. Maximum size is 5MB." 
+      return res.status(400).json({
+        status_code: 400,
+        message: "File too large. Maximum size is 5MB.",
       });
     }
-    
+
     const humanAgent = await HumanAgent.findById(humanAgentId);
     const requestUserId = req.body?.userId;
     if (
@@ -487,33 +652,33 @@ exports.uploadHumanAgentAvatar = async (req, res) => {
         try {
           fs.unlinkSync(req.file.path);
         } catch (deleteError) {
-          console.error('Error deleting file:', deleteError);
+          console.error("Error deleting file:", deleteError);
         }
       }
-      return res.status(404).json({ 
-        status_code: 404, 
-        message: "Human agent not found" 
+      return res.status(404).json({
+        status_code: 404,
+        message: "Human agent not found",
       });
     }
-    
+
     // Delete old avatar if exists
     if (humanAgent.avatar) {
-      const oldAvatarPath = path.join(__dirname, '..', humanAgent.avatar);
+      const oldAvatarPath = path.join(__dirname, "..", humanAgent.avatar);
       try {
         if (fs.existsSync(oldAvatarPath)) {
           fs.unlinkSync(oldAvatarPath);
         }
       } catch (deleteError) {
-        console.error('Error deleting old avatar:', deleteError);
+        console.error("Error deleting old avatar:", deleteError);
       }
     }
-    
+
     const filePath = `/uploads/${req.file.filename}`;
-    
+
     humanAgent.avatar = filePath;
     await humanAgent.save();
-    
-    res.status(200).json({ 
+
+    res.status(200).json({
       status_code: 200,
       message: "Avatar uploaded successfully",
       agent: {
@@ -521,13 +686,13 @@ exports.uploadHumanAgentAvatar = async (req, res) => {
         name: humanAgent.name,
         email: humanAgent.email,
         avatar: humanAgent.avatar,
-      }
+      },
     });
   } catch (error) {
     console.error("Error uploading avatar:", error);
-    res.status(500).json({ 
-      status_code: 500, 
-      message: "Error uploading avatar" 
+    res.status(500).json({
+      status_code: 500,
+      message: "Error uploading avatar",
     });
   }
 };

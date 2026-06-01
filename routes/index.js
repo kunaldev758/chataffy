@@ -226,6 +226,7 @@ router.get('/agents',middleware, agentController.getAllHumanAgents);
 router.get('/agents/:id',middleware, agentController.getHumanAgent);
 router.post('/agents/:id',middleware, agentController.updateHumanAgent);
 router.post('/agents/delete/:id',middleware, agentController.deleteHumanAgent);
+router.post('/agents/resend-mail/:id',middleware, agentController.resendInviteMailToHumanAgent);
 router.post('/agents/:id/status',middleware, agentController.updateHumanAgentStatus);
 router.post('/agents/:id/avatar',middleware, upload.single('avatar'), agentController.uploadHumanAgentAvatar);
 
