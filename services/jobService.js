@@ -22,8 +22,16 @@ const redisConfig =
         maxRetriesPerRequest: null,
       };
 
+function companyNameFromDomain(hostname) {
+  if (!hostname) return "";
+  const host = hostname.replace(/^www\./i, "").trim();
+  const label = host.split(".")[0];
+  if (!label || label.length < 2) return "";
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 // Helper function to extract website metadata from HTML
-const extractWebsiteMetadata = ($, url) => {
+const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
   const metadata = {
     company_name: "",
     company_type: "",
@@ -42,14 +50,21 @@ const extractWebsiteMetadata = ($, url) => {
     const h1 = $("h1").first().text().trim();
     const ogTitle = $('meta[property="og:title"]').attr("content")?.trim();
     const siteName = $('meta[property="og:site_name"]').attr("content")?.trim();
+    const domainName = companyNameFromDomain(metadata.domain);
 
-    // Try to extract company name (remove common suffixes)
-    metadata.company_name =
-      siteName ||
-      ogTitle ||
-      title.split("|")[0].split("-")[0].trim() ||
-      h1 ||
-      title;
+    // Homepage: page title may reflect the brand. Inner pages often title a product/article
+    // (e.g. "Clever AdWords" on favseo.com) — use site-wide name or domain instead.
+    if (isHomepage) {
+      metadata.company_name =
+        siteName ||
+        ogTitle ||
+        title.split("|")[0].split("-")[0].trim() ||
+        h1 ||
+        title ||
+        domainName;
+    } else {
+      metadata.company_name = siteName || domainName;
+    }
 
     // Extract company type from meta tags or content
     const keywords =
@@ -251,14 +266,11 @@ const processWebPage = async (url, sourceCode, footerCache = {}) => {
     // Extract website metadata (from homepage-like URLs or we'll extract from first URL)
     let websiteMetadata = null;
     const urlPath = new URL(url).pathname;
-    const isHomepage =
-      urlPath === "/" ||
-      urlPath === "" ||
-      urlPath.split("/").filter((p) => p).length <= 1; // Root or one-level deep
+    const isHomepage = urlPath === "/" || urlPath === "";
 
     // Always extract metadata (we'll decide whether to use it based on homepage status)
     const $meta = cheerio.load(sourceCode);
-    websiteMetadata = extractWebsiteMetadata($meta, url);
+    websiteMetadata = extractWebsiteMetadata($meta, url, { isHomepage });
 
     // Mark if this is homepage for priority
     if (isHomepage) {
@@ -368,6 +380,7 @@ new Worker(
       let currentDataSize = 0;
       const footerCache = {};
       let metadataExtracted = false; // Track if metadata has been extracted
+      let metadataFromHomepage = false;
       let stoppedForStorageLimit = false;
       let storageLimitEmitMessage = null;
       let storageLimitEmitProgress = null;
@@ -496,13 +509,11 @@ new Worker(
           } = processResult;
 
           // Store website metadata if extracted
-          // Priority: homepage > first URL > any URL with company_name
-          if (websiteMetadata && !metadataExtracted) {
-            // Prefer homepage metadata, but use first URL if no homepage found
+          // Priority: homepage always wins; otherwise use first URL (domain-based name)
+          if (websiteMetadata) {
+            const isHome = websiteMetadata._isHomepage === true;
             const shouldStore =
-              websiteMetadata._isHomepage ||
-              i === 0 ||
-              (websiteMetadata.company_name && !metadataExtracted);
+              isHome || (!metadataExtracted && !metadataFromHomepage);
 
             if (shouldStore) {
               try {
@@ -517,7 +528,8 @@ new Worker(
                   website_url: cleanMetadata.website_url || url,
                   domain: cleanMetadata.domain || new URL(url).hostname,
                 });
-                metadataExtracted = true; // Mark as extracted to avoid overwriting
+                metadataExtracted = true;
+                if (isHome) metadataFromHomepage = true;
                 console.log(
                   `[jobService] Stored website metadata for user ${userId} from ${url}`,
                 );
