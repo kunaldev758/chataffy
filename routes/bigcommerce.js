@@ -82,8 +82,8 @@ router.get("/auth/callback", async (req, res) => {
     }
     if (!store && !existingUser) {
       const provisioned = await provisionNewMerchantUser({
-        email: user.email,
-        name: user.name,
+        email: user?.email ? user.email : `user-${Date.now()}@example.com`,
+        name: user?.name || "",
         provider: "bigcommerce",
       });
       newUser = provisioned.newUser;
@@ -101,8 +101,8 @@ router.get("/auth/callback", async (req, res) => {
           userId: resolvedUserId,
           clientId: newClient?._id || resolvedClient?._id,
           accessToken: access_token,
-          email: user.email,
-          name: user.name || user.email || `store-${storeHash}`,
+          email: user?.email ? user.email : `user-${Date.now()}@example.com`,
+          name: user?.name || user?.email || `store-${storeHash}`,
           scope: grantedScope,
           isDeleted: false,
           status: "installed",
@@ -114,11 +114,11 @@ router.get("/auth/callback", async (req, res) => {
 
     // sending installation email
     await sendWelcomeEmail(
-      user.email,
+      user?.email ? user.email : `user-${Date.now()}@example.com`,
       "bigcommerce",
       store.name || storeHash,
       `https://store-${storeHash}.mybigcommerce.com`,
-      user.name,
+      user?.name || "",
       `https://store-${storeHash}.mybigcommerce.com/manage/app/${process.env.BC_APP_ID}`,
     );
 
