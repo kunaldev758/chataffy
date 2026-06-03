@@ -343,6 +343,8 @@ router.get("/auth/load", async (req, res) => {
     const cookieOptions = getAuthCookieOptions(req);
     res.cookie("sf_token", token, cookieOptions);
     res.cookie("platform", "shopify", cookieOptions);
+    // Stable hint for iframe session selection (do not clear on web logout).
+    res.cookie("embedded_provider", "shopify", cookieOptions);
 
     return res.status(200).json({
       status: true,

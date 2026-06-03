@@ -180,6 +180,8 @@ router.get("/auth/load", async (req, res) => {
     const cookieOptions = getAuthCookieOptions(req);
     res.cookie("bc_token", token, cookieOptions);
     res.cookie("platform", "bigcommerce", cookieOptions);
+    // Stable hint for iframe session selection (do not clear on web logout).
+    res.cookie("embedded_provider", "bigcommerce", cookieOptions);
     res.status(200).json({
       status: true,
       userId: userData._id,

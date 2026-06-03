@@ -473,6 +473,47 @@ UserController.deleteUser = async (req, res) => {
 };
 
 // Login user
+// UserController.logoutUser = async (req, res) => {
+//   try {
+//     if (req.authSession?.portal === "agent") {
+//       clearAgentSessionCookies(res, req);
+//       return res.json({
+//         status_code: 200,
+//         status: true,
+//         message: "Logout successful",
+//       });
+//     }
+
+//     const userId = req.body.userId;
+//     const user = await User.findById(userId);
+//     if (user) {
+//       // Only invalidate the web (local) token — Shopify and BigCommerce sessions remain active.
+//       user.auth_token = "";
+//       await user.save();
+//       clearClientSessionCookies(res, req);
+//       const cookieOptions = getAuthCookieOptions(req);
+//       res.clearCookie("platform", cookieOptions);
+//       res.json({
+//         status_code: 200,
+//         status: true,
+//         message: "Logout successful",
+//       });
+//     } else {
+//       return res.status(403).json({
+//         status_code: 201,
+//         status: false,
+//         message: "Invalid data please try agian",
+//       });
+//     }
+//   } catch (error) {
+//     commonHelper.logErrorToFile(error);
+//     res
+//       .status(500)
+//       .json({ status_code: 500, status: false, message: "Logout failed" });
+//   }
+// };
+
+
 UserController.logoutUser = async (req, res) => {
   try {
     if (req.authSession?.portal === "agent") {
@@ -487,7 +528,8 @@ UserController.logoutUser = async (req, res) => {
     const userId = req.body.userId;
     const user = await User.findById(userId);
     if (user) {
-      // Only invalidate the web (local) token — Shopify and BigCommerce sessions remain active.
+      // ✅ CRITICAL: Only invalidate the web (local) token
+      // Shopify and BigCommerce sessions remain active.
       user.auth_token = "";
       await user.save();
       clearClientSessionCookies(res, req);
