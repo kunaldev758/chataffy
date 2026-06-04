@@ -117,10 +117,22 @@ class QuestionAnsweringSystem {
     return conversationFlow;
   }
 
+  // Prefer user-configured branding over auto-scraped page titles (blog posts often
+  // title a product, e.g. "Clever AdWords" on favseo.com, not the site name).
+  resolveCompanyName({ websiteData, widgetData, agentData }) {
+    const configured =
+      (widgetData?.organisation || "").trim() ||
+      (widgetData?.titleBar || "").trim() ||
+      (agentData?.website_name || "").trim() ||
+      (agentData?.agentName || "").trim();
+    if (configured) return configured;
+    return (websiteData?.company_name || "").trim() || "the company";
+  }
+
   // Build dynamic system prompt from WebsiteData
   buildDynamicSystemPrompt(websiteData, organisation) {
-    // Use organisation from widget as fallback for company_name
-    const companyName = websiteData?.company_name || organisation || "the company";
+    // User-configured organisation (widget/agent name) takes priority over scraped metadata
+    const companyName = organisation || websiteData?.company_name || "the company";
     const companyType = websiteData?.company_type || "company";
     const industry = websiteData?.industry || "";
     const foundedYear = websiteData?.founded_year || "";
@@ -519,7 +531,7 @@ class QuestionAnsweringSystem {
   ) {
     // Build dynamic system prompt if websiteData is available, otherwise use fallback
     let systemPrompt;
-    if (websiteData && websiteData.company_name) {
+    if (websiteData && (organisation || websiteData.company_name)) {
       systemPrompt = this.buildDynamicSystemPrompt(websiteData, organisation);
     } else {
       // Fallback to a simpler prompt if websiteData is not available
@@ -921,6 +933,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       const agentData = await Agent.findOne({ _id: agentId }).lean();
       const widgetData = await Widget.findOne({ agentId }).lean();
       const websiteData = await WebsiteData.findOne({ agentId }).lean();
+      const companyName = this.resolveCompanyName({ websiteData, widgetData, agentData });
 
       if (
         !clientData ||
@@ -984,10 +997,6 @@ Keep responses short, direct, friendly, and professional. Only use information e
         const topItems = uniquePages.slice(0, requestedCount);
 
         if (topItems.length > 0) {
-          const companyName =
-            websiteData?.company_name ||
-            widgetData.organisation ||
-            "the company";
           const pagesLines = topItems
             .map((p, idx) => {
               const url = p.url || "";
@@ -1003,7 +1012,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
               question,
               structuralContext,
               chatHistory,
-              widgetData.organisation || "the company",
+              companyName,
               websiteData
             );
           if (structuralUsage) {
@@ -1192,7 +1201,6 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       // Check if message looks accidental or like test input
       const isAccidental = this.isAccidentalOrTestMessage(question);
-      const companyName = websiteData?.company_name || widgetData.organisation || "the company";
       
       // Check if visitor is requesting to connect to an agent
       const isAgentRequest = this.isAgentConnectionRequest(question);
@@ -1205,7 +1213,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             question,
             `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
             chatHistory,
-            widgetData.organisation || "the company",
+            companyName,
             websiteData,
           );
         finalAnswer = greetingAnswer;
@@ -1224,7 +1232,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             question,
             `The user sent a message that looks accidental or like test input: "${question}". This appears to be random characters or accidental typing. Acknowledge it might have been sent by accident, be friendly and understanding, and offer help with ${companyName}'s services. Respond naturally as a human would, not robotically.`,
             chatHistory,
-            widgetData.organisation || "the company",
+            companyName,
             websiteData,
           );
         finalAnswer = accidentalAnswer;
@@ -1241,7 +1249,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           question,
           contextMessage,
           chatHistory,
-          widgetData.organisation || "the company",
+          companyName,
           websiteData,
         );
       finalAnswer = irrelaventAnswer;
@@ -1255,7 +1263,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             question,
             context,
             chatHistory,
-            widgetData.organisation || "the company",
+            companyName,
             websiteData,
             // widgetData.fallbackMessage ||
             //   "I couldn't find specific information about your question in the knowledge base. You might contact support",
