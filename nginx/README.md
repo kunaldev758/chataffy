@@ -5,7 +5,7 @@ Canonical config: `nginx.conf` in this folder.
 ## What it does
 
 - `chataffy.com`, `www`, `dashboard.chataffy.com`, `agent.chataffy.com` → Next.js (`127.0.0.1:9001`)
-- `/api/`, `/socket.io/` → backend (`127.0.0.1:9000`)
+- `/api/`, `/socket.io/`, `/uploads/` → backend (`127.0.0.1:9000`)
 - `/chataffy/chataffy/` → legacy backend path (remove when `BASE_URL` uses `/api/` only)
 - `/chataffy/cahtaffy_fe` → legacy frontend (Next.js middleware 301s to subdomains)
 - `/chataffy/superadmin` → static superadmin build
