@@ -58,9 +58,15 @@ const userSchema = new Schema(
       enum: ["admin", "client", "agent"],
       default: "client",
     },
+    // isOnboarded: {
+    //   type: Boolean,
+    //   default: false,
+    // },
+    // handling is isOnboarded for different platforms
     isOnboarded: {
-      type: Boolean,
-      default: false,
+      local: { type: Boolean, default: false },
+      shopify: { type: Boolean, default: false },
+      bigcommerce: { type: Boolean, default: false },
     },
   },
   { timestamps: true }
@@ -130,6 +136,17 @@ userSchema.methods.generatePasswordResetToken = function () {
 userSchema.methods.comparePassword = async function (password) {
   if (!this.password) return false;
   return await bcrypt.compare(password, this.password);
+};
+
+// Get platform-specific onboarding status (handles object format, legacy boolean format, and defaults)
+userSchema.methods.getIsOnboarded = function (platform = 'local') {
+  if (this.isOnboarded && typeof this.isOnboarded === 'object') {
+    return !!this.isOnboarded[platform];
+  }
+  if (typeof this.isOnboarded === 'boolean') {
+    return this.isOnboarded;
+  }
+  return false;
 };
 const User = mongoose.model("User", userSchema);
 module.exports = User;

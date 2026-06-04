@@ -64,12 +64,12 @@ const agentSchema = new mongoose.Schema({
 
   faqsAdded: { type: Number, default: 0 },
 
-  // Onboarding step persistence — tracks which step the user reached so
-  // a page refresh restores the correct screen instead of resetting to 'source'
+  // Onboarding step persistence — platform-scoped so a shared agent correctly
+  // restores each platform's progress independently (mirrors isOnboarded structure)
   onboardingStep: {
-    type: String,
-    enum: ['source', 'train', 'widget'],
-    default: 'source',
+    local:        { type: String, enum: ['source', 'train', 'widget'], default: 'source' },
+    shopify:      { type: String, enum: ['source', 'train', 'widget'], default: 'source' },
+    bigcommerce:  { type: String, enum: ['source', 'train', 'widget'], default: 'source' },
   },
   onboardingWebsiteUrl: { type: String, default: '' },
   onboardingExtractedUrls: { type: [String], default: [] },

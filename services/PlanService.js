@@ -431,7 +431,24 @@ class PlanService {
         upgradeSuggested: false
       };
     }
-  } 
+  }
+
+  /** True when the account cannot add more AI agents (matches createAgent / website limit UX). */
+  static async isAgentLimitExceeded(userId) {
+    try {
+      const limits = await PlanService.getEffectiveLimits(userId);
+      const maxAgents = Number(limits?.maxAgentsPerAccount);
+      if (Number.isFinite(maxAgents) && maxAgents > 0) {
+        const agentsCount = await Agent.countDocuments({ userId, isDeleted: false });
+        if (agentsCount >= maxAgents) return true;
+      }
+      const client = await Client.findOne({ userId }).select('upgradePlanStatus').lean();
+      return !!client?.upgradePlanStatus?.agentLimitExceeded;
+    } catch (error) {
+      console.error('Error checking agent limit exceeded:', error);
+      return false;
+    }
+  }
 }
 
 module.exports = PlanService;

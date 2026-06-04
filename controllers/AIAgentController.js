@@ -85,13 +85,15 @@ AIAgentController.createAgent = async (req, res) => {
     await widget.save();
 
     const user = await User.findById(userId).select('isOnboarded');
-    if (user && !user.isOnboarded) {
+    const platform = req.authSession?.platform || 'local';
+    const userIsOnboarded = user ? user.getIsOnboarded(platform) : false;
+    if (user && !userIsOnboarded) {
       const humanAgent = await HumanAgent.findOne({ userId, isClient: true });
       if (humanAgent) {
         humanAgent.name = commonHelper.clientHumanAgentNameFromAgent(agent);
         await humanAgent.save();
       }
-    }else if(user && user.isOnboarded) {
+    }else if(user && userIsOnboarded) {
       await HumanAgent.findOneAndUpdate(
         { userId, isClient: true },
         { $addToSet: { assignedAgents: agent._id } },
@@ -122,10 +124,14 @@ AIAgentController.getAgentSettings = async (req, res) => {
     if (!agentId) {
       return res.status(400).json({ status_code: 400, status: false, message: 'Agent ID is required' });
     }
-    const agent = await Agent.findById(agentId).select('agentName email phone fallbackMessage liveAgentSupport website_name onboardingStep onboardingWebsiteUrl onboardingExtractedUrls');
+    const agent = await Agent.findById(agentId).select('agentName email phone fallbackMessage liveAgentSupport website_name onboardingStep onboardingWebsiteUrl onboardingExtractedUrls userId');
     if (!agent) {
       return res.status(404).json({ status_code: 404, status: false, message: 'Agent not found' });
     }
+    const owner = await User.findById(agent.userId).select('isOnboarded');
+    const platform = req.authSession?.platform || 'local';
+    const isOnboarded = owner ? owner.getIsOnboarded(platform) : false;
+
     return res.status(200).json({
       status_code: 200,
       status: true,
@@ -135,9 +141,10 @@ AIAgentController.getAgentSettings = async (req, res) => {
         phone:                    agent.phone || '',
         fallbackMessage:          agent.fallbackMessage || '',
         liveAgentSupport:         agent.liveAgentSupport ?? false,
-        onboardingStep:           agent.onboardingStep || 'source',
+        onboardingStep:           agent.onboardingStep?.[platform] || 'source',
         onboardingWebsiteUrl:     agent.onboardingWebsiteUrl || '',
         onboardingExtractedUrls:  agent.onboardingExtractedUrls || [],
+        isOnboarded,
       }
     });
   } catch (error) {
@@ -153,13 +160,14 @@ AIAgentController.updateAgentSettings = async (req, res) => {
     if (!agentId) {
       return res.status(400).json({ status_code: 400, status: false, message: 'Agent ID is required' });
     }
+    const platform = req.authSession?.platform || 'local';
     const updateData = {};
     if (agentName                !== undefined) updateData.agentName               = agentName;
     if (email                    !== undefined) updateData.email                   = email;
     if (phone                    !== undefined) updateData.phone                   = phone;
     if (fallbackMessage          !== undefined) updateData.fallbackMessage         = fallbackMessage;
     if (liveAgentSupport         !== undefined) updateData.liveAgentSupport        = liveAgentSupport;
-    if (onboardingStep           !== undefined) updateData.onboardingStep          = onboardingStep;
+    if (onboardingStep           !== undefined) updateData[`onboardingStep.${platform}`] = onboardingStep;
     if (onboardingWebsiteUrl     !== undefined) updateData.onboardingWebsiteUrl    = onboardingWebsiteUrl;
     if (onboardingExtractedUrls  !== undefined) updateData.onboardingExtractedUrls = onboardingExtractedUrls;
 
@@ -169,7 +177,9 @@ AIAgentController.updateAgentSettings = async (req, res) => {
     }
 
     const owner = await User.findById(agent.userId).select('isOnboarded');
-    if (owner && !owner.isOnboarded) {
+    // platform already resolved above
+    const ownerIsOnboarded = owner ? owner.getIsOnboarded(platform) : false;
+    if (owner && !ownerIsOnboarded) {
       const humanAgent = await HumanAgent.findOne({ userId: agent.userId, isClient: true });
       if (humanAgent) {
         humanAgent.name = commonHelper.clientHumanAgentNameFromAgent(agent);
@@ -242,7 +252,15 @@ AIAgentController.completeOnboarding = async (req, res) => {
       return res.status(404).json({ status_code: 404, status: false, message: 'User not found' });
     }
 
-    user.isOnboarded = true;
+    const platform = req.authSession?.platform || 'local';
+    if (!user.isOnboarded || typeof user.isOnboarded !== 'object') {
+      user.isOnboarded = {
+        local: false,
+        shopify: false,
+        bigcommerce: false
+      };
+    }
+    user.isOnboarded[platform] = true;
     await user.save();
 
     return res.status(200).json({ status_code: 200, status: true, message: 'Onboarding completed' });

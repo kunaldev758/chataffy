@@ -9,6 +9,7 @@ const Agent = require("../models/Agent");
 const {
   provisionNewMerchantUser,
 } = require("../services/CommerceMerchantProvisionService");
+const PlanService = require("../services/PlanService");
 const { getAuthCookieOptions } = require("../helpers/helper");
 const { sendWelcomeEmail } = require("../services/emailService");
 
@@ -336,6 +337,18 @@ router.get("/auth/load", async (req, res) => {
       req.io.emit("user-logged-in", { userId: userData._id });
     }
 
+    // If limit exceeded and not yet onboarded, treat as onboarded so the
+    // embedded app skips the onboarding wizard and goes straight to the dashboard.
+    let isOnboarded = userData.getIsOnboarded('shopify');
+    if (!isOnboarded && await PlanService.isAgentLimitExceeded(store.userId)) {
+      isOnboarded = true;
+      if (!userData.isOnboarded || typeof userData.isOnboarded !== 'object') {
+        userData.isOnboarded = { local: false, shopify: false, bigcommerce: false };
+      }
+      userData.isOnboarded.shopify = true;
+      userData.markModified('isOnboarded');
+    }
+
     const token = userData.generateAuthToken('shopify');
     userData.sf_token = token;
     await userData.save();
@@ -347,7 +360,7 @@ router.get("/auth/load", async (req, res) => {
     return res.status(200).json({
       status: true,
       userId: userData._id,
-      isOnboarded: userData.isOnboarded,
+      isOnboarded,
       agents,
       shopifyShop: shopDomain,
     });

@@ -29,7 +29,7 @@ async function authenticateDecoded(req, res, decoded, token, cookieName) {
     req.body.userId = decoded._id;
     req.body.impersonatedBy = session.superAdminId;
     req.body.isImpersonating = true;
-    req.authSession = { portal: "client", cookieName, token };
+    req.authSession = { portal: "client", cookieName, token, platform: "local" };
     return true;
   }
 
@@ -53,7 +53,7 @@ async function authenticateDecoded(req, res, decoded, token, cookieName) {
 
   if (user && user[platformTokenField] === token) {
     req.body.userId = userId;
-    req.authSession = { portal: "client", cookieName, token };
+    req.authSession = { portal: "client", cookieName, token, platform };
     await maybeRefreshClientToken(req, res, user, platform, platformTokenField);
     return true;
   }

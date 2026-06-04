@@ -6,6 +6,7 @@ const User = require("../models/User");
 const Client = require("../models/Client");
 const Agent = require("../models/Agent");
 const { provisionNewMerchantUser } = require("../services/CommerceMerchantProvisionService");
+const PlanService = require("../services/PlanService");
 const { getAuthCookieOptions } = require("../helpers/helper");
 const { sendWelcomeEmail } = require("../services/emailService");
 
@@ -20,6 +21,28 @@ function bigcommerceStoreQuery(storeHash) {
     storeHash,
     platform: "bigcommerce",
   };
+}
+
+function defaultBigcommerceStoreUrl(storeHash) {
+  return `https://store-${storeHash}.mybigcommerce.com`;
+}
+
+async function fetchBigcommerceStoreUrl(storeHash, accessToken) {
+  if (!accessToken) return defaultBigcommerceStoreUrl(storeHash);
+  try {
+    const { data } = await axios.get(
+      `https://api.bigcommerce.com/stores/${storeHash}/v2/store`,
+      {
+        headers: {
+          'X-Auth-Token': accessToken,
+          Accept: 'application/json',
+        },
+      },
+    );
+    return data?.secure_url || defaultBigcommerceStoreUrl(storeHash);
+  } catch {
+    return defaultBigcommerceStoreUrl(storeHash);
+  }
 }
 
 // ─── 1. INSTALL CALLBACK ─────────────────────────────────────────────────────
@@ -93,6 +116,10 @@ router.get("/auth/callback", async (req, res) => {
     const resolvedUserId = newUser?._id ? newUser?._id : existingUser?._id;
     if (!resolvedUserId)
       throw new Error("Could not resolve user for store install");
+
+    const storeUrl = await fetchBigcommerceStoreUrl(storeHash, access_token);
+    const storeName = user?.name || user?.email || store?.name || `store-${storeHash}`;
+
     await Store.updateOne(
       { storeHash },
       {
@@ -103,6 +130,7 @@ router.get("/auth/callback", async (req, res) => {
           accessToken: access_token,
           email: user?.email ? user.email : `user-${Date.now()}@example.com`,
           name: user?.name || user?.email || `store-${storeHash}`,
+          storeUrl,
           scope: grantedScope,
           isDeleted: false,
           status: "installed",
@@ -116,15 +144,14 @@ router.get("/auth/callback", async (req, res) => {
     await sendWelcomeEmail(
       user?.email ? user.email : `user-${Date.now()}@example.com`,
       "bigcommerce",
-      store.name || storeHash,
-      `https://store-${storeHash}.mybigcommerce.com`,
+      storeName,
+      storeUrl,
       user?.name || "",
-      `https://store-${storeHash}.mybigcommerce.com/manage/app/${process.env.BC_APP_ID}`,
+      `${defaultBigcommerceStoreUrl(storeHash)}/manage/app/${process.env.BC_APP_ID}`,
     );
 
-
     return res.redirect(
-      `https://store-${storeHash}.mybigcommerce.com/manage/app/${process.env.BC_APP_ID}`,
+      `${defaultBigcommerceStoreUrl(storeHash)}/manage/app/${process.env.BC_APP_ID}`,
     );
   } catch (err) {
     console.error(
@@ -169,8 +196,33 @@ router.get("/auth/load", async (req, res) => {
         .select("_id agentName isActive")
         .lean(),
     ]);
+
+    let bigcommerceStoreUrl = store.storeUrl || '';
+    if (!bigcommerceStoreUrl) {
+      bigcommerceStoreUrl = await fetchBigcommerceStoreUrl(
+        store_hash,
+        store.accessToken,
+      );
+      await Store.updateOne(
+        bigcommerceStoreQuery(store_hash),
+        { $set: { storeUrl: bigcommerceStoreUrl } },
+      );
+    }
+
     if (req.io) {
       req.io.emit("user-logged-in", { userId: userData._id });
+    }
+
+    // If limit exceeded and not yet onboarded, treat as onboarded so the
+    // embedded app skips the onboarding wizard and goes straight to the dashboard.
+    let isOnboarded = userData.getIsOnboarded('bigcommerce');
+    if (!isOnboarded && await PlanService.isAgentLimitExceeded(store.userId)) {
+      isOnboarded = true;
+      if (!userData.isOnboarded || typeof userData.isOnboarded !== 'object') {
+        userData.isOnboarded = { local: false, shopify: false, bigcommerce: false };
+      }
+      userData.isOnboarded.bigcommerce = true;
+      userData.markModified('isOnboarded');
     }
 
     const token = userData.generateAuthToken('bigcommerce');
@@ -183,9 +235,10 @@ router.get("/auth/load", async (req, res) => {
     res.status(200).json({
       status: true,
       userId: userData._id,
-      isOnboarded: userData.isOnboarded,
+      isOnboarded,
       agents: agents,
       bigcommerceStoreHash: store_hash,
+      bigcommerceStoreUrl,
     });
   } catch (err) {
     console.error("Load error:", err.message);

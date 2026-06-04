@@ -233,7 +233,7 @@ UserController.verifyEmail = async (req, res) => {
         status: true,
         token: authToken,
         userId: user._id,
-        isOnboarded: user.isOnboarded,
+        isOnboarded: user.getIsOnboarded('local'),
         agents,
         message: "Signed in successfully",
       });
@@ -253,7 +253,7 @@ UserController.verifyEmail = async (req, res) => {
       status: true,
       token,
       userId: user._id,
-      isOnboarded: user.isOnboarded,
+      isOnboarded: user.getIsOnboarded('local'),
       agents,
       message: "Email verified successfully",
     });
@@ -424,7 +424,7 @@ UserController.loginUser = async (req, res) => {
       status: true,
       token,
       userId: user?._id,
-      isOnboarded: user.isOnboarded,
+      isOnboarded: user.getIsOnboarded('local'),
       agents,
       message: "Login successful",
     });
@@ -821,7 +821,7 @@ UserController.googleOAuth = async (req, res) => {
       token: appToken,
       role: user.role,
       userId: user?._id,
-      isOnboarded: user.isOnboarded,
+      isOnboarded: user.getIsOnboarded('local'),
       agents,
       isNewUser,
     });
@@ -1186,7 +1186,7 @@ UserController.getClientByToken = async (req, res) => {
       status: true,
       token: appToken,
       userId: user._id,
-      isOnboarded: user.isOnboarded,
+      isOnboarded: user.getIsOnboarded('local'),
       agents,
       message: "Signed in successfully",
     });
@@ -1227,7 +1227,7 @@ UserController.platformRedirectionLogin = async (req, res) => {
       status: true,
       token: appToken,
       userId: user._id,
-      isOnboarded: user.isOnboarded,
+      isOnboarded: user.getIsOnboarded('local'),
       agents,
       message: "Login successful",
     });
