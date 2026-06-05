@@ -17,6 +17,10 @@ const BlockedVisitorIp = require("../models/blockedVisitorIp");
 const NotificationController = require("../controllers/NotificationController");
 const { transcriptEmailQueue } = require("../services/jobService");
 const { chatTranscriptTemplate } = require("../templates/transcript-template");
+const {
+  getClientIpFromSocket,
+  resolveVisitorGeoForSocket,
+} = require("../services/geoService");
 // Store active timeouts for agent connection requests
 const agentConnectionTimeouts = new Map();
 
@@ -220,15 +224,48 @@ const initializeVisitorEvents = (io, socket) => {
   socket.join(agentRoom);
   // socket.join(userRoom);
 
-  socket.on("visitor-ip", async ({ ip }, callback) => {
+  const checkVisitorBlocked = async (ip) => {
+    if (!ip) return;
+    const ipFound = await BlockedVisitorIp.findOne({
+      ip,
+      userId,
+    });
+    if (ipFound) {
+      io.to(visitorRoom).emit("visitor-is-blocked", {});
+    }
+  };
+
+  const resolveAndSaveVisitorGeo = async () => {
     try {
-      const ipFound = await BlockedVisitorIp.findOne({
-        ip: ip,
-        userId: userId,
+      const geo = await resolveVisitorGeoForSocket(socket);
+      if (!visitorId) return geo;
+
+      await VisitorController.updateVisitorById({
+        id: visitorId,
+        location: geo.country,
+        ip: geo.ip,
       });
-      if (ipFound) {
-        io.to(visitorRoom).emit("visitor-is-blocked", {});
-      }
+
+      socket.emit("visitor-geo-resolved", {
+        ip: geo.ip,
+        country: geo.country,
+      });
+
+      await checkVisitorBlocked(geo.ip);
+      return geo;
+    } catch (error) {
+      console.error("resolveAndSaveVisitorGeo error:", error.message);
+      return null;
+    }
+  };
+
+  resolveAndSaveVisitorGeo();
+
+  socket.on("visitor-ip", async (_payload, callback) => {
+    try {
+      const ip = getClientIpFromSocket(socket);
+      await checkVisitorBlocked(ip);
+      callback?.({ success: true, ip });
     } catch (error) {
       console.error("visitor-ip error:", error.message);
       callback?.({ success: false, error: error.message });
@@ -326,14 +363,16 @@ const initializeVisitorEvents = (io, socket) => {
 
   socket.on(
     "save-visitor-details",
-    async ({ location, ip, visitorDetails }, callback) => {
+    async ({ visitorDetails }, callback) => {
       try {
+        const geo = await resolveVisitorGeoForSocket(socket);
         await VisitorController.updateVisitorById({
           id: visitorId,
-          location,
-          ip,
+          location: geo.country,
+          ip: geo.ip,
           visitorDetails,
         });
+        callback?.({ success: true, ip: geo.ip, country: geo.country });
       } catch (error) {
         console.error("save-visitor-details error:", error.message);
         callback?.({ success: false, error: error.message });
