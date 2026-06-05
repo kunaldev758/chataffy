@@ -41,12 +41,25 @@ const transporter = nodemailer.createTransport(
 );
 
 // Construct the path to the email template file
-const templateFilePath = path.join(__dirname, '..', '/public/email-templates', 'email-new-account-verification.html');
-const forgotPasswordTemplatePath = path.join(__dirname, '..', '/public/email-templates', 'email-forgot-password.html');
+const templateFilePath = path.join(
+  __dirname,
+  "..",
+  "/public/email-templates",
+  "email-new-account-verification.html",
+);
+const forgotPasswordTemplatePath = path.join(
+  __dirname,
+  "..",
+  "/public/email-templates",
+  "email-forgot-password.html",
+);
 
 // Read the HTML email template from the file
-const emailTemplate = fs.readFileSync(templateFilePath, 'utf-8');
-const forgotPasswordTemplate = fs.readFileSync(forgotPasswordTemplatePath, 'utf-8');
+const emailTemplate = fs.readFileSync(templateFilePath, "utf-8");
+const forgotPasswordTemplate = fs.readFileSync(
+  forgotPasswordTemplatePath,
+  "utf-8",
+);
 
 /** Issue a fresh 15-minute verification link and email it to the user. */
 async function sendVerificationEmail(user) {
@@ -56,11 +69,14 @@ async function sendVerificationEmail(user) {
 
   const client_url = process.env.CLIENT_URL;
   const verificationLink = `${client_url}verify-email?token=${emailVerificationToken}`;
-  const emailContent = emailTemplate.replace(/VERIFY_LINK_HERE/g, verificationLink);
+  const emailContent = emailTemplate.replace(
+    /VERIFY_LINK_HERE/g,
+    verificationLink,
+  );
   const mailOptions = {
     from: process.env.SMTP_FROM,
     to: user.email,
-    subject: 'Email Verification',
+    subject: "Email Verification",
     html: emailContent,
   };
 
@@ -167,9 +183,22 @@ UserController.createUser = async (req, res) => {
 
     try {
       await sendVerificationEmail(user);
-      return res.status(200).json({ status_code: 200, status: true, message: 'User registered. Check your email for verification.' });
+      return res
+        .status(200)
+        .json({
+          status_code: 200,
+          status: true,
+          message: "User registered. Check your email for verification.",
+        });
     } catch (error) {
-      return res.status(500).json({ status_code: 201, status: false, message: 'Verification email sending failed', error });
+      return res
+        .status(500)
+        .json({
+          status_code: 201,
+          status: false,
+          message: "Verification email sending failed",
+          error,
+        });
     }
   } catch (error) {
     console.error("Error creating user:", error);
@@ -233,7 +262,7 @@ UserController.verifyEmail = async (req, res) => {
         status: true,
         token: authToken,
         userId: user._id,
-        isOnboarded: user.getIsOnboarded('local'),
+        isOnboarded: user.getIsOnboarded("local"),
         agents,
         message: "Signed in successfully",
       });
@@ -253,7 +282,7 @@ UserController.verifyEmail = async (req, res) => {
       status: true,
       token,
       userId: user._id,
-      isOnboarded: user.getIsOnboarded('local'),
+      isOnboarded: user.getIsOnboarded("local"),
       agents,
       message: "Email verified successfully",
     });
@@ -271,15 +300,23 @@ UserController.forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
     if (!email || !String(email).trim()) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'Email is required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Email is required",
+        });
     }
 
     const normalizedEmail = String(email).trim().toLowerCase();
-    const successMessage = 'Password Reset Link has been sent.';
+    const successMessage = "Password Reset Link has been sent.";
     const user = await User.findOne({ email: normalizedEmail });
 
     if (!user || user.isDeleted) {
-      return res.status(200).json({ status_code: 200, status: true, message: successMessage });
+      return res
+        .status(200)
+        .json({ status_code: 200, status: true, message: successMessage });
     }
 
     const resetToken = user.generatePasswordResetToken();
@@ -288,23 +325,40 @@ UserController.forgotPassword = async (req, res) => {
 
     const client_url = process.env.CLIENT_URL;
     const resetLink = `${client_url}reset-password?token=${encodeURIComponent(resetToken)}`;
-    const emailContent = forgotPasswordTemplate.replace(/RESET_LINK_HERE/g, resetLink);
+    const emailContent = forgotPasswordTemplate.replace(
+      /RESET_LINK_HERE/g,
+      resetLink,
+    );
     const mailOptions = {
       from: process.env.SMTP_FROM,
       to: normalizedEmail,
-      subject: 'Reset Your Password',
+      subject: "Reset Your Password",
       html: emailContent,
     };
 
     transporter.sendMail(mailOptions, (error) => {
       if (error) {
-        return res.status(500).json({ status_code: 500, status: false, message: 'Failed to send password reset email' });
+        return res
+          .status(500)
+          .json({
+            status_code: 500,
+            status: false,
+            message: "Failed to send password reset email",
+          });
       }
-      return res.status(200).json({ status_code: 200, status: true, message: successMessage });
+      return res
+        .status(200)
+        .json({ status_code: 200, status: true, message: successMessage });
     });
   } catch (error) {
     commonHelper.logErrorToFile(error);
-    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to process password reset request' });
+    return res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "Failed to process password reset request",
+      });
   }
 };
 
@@ -313,50 +367,105 @@ UserController.resetPassword = async (req, res) => {
   try {
     const { token, newPassword, confirmPassword } = req.body;
     if (!token) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'Reset token is required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Reset token is required",
+        });
     }
     if (!newPassword || !confirmPassword) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'New password and confirmation are required' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "New password and confirmation are required",
+        });
     }
     if (newPassword !== confirmPassword) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'Passwords do not match' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Passwords do not match",
+        });
     }
     if (!isStrongPassword(newPassword)) {
       return res.status(400).json({
         status_code: 400,
         status: false,
-        message: 'Password must be at least 8 characters and include uppercase, number, and symbol',
+        message:
+          "Password must be at least 8 characters and include uppercase, number, and symbol",
       });
     }
 
     const resetToken = decodeURIComponent(String(token));
     const user = await User.findOne({ password_reset_token: resetToken });
     if (!user || user.isDeleted) {
-      return res.status(400).json({ status_code: 400, status: false, message: 'Invalid or expired reset link' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Invalid or expired reset link",
+        });
     }
 
     try {
       const decoded = jwt.verify(resetToken, process.env.JWT_SECRET_KEY);
-      if (decoded.purpose !== 'password_reset') {
-        return res.status(400).json({ status_code: 400, status: false, message: 'Invalid reset link' });
+      if (decoded.purpose !== "password_reset") {
+        return res
+          .status(400)
+          .json({
+            status_code: 400,
+            status: false,
+            message: "Invalid reset link",
+          });
       }
     } catch (err) {
-      if (err.name === 'TokenExpiredError') {
+      if (err.name === "TokenExpiredError") {
         user.password_reset_token = undefined;
         await user.save();
-        return res.status(400).json({ status_code: 400, status: false, message: 'Reset link has expired. Please request a new one.' });
+        return res
+          .status(400)
+          .json({
+            status_code: 400,
+            status: false,
+            message: "Reset link has expired. Please request a new one.",
+          });
       }
-      return res.status(400).json({ status_code: 400, status: false, message: 'Invalid reset link' });
+      return res
+        .status(400)
+        .json({
+          status_code: 400,
+          status: false,
+          message: "Invalid reset link",
+        });
     }
 
     user.password = newPassword;
     user.password_reset_token = undefined;
     await user.save();
 
-    return res.status(200).json({ status_code: 200, status: true, message: 'Password reset successfully. You can now sign in.' });
+    return res
+      .status(200)
+      .json({
+        status_code: 200,
+        status: true,
+        message: "Password reset successfully. You can now sign in.",
+      });
   } catch (error) {
     commonHelper.logErrorToFile(error);
-    return res.status(500).json({ status_code: 500, status: false, message: 'Failed to reset password' });
+    return res
+      .status(500)
+      .json({
+        status_code: 500,
+        status: false,
+        message: "Failed to reset password",
+      });
   }
 };
 
@@ -382,7 +491,7 @@ UserController.loginUser = async (req, res) => {
             status: false,
             requires_email_verification: true,
             verification_email_sent: true,
-            message: 'Verification email sent. Please check your inbox.',
+            message: "Verification email sent. Please check your inbox.",
           });
         } catch (error) {
           commonHelper.logErrorToFile(error);
@@ -391,7 +500,7 @@ UserController.loginUser = async (req, res) => {
             status: false,
             requires_email_verification: true,
             verification_email_sent: false,
-            message: 'Failed to send verification email.',
+            message: "Failed to send verification email.",
           });
         }
       }
@@ -400,7 +509,7 @@ UserController.loginUser = async (req, res) => {
         status: false,
         requires_email_verification: true,
         verification_email_sent: false,
-        message: 'Please verify your email address',
+        message: "Please verify your email address",
       });
     }
     // Generate an authentication token
@@ -418,17 +527,30 @@ UserController.loginUser = async (req, res) => {
       req.io.emit("user-logged-in", { userId: user._id });
     }
 
+    console.log("check agents data is during login : ", agents);
+
+    // we need to find out the human agent id here ---->
+
+    const humanAgentData = await HumanAgent.findOne({
+      userId: user._id,
+      isClient: true,
+    });
+
+    console.log("humanAgentData : ", humanAgentData);
+
     setClientSessionCookies(res, req, token);
     res.json({
       status_code: 200,
       status: true,
       token,
       userId: user?._id,
-      isOnboarded: user.getIsOnboarded('local'),
+      isOnboarded: user.getIsOnboarded("local"),
       agents,
+      humanAgentId: humanAgentData?._id,
       message: "Login successful",
     });
   } catch (error) {
+    console.log("Error during login:", error);
     commonHelper.logErrorToFile(error);
     res
       .status(500)
@@ -813,6 +935,15 @@ UserController.googleOAuth = async (req, res) => {
       req.io.emit("user-logged-in", { userId: user._id });
     }
 
+    // we need to find out the human agent id here ---->
+
+    const humanAgentData = await HumanAgent.findOne({
+      userId: user._id,
+      isClient: true,
+    });
+
+    console.log("humanAgentData : ", humanAgentData);
+
     setClientSessionCookies(res, req, appToken);
 
     return res.status(200).json({
@@ -821,7 +952,8 @@ UserController.googleOAuth = async (req, res) => {
       token: appToken,
       role: user.role,
       userId: user?._id,
-      isOnboarded: user.getIsOnboarded('local'),
+      isOnboarded: user.getIsOnboarded("local"),
+      humanAgentId: humanAgentData?._id,
       agents,
       isNewUser,
     });
@@ -1186,7 +1318,7 @@ UserController.getClientByToken = async (req, res) => {
       status: true,
       token: appToken,
       userId: user._id,
-      isOnboarded: user.getIsOnboarded('local'),
+      isOnboarded: user.getIsOnboarded("local"),
       agents,
       message: "Signed in successfully",
     });
@@ -1227,7 +1359,7 @@ UserController.platformRedirectionLogin = async (req, res) => {
       status: true,
       token: appToken,
       userId: user._id,
-      isOnboarded: user.getIsOnboarded('local'),
+      isOnboarded: user.getIsOnboarded("local"),
       agents,
       message: "Login successful",
     });
@@ -1330,15 +1462,13 @@ UserController.validateToken = async (req, res) => {
           .json({ status_code: 401, status: false, message: "Token expired" });
       }
 
-      return res
-        .status(401)
-        .json({
-          status_code: 401,
-          status: false,
-          message: expectedPortal
-            ? "Token does not match requested portal"
-            : "Invalid token",
-        });
+      return res.status(401).json({
+        status_code: 401,
+        status: false,
+        message: expectedPortal
+          ? "Token does not match requested portal"
+          : "Invalid token",
+      });
     }
 
     const userId = decoded?._id;
