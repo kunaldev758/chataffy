@@ -35,15 +35,14 @@ const stripHtml = (html) =>
     .trim();
 
 const transcriptMailTransporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST, // SMTP server hostname
-    port:Number( process.env.SMTP_PORT), // Port for the SMTP server (587 for TLS, 465 for SSL)
-    secure: false, // Set to true if using SSL
-    auth: {
-      user: process.env.EMAIL_USERNAME,
-      pass: process.env.EMAIL_PASSWORD,
-    },
-  }
-);
+  host: process.env.SMTP_HOST, // SMTP server hostname
+  port: Number(process.env.SMTP_PORT), // Port for the SMTP server (587 for TLS, 465 for SSL)
+  secure: false, // Set to true if using SSL
+  auth: {
+    user: process.env.EMAIL_USERNAME,
+    pass: process.env.EMAIL_PASSWORD,
+  },
+});
 
 const formatTimestamp = (dateValue) => {
   if (!dateValue) return "-";
@@ -60,7 +59,10 @@ const formatTimestamp = (dateValue) => {
 
 const formatDuration = (start, end) => {
   if (!start || !end) return "-";
-  const diffMs = Math.max(0, new Date(end).getTime() - new Date(start).getTime());
+  const diffMs = Math.max(
+    0,
+    new Date(end).getTime() - new Date(start).getTime(),
+  );
   const totalSec = Math.floor(diffMs / 1000);
   const hours = Math.floor(totalSec / 3600);
   const minutes = Math.floor((totalSec % 3600) / 60);
@@ -101,41 +103,44 @@ const getMessageSenderName = (msg, visitorName = "Visitor") => {
 };
 
 const sendConversationTranscriptEmail = async (conversation) => {
-  console.log(conversation ,"<----------- conversation");
+  console.log(conversation, "<----------- conversation");
   if (!conversation?.userId || !conversation?._id) return;
-   const transcriptSettings = await ChatTranscriptSetting.findOne({
-     userId: conversation.userId,
-   }).lean();
-   const recipients = transcriptSettings?.transcriptEmails || [];
-   console.log(recipients ,"<----------- recipients");
-   if (!recipients || !recipients.length) {
-     console.log("NO transcriptEmails found returning");
-     return
-   };
- 
-   const [visitorDoc, messages, widget] = await Promise.all([
-     Visitor.findById(conversation.visitor).lean(),
-     ChatMessage.find({
-       conversation_id: conversation._id,
-       is_note: { $ne: true },
-       sender_type: { $ne: "agent-connect" },
-     })
-       .sort({ createdAt: 1 })
-       .populate("humanAgentId", "name")
-       .populate("agentId", "agentName")
-       .populate({
-         path: "replyTo",
-         select: "sender message createdAt sender_type humanAgentId agentId",
-         populate: [
-           { path: "humanAgentId", select: "name" },
-           { path: "agentId", select: "agentName" },
-         ],
-       })
-       .lean(),
-     Widget.findOne({ userId: conversation.userId, agentId: conversation.agentId })
-       .select("titleBar colorFields")
-       .lean(),
-   ]);
+  const transcriptSettings = await ChatTranscriptSetting.findOne({
+    userId: conversation.userId,
+  }).lean();
+  const recipients = transcriptSettings?.transcriptEmails || [];
+  console.log(recipients, "<----------- recipients");
+  if (!recipients || !recipients.length) {
+    console.log("NO transcriptEmails found returning");
+    return;
+  }
+
+  const [visitorDoc, messages, widget] = await Promise.all([
+    Visitor.findById(conversation.visitor).lean(),
+    ChatMessage.find({
+      conversation_id: conversation._id,
+      is_note: { $ne: true },
+      sender_type: { $ne: "agent-connect" },
+    })
+      .sort({ createdAt: 1 })
+      .populate("humanAgentId", "name")
+      .populate("agentId", "agentName")
+      .populate({
+        path: "replyTo",
+        select: "sender message createdAt sender_type humanAgentId agentId",
+        populate: [
+          { path: "humanAgentId", select: "name" },
+          { path: "agentId", select: "agentName" },
+        ],
+      })
+      .lean(),
+    Widget.findOne({
+      userId: conversation.userId,
+      agentId: conversation.agentId,
+    })
+      .select("titleBar colorFields")
+      .lean(),
+  ]);
   const visitorName = visitorDoc?.name || "Visitor";
   const firstMessageAt = messages?.[1]?.createdAt || conversation.createdAt;
   const lastMessageAt =
@@ -143,52 +148,52 @@ const sendConversationTranscriptEmail = async (conversation) => {
     conversation.endedAt ||
     conversation.updatedAt ||
     new Date();
- 
-   const mappedMessages = messages
-  //  .filter((msg) => msg?.sender_type !== "agent-connect" && typeof msg?.is_note === "string" ? msg?.is_note !== "true" : msg?.is_note !== true)
-   .map((msg) => {
-     const senderType = msg?.sender_type || "system";
-   const senderName = getMessageSenderName(msg, visitorName);
-    const replyTo = msg?.replyTo
-      ? {
-          sender: getMessageSenderName(msg.replyTo, visitorName),
-          sender_type: msg.replyTo?.sender_type || "system",
-          timestamp: formatTimestamp(msg.replyTo?.createdAt),
-          text: stripHtml(msg.replyTo?.message || ""),
-        }
-      : null;
- 
-     return {
-       sender: senderName,
-       sender_type: senderType,
-       timestamp: formatTimestamp(msg?.createdAt),
-       text: stripHtml(msg?.message || ""),
-      replyTo,
-     };
-   });
- 
-   const html = chatTranscriptTemplate({
-     websiteName: widget?.titleBar || "Chataffy",
-     conversationId: conversation._id.toString(),
-     visitorName,
-     visitorEmail: getVisitorEmail(visitorDoc),
-     startedAt: formatTimestamp(firstMessageAt),
-     endedAt: formatTimestamp(lastMessageAt),
-     duration: formatDuration(firstMessageAt, lastMessageAt),
-     messages: mappedMessages,
-     colorFields: widget?.colorFields || [],
-   });
- 
-   const appName = process.env.APP_NAME || "Chataffy";
-   const result = await Promise.allSettled(
+
+  const mappedMessages = messages
+    //  .filter((msg) => msg?.sender_type !== "agent-connect" && typeof msg?.is_note === "string" ? msg?.is_note !== "true" : msg?.is_note !== true)
+    .map((msg) => {
+      const senderType = msg?.sender_type || "system";
+      const senderName = getMessageSenderName(msg, visitorName);
+      const replyTo = msg?.replyTo
+        ? {
+            sender: getMessageSenderName(msg.replyTo, visitorName),
+            sender_type: msg.replyTo?.sender_type || "system",
+            timestamp: formatTimestamp(msg.replyTo?.createdAt),
+            text: stripHtml(msg.replyTo?.message || ""),
+          }
+        : null;
+
+      return {
+        sender: senderName,
+        sender_type: senderType,
+        timestamp: formatTimestamp(msg?.createdAt),
+        text: stripHtml(msg?.message || ""),
+        replyTo,
+      };
+    });
+
+  const html = chatTranscriptTemplate({
+    websiteName: widget?.titleBar || "Chataffy",
+    conversationId: conversation._id.toString(),
+    visitorName,
+    visitorEmail: getVisitorEmail(visitorDoc),
+    startedAt: formatTimestamp(firstMessageAt),
+    endedAt: formatTimestamp(lastMessageAt),
+    duration: formatDuration(firstMessageAt, lastMessageAt),
+    messages: mappedMessages,
+    colorFields: widget?.colorFields || [],
+  });
+
+  const appName = process.env.APP_NAME || "Chataffy";
+  const result = await Promise.allSettled(
     recipients.map((email) =>
       transcriptMailTransporter.sendMail({
         from: `${appName} <${process.env.SMTP_FROM}>`,
         to: email,
         subject: `Chat Transcript`,
         html,
-      })
-    )
+      }),
+    ),
   );
 
   const rejected = result.filter((result) => result.status === "rejected");
@@ -202,24 +207,28 @@ const sendConversationTranscriptEmail = async (conversation) => {
 // Export for use in other handlers
 module.exports.agentConnectionTimeouts = agentConnectionTimeouts;
 
+function isLocalIp(ip) {
+  return ip === "::1" || ip === "127.0.0.1" || ip.startsWith("::ffff:127.");
+}
+
 const initializeVisitorEvents = (io, socket) => {
   const { humanAgentId } = socket;
   const { userId } = socket;
   const { visitorId } = socket;
   const { agentId } = socket;
-  const {type} = socket;
+  const { type } = socket;
   // let userAgentRoom = "";
   // let userRoom = "";
   let visitorRoom = "";
   let agentRoom = "";
   let conversationRoom = "";
 
-    console.log(agentId ,"<----------- agentId");
+  console.log(agentId, "<----------- agentId");
 
-    // userAgentRoom = `user-${agentId}-${humanAgentId}`;
-    agentRoom = `user-${agentId}`;
-    visitorRoom = `visitor-${agentId}-${visitorId}`;
-    // userRoom = `user-${userId}`;
+  // userAgentRoom = `user-${agentId}-${humanAgentId}`;
+  agentRoom = `user-${agentId}`;
+  visitorRoom = `visitor-${agentId}-${visitorId}`;
+  // userRoom = `user-${userId}`;
   socket.join(visitorRoom);
   socket.join(agentRoom);
   // socket.join(userRoom);
@@ -237,7 +246,14 @@ const initializeVisitorEvents = (io, socket) => {
 
   const resolveAndSaveVisitorGeo = async () => {
     try {
-      const geo = await resolveVisitorGeoForSocket(socket);
+      let geo = await resolveVisitorGeoForSocket(socket);
+
+      console.log("Resolved visitor geo:", geo);
+
+      if (isLocalIp(geo.ip)) {
+        geo.country = "IN";
+      }
+
       if (!visitorId) return geo;
 
       await VisitorController.updateVisitorById({
@@ -287,13 +303,13 @@ const initializeVisitorEvents = (io, socket) => {
       let conversation = await ConversationController.getOpenConversation(
         visitorId,
         ownerUserId,
-        effectiveAgentId
+        effectiveAgentId,
       );
 
       if (!conversation) {
         await Client.updateOne(
           { userId: ownerUserId },
-          { $set: { "upgradePlanStatus.chatLimitExceeded": true } }
+          { $set: { "upgradePlanStatus.chatLimitExceeded": true } },
         );
         socket.emit("visitor-connect-response", {
           conversationId: null,
@@ -310,7 +326,10 @@ const initializeVisitorEvents = (io, socket) => {
 
       // Fetch the visitor's conversation history
       let chatMessages = [];
-      chatMessages = await ChatMessageController.getAllChatMessages(visitorId, effectiveAgentId);
+      chatMessages = await ChatMessageController.getAllChatMessages(
+        visitorId,
+        effectiveAgentId,
+      );
 
       let aiChat = true;
 
@@ -323,24 +342,31 @@ const initializeVisitorEvents = (io, socket) => {
           "system",
           themeSettings?.welcomeMessage,
           ownerUserId,
-          effectiveAgentId
+          effectiveAgentId,
         );
 
         chatMessages = await ChatMessageController.getAllChatMessages(
           visitorId,
-          effectiveAgentId
+          effectiveAgentId,
         );
       }
 
       // aiChat from loaded conversation
       aiChat = conversation.aiChat !== undefined ? conversation.aiChat : true;
-      console.log('🔌 visitor-connect: aiChat status:', aiChat, 'for conversation:', conversation._id);
+      console.log(
+        "🔌 visitor-connect: aiChat status:",
+        aiChat,
+        "for conversation:",
+        conversation._id,
+      );
 
       // Prepare conversation feedback data
-      const conversationFeedback = conversation ? {
-        feedback: conversation.feedback,
-        comment: conversation.comment
-      } : null;
+      const conversationFeedback = conversation
+        ? {
+            feedback: conversation.feedback,
+            comment: conversation.comment,
+          }
+        : null;
 
       conversationRoom = `conversation-${conversation._id}`;
       socket.join(conversationRoom);
@@ -361,290 +387,294 @@ const initializeVisitorEvents = (io, socket) => {
     }
   });
 
-  socket.on(
-    "save-visitor-details",
-    async ({ visitorDetails }, callback) => {
-      try {
-        const geo = await resolveVisitorGeoForSocket(socket);
-        await VisitorController.updateVisitorById({
-          id: visitorId,
-          location: geo.country,
-          ip: geo.ip,
-          visitorDetails,
-        });
-        callback?.({ success: true, ip: geo.ip, country: geo.country });
-      } catch (error) {
-        console.error("save-visitor-details error:", error.message);
-        callback?.({ success: false, error: error.message });
-      }
-    }
-  );
-
-  socket.on("visitor-send-message", async ({ message, id, replyTo }, callback) => {
+  socket.on("save-visitor-details", async ({ visitorDetails }, callback) => {
     try {
-      const conversation = await ConversationController.getOpenConversation(
-        visitorId,
-        userId,
-        agentId
-        // socket.humanAgentId
-      );
-      if (!conversation) {
-        await Client.updateOne({ userId }, { $set: { "upgradePlanStatus.chatLimitExceeded": true } });
-        socket.emit("visitor-connect-response-upgrade");
-        callback?.({ success: false });
-        return;
-      }
-      const conversationId = conversation._id;
-      const messages = await ChatMessage.find({
-        conversation_id: conversationId,
+      const geo = await resolveVisitorGeoForSocket(socket);
+      await VisitorController.updateVisitorById({
+        id: visitorId,
+        location: geo.country,
+        ip: geo.ip,
+        visitorDetails,
       });
-      if (messages.length <= 1) {
-        await Conversation.findByIdAndUpdate(conversationId, {
-          is_started: true,
-        });
-        io.to([agentRoom]).emit(
-          "visitor-connect-list-update",
-          {}
-        );
-      }
-      const encodedMessage = encode(message);
-      let chatMessage = await ChatMessageController.createChatMessage(
-        conversationId,
-        visitorId,
-        "visitor",
-        "<p>" + encodedMessage + "</p>",
-        userId,
-        agentId,
-        undefined,
-        undefined,
-        replyTo
-      );
-
-      if (replyTo) {
-        await chatMessage.populate({
-          path: "replyTo",
-          select: "sender message createdAt sender_type humanAgentId agentId",
-          populate: [
-            { path: "humanAgentId", select: "name isClient" },
-            { path: "agentId", select: "agentName" },
-          ],
-        });
-      }
-
-      const chatMessageObj = chatMessage.toObject ? chatMessage.toObject() : chatMessage;
-
-      io.to(conversationRoom).emit(
-        "conversation-append-message",
-        {
-          chatMessage: chatMessageObj,
-        }
-      );
-      await Conversation.updateOne(
-        { _id: conversationId },
-        { $inc: { newMessage: 1 }, $set: { lastMessage: message } }
-      );
-      io.to([agentRoom]).emit("new-message-count", { conversationId, lastMessage: message });
-      callback?.({ success: true, chatMessage: chatMessageObj, id });
-      if (conversation.aiChat) {
-        const response_data = await QueryController.handleQuestionAnswer(
-          userId,
-          agentId,
-          message,
-          conversationId
-        );
-        io.to(conversationRoom).emit("intermediate-response", {
-          message: "...replying",
-          conversationId,
-        });
-
-        // Check if visitor requested agent connection and liveAgentSupport is enabled
-        if (response_data.isAgentRequest) {
-          const agentData = await Agent.findOne({ _id: agentId }).lean();
-          if (agentData && agentData.liveAgentSupport === true) {
-            // Get visitor and conversation details for notification
-            const visitor = await Visitor.findById(visitorId).lean();
-            const conversationDoc = await Conversation.findById(conversationId).lean();
-            
-            // Emit agent connection request to visitor (show connecting state)
-            io.to(conversationRoom).emit("agent-connection-request", {
-              conversationId,
-              visitorId,
-              message: "Connecting to agent...",
-            });
-
-            // Same start time for countdown + sessionStorage dismiss key on every replay (e.g. check-pending).
-            const requestStartedAt = Date.now();
-
-            const agents = await HumanAgent.find({
-              assignedAgents: agentId,
-              status: "approved",
-              // isActive: true,
-            }).lean();
-
-            // Emit notification to client (AI agent room). Per-human-agent emits happen below (include notificationId).
-            const baseNotificationData = {
-              conversationId,
-              visitorId,
-              agentId,
-              visitor: visitor,
-              message: "Visitor requested to connect to an agent",
-              timestamp: new Date(),
-              requestStartedAt,
-            };
-
-            // io.to([agentRoom]).emit(
-            //   "agent-connection-notification",
-            //   baseNotificationData
-            // );
-
-            // Create per-agent DB notifications, then emit to each human agent room with notificationId
-            if (agents.length > 0) {
-              console.log("saving notifications for agents");
-              for (const agent of agents) {
-                const notification =
-                  await NotificationController.createAgentConnectionNotification(
-                  agent._id,
-                  conversationId,
-                  visitorId,
-                  userId,
-                  "Visitor requested to connect to an agent",
-                  agentId
-                );
-
-                io.to([`user-${agent._id}`]).emit(
-                  "agent-connection-notification",
-                  {
-                    ...baseNotificationData,
-                    notificationId: notification?._id,
-                    humanAgentId: agent._id,
-                  }
-                );
-              }
-            }
-
-            // const notificationData = {
-            //   conversationId,
-            //   visitorId,
-            //   agentId,
-            //   visitor: visitor,
-            //   message: "Visitor requested to connect to an agent",
-            //   timestamp: new Date(),
-            //   requestStartedAt,
-            //   targetHumanAgentIds: agents.map((h) => h._id.toString()),
-            // };
-
-            // // Inbox listeners join user-<AI agent id>; human agents also join user-<HumanAgent id>.
-            // // Include both so active, assigned humans get live notifications from any inbox view.
-            // const notificationRooms = [
-            //   agentRoom,
-            //   ...agents.map((h) => `user-${h._id}`),
-            // ];
-            // io.to(notificationRooms).emit(
-            //   "agent-connection-notification",
-            //   notificationData
-            // );
-
-            // Set up 20-second timeout
-            const timeoutId = setTimeout(async () => {
-              // Check if conversation was already accepted
-              const updatedConversation = await Conversation.findById(conversationId).lean();
-              if (updatedConversation && updatedConversation.aiChat === true) {
-                // No agent accepted, continue in AI mode
-                const timeoutMessage = await ChatMessageController.createChatMessage(
-                  conversationId,
-                  "",
-                  "ai",
-                  "Sorry, currently there is no active agent available. I'll continue helping you.",
-                  userId
-                );
-                
-                io.to(conversationRoom).emit("conversation-append-message", {
-                  chatMessage: timeoutMessage,
-                });
-
-                // Emit to visitor that connection failed
-                io.to(conversationRoom).emit("agent-connection-timeout", {
-                  conversationId,
-                });
-
-                // Cancel notifications
-                // io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });
-                // agents.forEach(agent => {
-                //   io.to().emit("agent-connection-cancelled", { conversationId });
-                // });
-
-                // Remove timeout from map
-                agentConnectionTimeouts.delete(conversationId.toString());
-              }
-            }, 20000); // 20 seconds
-
-            // Store timeout + start time (check-pending replays need requestStartedAt for dismiss/sessionStorage)
-            agentConnectionTimeouts.set(conversationId.toString(), {
-              timeoutId,
-              requestStartedAt,
-            });
-            
-            return; // Don't send AI response if agent connection is requested
-          }
-        }
-
-        if (response_data.success == true) {
-          const chatMessageResponse =
-            await ChatMessageController.createChatMessage(
-              conversationId,
-              "",
-              "ai",
-              response_data.answer,
-              userId,
-              agentId,
-              response_data?.sources
-            );
-          await chatMessageResponse.populate("agentId", "agentName");
-          const chatMessageObj =
-            chatMessageResponse.toObject?.() ?? chatMessageResponse;
-          await Conversation.updateOne(
-            { _id: conversationId },
-            { $set: { lastMessage: stripHtml(response_data.answer) } }
-          );
-          io.to(conversationRoom).emit(
-            "conversation-append-message",
-            {
-              chatMessage: chatMessageObj,
-              sources: response_data?.sources,
-            }
-          );
-        } else {
-          const agentFallback = await Agent.findById(agentId)
-            .select("fallbackMessage")
-            .lean();
-          const fallbackText =
-            (agentFallback?.fallbackMessage &&
-              String(agentFallback.fallbackMessage).trim()) ||
-            "error in generating Response";
-          const chatMessageResponse =
-            await ChatMessageController.createChatMessage(
-              conversationId,
-              "",
-              "system",
-              fallbackText,
-              userId,
-              agentId
-            );
-          await Conversation.updateOne(
-            { _id: conversationId },
-            { $set: { lastMessage: stripHtml(fallbackText) } }
-          );
-          io.to(conversationRoom).emit(
-            "conversation-append-message",
-            { chatMessage: chatMessageResponse }
-          );
-        }
-      }
+      callback?.({ success: true, ip: geo.ip, country: geo.country });
     } catch (error) {
-      console.error("visitor-send-message error:", error.message);
+      console.error("save-visitor-details error:", error.message);
       callback?.({ success: false, error: error.message });
     }
   });
+
+  socket.on(
+    "visitor-send-message",
+    async ({ message, id, replyTo }, callback) => {
+      try {
+        const conversation = await ConversationController.getOpenConversation(
+          visitorId,
+          userId,
+          agentId,
+          // socket.humanAgentId
+        );
+        if (!conversation) {
+          await Client.updateOne(
+            { userId },
+            { $set: { "upgradePlanStatus.chatLimitExceeded": true } },
+          );
+          socket.emit("visitor-connect-response-upgrade");
+          callback?.({ success: false });
+          return;
+        }
+        const conversationId = conversation._id;
+        const messages = await ChatMessage.find({
+          conversation_id: conversationId,
+        });
+        if (messages.length <= 1) {
+          await Conversation.findByIdAndUpdate(conversationId, {
+            is_started: true,
+          });
+          io.to([agentRoom]).emit("visitor-connect-list-update", {});
+        }
+        const encodedMessage = encode(message);
+        let chatMessage = await ChatMessageController.createChatMessage(
+          conversationId,
+          visitorId,
+          "visitor",
+          "<p>" + encodedMessage + "</p>",
+          userId,
+          agentId,
+          undefined,
+          undefined,
+          replyTo,
+        );
+
+        if (replyTo) {
+          await chatMessage.populate({
+            path: "replyTo",
+            select: "sender message createdAt sender_type humanAgentId agentId",
+            populate: [
+              { path: "humanAgentId", select: "name isClient" },
+              { path: "agentId", select: "agentName" },
+            ],
+          });
+        }
+
+        const chatMessageObj = chatMessage.toObject
+          ? chatMessage.toObject()
+          : chatMessage;
+
+        io.to(conversationRoom).emit("conversation-append-message", {
+          chatMessage: chatMessageObj,
+        });
+        await Conversation.updateOne(
+          { _id: conversationId },
+          { $inc: { newMessage: 1 }, $set: { lastMessage: message } },
+        );
+        io.to([agentRoom]).emit("new-message-count", {
+          conversationId,
+          lastMessage: message,
+        });
+        callback?.({ success: true, chatMessage: chatMessageObj, id });
+        if (conversation.aiChat) {
+          const response_data = await QueryController.handleQuestionAnswer(
+            userId,
+            agentId,
+            message,
+            conversationId,
+          );
+          io.to(conversationRoom).emit("intermediate-response", {
+            message: "...replying",
+            conversationId,
+          });
+
+          // Check if visitor requested agent connection and liveAgentSupport is enabled
+          if (response_data.isAgentRequest) {
+            const agentData = await Agent.findOne({ _id: agentId }).lean();
+            if (agentData && agentData.liveAgentSupport === true) {
+              // Get visitor and conversation details for notification
+              const visitor = await Visitor.findById(visitorId).lean();
+              const conversationDoc =
+                await Conversation.findById(conversationId).lean();
+
+              // Emit agent connection request to visitor (show connecting state)
+              io.to(conversationRoom).emit("agent-connection-request", {
+                conversationId,
+                visitorId,
+                message: "Connecting to agent...",
+              });
+
+              // Same start time for countdown + sessionStorage dismiss key on every replay (e.g. check-pending).
+              const requestStartedAt = Date.now();
+
+              const agents = await HumanAgent.find({
+                assignedAgents: agentId,
+                status: "approved",
+                // isActive: true,
+              }).lean();
+
+              // Emit notification to client (AI agent room). Per-human-agent emits happen below (include notificationId).
+              const baseNotificationData = {
+                conversationId,
+                visitorId,
+                agentId,
+                visitor: visitor,
+                message: "Visitor requested to connect to an agent",
+                timestamp: new Date(),
+                requestStartedAt,
+              };
+
+              // io.to([agentRoom]).emit(
+              //   "agent-connection-notification",
+              //   baseNotificationData
+              // );
+
+              // Create per-agent DB notifications, then emit to each human agent room with notificationId
+              if (agents.length > 0) {
+                console.log("saving notifications for agents");
+                for (const agent of agents) {
+                  const notification =
+                    await NotificationController.createAgentConnectionNotification(
+                      agent._id,
+                      conversationId,
+                      visitorId,
+                      userId,
+                      "Visitor requested to connect to an agent",
+                      agentId,
+                    );
+
+                  io.to([`user-${agent._id}`]).emit(
+                    "agent-connection-notification",
+                    {
+                      ...baseNotificationData,
+                      notificationId: notification?._id,
+                      humanAgentId: agent._id,
+                    },
+                  );
+                }
+              }
+
+              // const notificationData = {
+              //   conversationId,
+              //   visitorId,
+              //   agentId,
+              //   visitor: visitor,
+              //   message: "Visitor requested to connect to an agent",
+              //   timestamp: new Date(),
+              //   requestStartedAt,
+              //   targetHumanAgentIds: agents.map((h) => h._id.toString()),
+              // };
+
+              // // Inbox listeners join user-<AI agent id>; human agents also join user-<HumanAgent id>.
+              // // Include both so active, assigned humans get live notifications from any inbox view.
+              // const notificationRooms = [
+              //   agentRoom,
+              //   ...agents.map((h) => `user-${h._id}`),
+              // ];
+              // io.to(notificationRooms).emit(
+              //   "agent-connection-notification",
+              //   notificationData
+              // );
+
+              // Set up 20-second timeout
+              const timeoutId = setTimeout(async () => {
+                // Check if conversation was already accepted
+                const updatedConversation =
+                  await Conversation.findById(conversationId).lean();
+                if (
+                  updatedConversation &&
+                  updatedConversation.aiChat === true
+                ) {
+                  // No agent accepted, continue in AI mode
+                  const timeoutMessage =
+                    await ChatMessageController.createChatMessage(
+                      conversationId,
+                      "",
+                      "ai",
+                      "Sorry, currently there is no active agent available. I'll continue helping you.",
+                      userId,
+                    );
+
+                  io.to(conversationRoom).emit("conversation-append-message", {
+                    chatMessage: timeoutMessage,
+                  });
+
+                  // Emit to visitor that connection failed
+                  io.to(conversationRoom).emit("agent-connection-timeout", {
+                    conversationId,
+                  });
+
+                  // Cancel notifications
+                  // io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });
+                  // agents.forEach(agent => {
+                  //   io.to().emit("agent-connection-cancelled", { conversationId });
+                  // });
+
+                  // Remove timeout from map
+                  agentConnectionTimeouts.delete(conversationId.toString());
+                }
+              }, 20000); // 20 seconds
+
+              // Store timeout + start time (check-pending replays need requestStartedAt for dismiss/sessionStorage)
+              agentConnectionTimeouts.set(conversationId.toString(), {
+                timeoutId,
+                requestStartedAt,
+              });
+
+              return; // Don't send AI response if agent connection is requested
+            }
+          }
+
+          if (response_data.success == true) {
+            const chatMessageResponse =
+              await ChatMessageController.createChatMessage(
+                conversationId,
+                "",
+                "ai",
+                response_data.answer,
+                userId,
+                agentId,
+                response_data?.sources,
+              );
+            await chatMessageResponse.populate("agentId", "agentName");
+            const chatMessageObj =
+              chatMessageResponse.toObject?.() ?? chatMessageResponse;
+            await Conversation.updateOne(
+              { _id: conversationId },
+              { $set: { lastMessage: stripHtml(response_data.answer) } },
+            );
+            io.to(conversationRoom).emit("conversation-append-message", {
+              chatMessage: chatMessageObj,
+              sources: response_data?.sources,
+            });
+          } else {
+            const agentFallback = await Agent.findById(agentId)
+              .select("fallbackMessage")
+              .lean();
+            const fallbackText =
+              (agentFallback?.fallbackMessage &&
+                String(agentFallback.fallbackMessage).trim()) ||
+              "error in generating Response";
+            const chatMessageResponse =
+              await ChatMessageController.createChatMessage(
+                conversationId,
+                "",
+                "system",
+                fallbackText,
+                userId,
+                agentId,
+              );
+            await Conversation.updateOne(
+              { _id: conversationId },
+              { $set: { lastMessage: stripHtml(fallbackText) } },
+            );
+            io.to(conversationRoom).emit("conversation-append-message", {
+              chatMessage: chatMessageResponse,
+            });
+          }
+        }
+      } catch (error) {
+        console.error("visitor-send-message error:", error.message);
+        callback?.({ success: false, error: error.message });
+      }
+    },
+  );
 
   socket.on(
     "conversation-feedback",
@@ -653,7 +683,7 @@ const initializeVisitorEvents = (io, socket) => {
         await ConversationController.updateFeedback(
           conversationId,
           feedback,
-          comment
+          comment,
         );
         callback?.({ success: true });
 
@@ -661,7 +691,11 @@ const initializeVisitorEvents = (io, socket) => {
         // closure variable (which is only set after visitor-connect fires).
         const feedbackConvRoom = `conversation-${conversationId}`;
         const rooms = [agentRoom, feedbackConvRoom].filter(Boolean);
-        console.log(`[conversation-feedback] emitting conversation-feedback-update to rooms:`, rooms, { conversationId, feedback, comment });
+        console.log(
+          `[conversation-feedback] emitting conversation-feedback-update to rooms:`,
+          rooms,
+          { conversationId, feedback, comment },
+        );
         io.to(rooms).emit("conversation-feedback-update", {
           conversationId,
           feedback,
@@ -671,7 +705,7 @@ const initializeVisitorEvents = (io, socket) => {
         console.error("message-feedback error:", error.message);
         callback?.({ success: false, error: error.message });
       }
-    }
+    },
   );
 
   socket.on(
@@ -700,14 +734,21 @@ const initializeVisitorEvents = (io, socket) => {
             "agent-connect",
             `Chat ended: ${closedByName} closed the chat.`,
             conversation.userId,
-            conversation.agentId || agentId
+            conversation.agentId || agentId,
           );
-          const closeLineObj = closeLine.toObject ? closeLine.toObject() : closeLine;
-          io.to(`conversation-${conversationId}`).emit("conversation-append-message", {
-            chatMessage: closeLineObj,
-          });
+          const closeLineObj = closeLine.toObject
+            ? closeLine.toObject()
+            : closeLine;
+          io.to(`conversation-${conversationId}`).emit(
+            "conversation-append-message",
+            {
+              chatMessage: closeLineObj,
+            },
+          );
           try {
-            await transcriptEmailQueue.add("sendConversationTranscriptEmail", { conversation });
+            await transcriptEmailQueue.add("sendConversationTranscriptEmail", {
+              conversation,
+            });
           } catch (mailError) {
             console.error("queue transcript email error:", mailError.message);
           }
@@ -726,7 +767,7 @@ const initializeVisitorEvents = (io, socket) => {
         console.error("close-conversation-visitor error:", error.message);
         callback?.({ success: false, error: error.message });
       }
-    }
+    },
   );
 
   // Listen for agent connection accepted to clear timeout
