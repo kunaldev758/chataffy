@@ -296,7 +296,7 @@ exports.chatTranscriptTemplate = (data) => {
           </div>
 
           <div class="footer">
-            <p>This transcript was generated automatically.</p>
+            <p>This transcript was generated automatically.${data.timezone ? ` All times are shown in ${String(data.timezone).replace(/_/g, " ")}.` : ""}</p>
             <p>&copy; 2026 Chataffy. All rights reserved.</p>
           </div>
         </div>

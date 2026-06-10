@@ -23,6 +23,36 @@ function legacyAlignFromRaw(raw) {
   return a === 'left' || a === 'right' ? a : null;
 }
 
+function isValidTimezone(timezone) {
+  if (!timezone || typeof timezone !== 'string') return false;
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: timezone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveWidgetTimezone(settings) {
+  const raw = settings?.toObject?.() ?? settings ?? {};
+  const timezone =
+    raw.timezone ||
+    raw.workingHours?.timezone ||
+    'UTC';
+  return isValidTimezone(timezone) ? timezone : 'UTC';
+}
+
+function mergeWidgetSettings(existing = {}, incoming = {}) {
+  const next = { ...existing, ...incoming };
+  if (incoming.workingHours || existing.workingHours) {
+    next.workingHours = {
+      ...(existing.workingHours || {}),
+      ...(incoming.workingHours || {}),
+    };
+  }
+  return next;
+}
+
 /** Normalize a URL or hostname to a bare hostname (no www.), lowercase. */
 function normalizeEmbedHost(input) {
   if (input == null || input === '') return '';
@@ -219,6 +249,7 @@ WidgetController.getThemeSettings = async (req, res) => {
           align,
           widgetType,
           displayBarMessage,
+          timezone: resolveWidgetTimezone(widget.settings),
           settings: widget.settings,
           widgetToken: widget.widgetToken,
           // website: widget.website,
@@ -338,7 +369,22 @@ WidgetController.updateThemeSettings = async (req, res) => {
     
     // Update advanced settings
     if (themeSettings.settings) {
-      updateData.settings = { ...widget.settings.toObject(), ...themeSettings.settings };
+      const existingSettings = widget.settings?.toObject?.() ?? { ...(widget.settings || {}) };
+      const incomingSettings = { ...themeSettings.settings };
+
+      if (incomingSettings.timezone !== undefined) {
+        const timezone = isValidTimezone(incomingSettings.timezone)
+          ? incomingSettings.timezone
+          : 'UTC';
+        incomingSettings.timezone = timezone;
+        incomingSettings.workingHours = {
+          ...(existingSettings.workingHours || {}),
+          ...(incomingSettings.workingHours || {}),
+          timezone,
+        };
+      }
+
+      updateData.settings = mergeWidgetSettings(existingSettings, incomingSettings);
     }
     
     const mongoUpdate = { $unset: { position: 1 } };

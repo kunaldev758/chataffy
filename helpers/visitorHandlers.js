@@ -44,17 +44,42 @@ const transcriptMailTransporter = nodemailer.createTransport({
   },
 });
 
-const formatTimestamp = (dateValue) => {
+const isValidTimezone = (timezone) => {
+  if (!timezone || typeof timezone !== "string") return false;
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: timezone });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const formatTimestamp = (dateValue, timeZone = "UTC") => {
   if (!dateValue) return "-";
-  return new Date(dateValue).toLocaleString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true,
-  });
+  const safeTimeZone = isValidTimezone(timeZone) ? timeZone : "UTC";
+  try {
+    return new Date(dateValue).toLocaleString("en-US", {
+      timeZone: safeTimeZone,
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+    });
+  } catch {
+    return new Date(dateValue).toLocaleString("en-US", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+    });
+  }
 };
 
 const formatDuration = (start, end) => {
@@ -138,9 +163,13 @@ const sendConversationTranscriptEmail = async (conversation) => {
       userId: conversation.userId,
       agentId: conversation.agentId,
     })
-      .select("titleBar colorFields")
+      .select("titleBar colorFields settings")
       .lean(),
   ]);
+  const widgetTimezone =
+    widget?.settings?.timezone ||
+    widget?.settings?.workingHours?.timezone ||
+    "UTC";
   const visitorName = visitorDoc?.name || "Visitor";
   const firstMessageAt = messages?.[1]?.createdAt || conversation.createdAt;
   const lastMessageAt =
@@ -158,7 +187,7 @@ const sendConversationTranscriptEmail = async (conversation) => {
         ? {
             sender: getMessageSenderName(msg.replyTo, visitorName),
             sender_type: msg.replyTo?.sender_type || "system",
-            timestamp: formatTimestamp(msg.replyTo?.createdAt),
+            timestamp: formatTimestamp(msg.replyTo?.createdAt, widgetTimezone),
             text: stripHtml(msg.replyTo?.message || ""),
           }
         : null;
@@ -166,7 +195,7 @@ const sendConversationTranscriptEmail = async (conversation) => {
       return {
         sender: senderName,
         sender_type: senderType,
-        timestamp: formatTimestamp(msg?.createdAt),
+        timestamp: formatTimestamp(msg?.createdAt, widgetTimezone),
         text: stripHtml(msg?.message || ""),
         replyTo,
       };
@@ -177,11 +206,12 @@ const sendConversationTranscriptEmail = async (conversation) => {
     conversationId: conversation._id.toString(),
     visitorName,
     visitorEmail: getVisitorEmail(visitorDoc),
-    startedAt: formatTimestamp(firstMessageAt),
-    endedAt: formatTimestamp(lastMessageAt),
+    startedAt: formatTimestamp(firstMessageAt, widgetTimezone),
+    endedAt: formatTimestamp(lastMessageAt, widgetTimezone),
     duration: formatDuration(firstMessageAt, lastMessageAt),
     messages: mappedMessages,
     colorFields: widget?.colorFields || [],
+    timezone: widgetTimezone,
   });
 
   const appName = process.env.APP_NAME || "Chataffy";
