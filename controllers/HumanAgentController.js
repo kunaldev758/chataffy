@@ -491,11 +491,11 @@ exports.acceptInviteHumanAgent = async (req, res) => {
     await humanAgent.save();
     res
       .status(200)
-      .json({ message: "Invitation accepted, human agent approved!" });
+      .json({ status_code: 200, message: "Invitation accepted, human agent approved!" });
   } catch (error) {
     res
       .status(500)
-      .json({ message: "Error accepting invitation for human agent" });
+      .json({ status_code: 500, message: "Error accepting invitation for human agent" });
   }
 };
 
