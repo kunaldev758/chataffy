@@ -250,6 +250,7 @@ WidgetController.getThemeSettings = async (req, res) => {
           widgetType,
           displayBarMessage,
           timezone: resolveWidgetTimezone(widget.settings),
+          timezoneConfigured: Boolean(widget.settings?.timezoneConfigured),
           settings: widget.settings,
           widgetToken: widget.widgetToken,
           // website: widget.website,
@@ -377,6 +378,7 @@ WidgetController.updateThemeSettings = async (req, res) => {
           ? incomingSettings.timezone
           : 'UTC';
         incomingSettings.timezone = timezone;
+        incomingSettings.timezoneConfigured = true;
         incomingSettings.workingHours = {
           ...(existingSettings.workingHours || {}),
           ...(incomingSettings.workingHours || {}),
