@@ -27,6 +27,7 @@ const {
   clearClientSessionCookies,
   clearAgentSessionCookies,
 } = require("../constants/authCookies");
+const UserSession = require("../models/userSession.js");
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
@@ -252,8 +253,13 @@ UserController.verifyEmail = async (req, res) => {
     // Already verified: still return a session so reopening the link (e.g. new tab) signs the user in
     if (user.email_verified) {
       const authToken = user.generateAuthToken("local");
-      user.auth_token = authToken;
-      await user.save();
+      // Create UserSession instead of storing on User
+      await UserSession.create({
+        userId: user._id,
+        platform: 'local',
+        token: authToken,
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+      });
       if (req.io) {
         req.io.emit("user-logged-in", { userId: user._id });
       }
@@ -270,7 +276,13 @@ UserController.verifyEmail = async (req, res) => {
 
     user.email_verified = true;
     const token = user.generateAuthToken("local");
-    user.auth_token = token;
+    // Create UserSession instead of storing on User
+    await UserSession.create({
+      userId: user._id,
+      platform: 'local',
+      token,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+    });
     await user.save();
 
     if (req.io) {
@@ -514,8 +526,13 @@ UserController.loginUser = async (req, res) => {
     }
     // Generate an authentication token
     const token = user.generateAuthToken("local");
-    user.auth_token = token;
-    await user.save();
+    // Create UserSession instead of storing on User
+    await UserSession.create({
+      userId: user._id,
+      platform: 'local',
+      token,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+    });
 
     // Fetch all AI agents for this user
     const agents = await Agent.find({
@@ -609,9 +626,8 @@ UserController.logoutUser = async (req, res) => {
     const userId = req.body.userId;
     const user = await User.findById(userId);
     if (user) {
-      // Only invalidate the web (local) token — Shopify and BigCommerce sessions remain active.
-      user.auth_token = "";
-      await user.save();
+      // Invalidate all local platform sessions for this user
+      await UserSession.deleteMany({ userId: user._id, platform: 'local' });
       clearClientSessionCookies(res, req);
       const cookieOptions = getAuthCookieOptions(req);
       res.clearCookie("platform", cookieOptions);
@@ -922,8 +938,13 @@ UserController.googleOAuth = async (req, res) => {
 
     // Generate token for both login and signup
     const appToken = user.generateAuthToken("local");
-    user.auth_token = appToken;
-    await user.save();
+    // Create UserSession instead of storing on User
+    await UserSession.create({
+      userId: user._id,
+      platform: 'local',
+      token: appToken,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+    });
 
     // Fetch all AI agents for this user
     const agents = await Agent.find({
@@ -1301,8 +1322,13 @@ UserController.getClientByToken = async (req, res) => {
 
     // Create a fresh app session token (so the caller doesn't need to keep using URL tokens).
     const appToken = user.generateAuthToken("local");
-    user.auth_token = appToken;
-    await user.save();
+    // Create UserSession instead of storing on User
+    await UserSession.create({
+      userId: user._id,
+      platform: 'local',
+      token: appToken,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+    });
 
     const agents = await Agent.find({
       userId: user._id,
@@ -1350,8 +1376,13 @@ UserController.platformRedirectionLogin = async (req, res) => {
     }
 
     const appToken = user.generateAuthToken("local");
-    user.auth_token = appToken;
-    await user.save();
+    // Create UserSession for platform redirection
+    await UserSession.create({
+      userId: user._id,
+      platform: 'local',
+      token: appToken,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+    });
     setClientSessionCookies(res, req, appToken);
 
     return res.status(200).json({

@@ -9,6 +9,29 @@ const { provisionNewMerchantUser } = require("../services/CommerceMerchantProvis
 const PlanService = require("../services/PlanService");
 const { getAuthCookieOptions } = require("../helpers/helper");
 const { sendWelcomeEmail } = require("../services/emailService");
+const UserSession = require("../models/userSession");
+
+async function findOrReuseUserSession(user, platform, cookieToken) {
+  if (cookieToken && typeof cookieToken === "string") {
+    const existing = await UserSession.findOne({
+      userId: user._id,
+      platform,
+      token: cookieToken,
+    });
+    if (existing && (!existing.expiresAt || existing.expiresAt.getTime() > Date.now())) {
+      return cookieToken;
+    }
+  }
+
+  const token = user.generateAuthToken(platform);
+  await UserSession.create({
+    userId: user._id,
+    platform,
+    token,
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+  });
+  return token;
+}
 
 const router = express.Router();
 
@@ -225,8 +248,12 @@ router.get("/auth/load", async (req, res) => {
       userData.markModified('isOnboarded');
     }
 
-    const token = userData.generateAuthToken('bigcommerce');
-    userData.bc_token = token;
+    const token = await findOrReuseUserSession(
+      userData,
+      'bigcommerce',
+      req.headers.authorization?.replace("Bearer ", "") || req.cookies?.bc_token,
+    );
+
     await userData.save();
 
     const cookieOptions = getAuthCookieOptions(req);

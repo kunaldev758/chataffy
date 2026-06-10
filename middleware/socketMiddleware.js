@@ -164,6 +164,8 @@ const Visitor = require("../models/Visitor");
 const VisitorController = require("../controllers/VisitorController");
 const Agent = require("../models/Agent");
 const HumanAgent = require("../models/HumanAgent");
+const ImpersonationSession = require("../models/ImpersonationSession");
+const UserSession = require("../models/userSession");
 
 const verifyToken = (token) => {
   return new Promise((resolve, reject) => {
@@ -174,11 +176,15 @@ const verifyToken = (token) => {
   });
 };
 
-async function resolveHumanAgentForSocket(decoded, humanAgentIdFromQuery) {
-  const isHumanAgentJwt = decoded?.role === "human-agent";
-  const queryId = humanAgentIdFromQuery && humanAgentIdFromQuery !== "undefined" ? humanAgentIdFromQuery : null;
+const getQueryValue = (value) => {
+  if (Array.isArray(value)) return value[0];
+  return value;
+};
 
-  if (queryId) {
+async function resolveHumanAgentForSocket(decoded, humanAgentIdFromQuery) {
+  const queryId = getQueryValue(humanAgentIdFromQuery);
+
+  if (queryId && queryId !== "undefined") {
     const fromQuery = await HumanAgent.findOne({
       _id: queryId,
       isDeleted: { $ne: true },
@@ -186,6 +192,7 @@ async function resolveHumanAgentForSocket(decoded, humanAgentIdFromQuery) {
     if (fromQuery) return fromQuery;
   }
 
+  const isHumanAgentJwt = decoded?.role === "human-agent";
   if (isHumanAgentJwt && decoded?.id) {
     const fromJwt = await HumanAgent.findOne({
       _id: decoded.id,
@@ -206,10 +213,60 @@ async function resolveHumanAgentForSocket(decoded, humanAgentIdFromQuery) {
   return null;
 }
 
+async function findAgentIdForUser(userId, explicitAgentId) {
+  const agentId = getQueryValue(explicitAgentId);
+  if (agentId && agentId !== "undefined") return agentId;
+
+  const firstAgent = await Agent.findOne({
+    userId,
+    isDeleted: { $ne: true },
+  }).lean();
+
+  return firstAgent ? firstAgent._id.toString() : undefined;
+}
+
+async function validateClientSession(token, decoded) {
+  if (!decoded?._id) return null;
+
+  const platform = decoded?.platform || "local";
+  const session = await UserSession.findOne({
+    userId: decoded._id,
+    platform,
+    token,
+  });
+
+  if (!session) return null;
+  if (session.expiresAt && session.expiresAt.getTime() <= Date.now()) return null;
+
+  return {
+    userId: decoded._id,
+    platform,
+    session,
+  };
+}
+
+async function validateImpersonationToken(decoded) {
+  if (decoded?.purpose !== "impersonation" || !decoded?._id || !decoded?.jti) {
+    return null;
+  }
+
+  const session = await ImpersonationSession.findOne({ jti: decoded.jti });
+  if (!session || session.revokedAt) return null;
+  if (String(session.userId) !== String(decoded._id)) return null;
+  if (session.expiresAt && session.expiresAt.getTime() <= Date.now()) return null;
+
+  return session;
+}
+
 const myMiddleware = async (socket, next) => {
   try {
-    const { token, visitorId, widgetId, widgetAuthToken, agentId, humanAgentId } =
-      socket.handshake.query;
+    const query = socket.handshake.query;
+    const token = getQueryValue(query.token);
+    const visitorId = getQueryValue(query.visitorId);
+    const widgetId = getQueryValue(query.widgetId);
+    const widgetAuthToken = getQueryValue(query.widgetAuthToken);
+    const agentId = getQueryValue(query.agentId);
+    const humanAgentId = getQueryValue(query.humanAgentId);
 
     const authToken = typeof token === "string" ? token.trim() : "";
 
@@ -217,80 +274,59 @@ const myMiddleware = async (socket, next) => {
       const decoded = await verifyToken(authToken);
       if (!decoded) throw new Error("Invalid token.");
 
-      const humanAgent = await resolveHumanAgentForSocket(decoded, humanAgentId);
-      
-      // For first-time login, user may not have a HumanAgent record yet
-      if (!humanAgent) {
-        const userId = decoded._id;
-        const user = await User.findById(userId);
-        
-        if (!user) {
-          throw new Error("User not found.");
-        }
-
-        const socketPlatform = decoded?.platform || "local";
-        const socketTokenField =
-          socketPlatform === "shopify"
-            ? "sf_token"
-            : socketPlatform === "bigcommerce"
-              ? "bc_token"
-              : "auth_token";
-
-        if (user[socketTokenField] !== authToken) {
-          throw new Error("Token mismatch.");
-        }
-
-        // First-time login: set socket properties for authenticated user without HumanAgent
-        socket.userId = userId;
+      const impersonationSession = await validateImpersonationToken(decoded);
+      if (impersonationSession) {
+        socket.userId = decoded._id;
         socket.type = "client";
         socket.humanAgentId = undefined;
-        socket.agentId = agentId || undefined;
+        socket.impersonatedBy = impersonationSession.superAdminId;
+        socket.authSession = {
+          portal: "client",
+          platform: "local",
+          token: authToken,
+        };
+        socket.agentId = await findAgentIdForUser(socket.userId, agentId);
+        return next();
+      }
 
-        // Try to find or assign an agent
-        if (!socket.agentId && socket.userId) {
-          const firstAgent = await Agent.findOne({
-            userId: socket.userId,
-            isDeleted: { $ne: true },
-          }).lean();
-          if (firstAgent) socket.agentId = firstAgent._id.toString();
-        }
-      } else if (humanAgent.isClient) {
-        socket.userId = humanAgent.userId;
-        socket.type = "client";
-        socket.humanAgentId = humanAgent._id.toString();
+      const humanAgent = await resolveHumanAgentForSocket(decoded, humanAgentId);
+      const isHumanAgentToken =
+        decoded?.id && humanAgent && String(decoded.id) === String(humanAgent._id);
 
-        const userId = decoded._id || humanAgent.userId;
-        const user = await User.findById(userId);
-        const socketPlatform = decoded?.platform || "local";
-        const socketTokenField =
-          socketPlatform === "shopify"
-            ? "sf_token"
-            : socketPlatform === "bigcommerce"
-              ? "bc_token"
-              : "auth_token";
-
-        if (!user || user[socketTokenField] !== authToken) {
-          throw new Error("User not found or token mismatch.");
-        }
-
-        socket.agentId = agentId || undefined;
-
-        if (!socket.agentId && socket.userId) {
-          if (humanAgent.assignedAgents?.length > 0) {
-            socket.agentId = humanAgent.assignedAgents[0].toString();
-          } else {
-            const firstAgent = await Agent.findOne({
-              userId: socket.userId,
-              isDeleted: { $ne: true },
-            }).lean();
-            if (firstAgent) socket.agentId = firstAgent._id.toString();
-          }
-        }
-      } else {
+      if (isHumanAgentToken) {
         socket.userId = humanAgent.userId;
         socket.type = "human-agent";
         socket.humanAgentId = humanAgent._id.toString();
         socket.agentId = agentId || undefined;
+        if (!socket.agentId && humanAgent.assignedAgents?.length > 0) {
+          socket.agentId = humanAgent.assignedAgents[0].toString();
+        }
+        socket.authSession = { portal: "agent", token: authToken };
+      } else {
+        const clientSession = await validateClientSession(authToken, decoded);
+        if (!clientSession) {
+          throw new Error("Client session invalid or expired.");
+        }
+
+        socket.userId = clientSession.userId;
+        socket.type = "client";
+        socket.authSession = {
+          portal: "client",
+          platform: clientSession.platform,
+          token: authToken,
+          sessionId: clientSession.session._id,
+        };
+
+        if (humanAgent && humanAgent.isClient) {
+          socket.humanAgentId = humanAgent._id.toString();
+          socket.agentId = agentId || undefined;
+          if (!socket.agentId && humanAgent.assignedAgents?.length > 0) {
+            socket.agentId = humanAgent.assignedAgents[0].toString();
+          }
+        } else {
+          socket.humanAgentId = undefined;
+          socket.agentId = await findAgentIdForUser(socket.userId, agentId);
+        }
       }
     } else if (visitorId && widgetId && widgetAuthToken) {
       const widget = await Widget.findOne({
@@ -304,8 +340,8 @@ const myMiddleware = async (socket, next) => {
       socket.agentId = agentId || widget.agentId;
       socket.humanAgentId = humanAgentId;
 
-      if (visitorId && visitorId != "undefined") {
-        const visitor = await Visitor.findOne({ visitorId: visitorId });
+      if (visitorId !== undefined && visitorId !== "undefined") {
+        const visitor = await Visitor.findOne({ visitorId });
         socket.visitorId =
           visitor && visitor.userId.toString() === socket.userId.toString()
             ? visitor._id
@@ -327,6 +363,7 @@ const myMiddleware = async (socket, next) => {
     } else {
       throw new Error("Invalid connection type or credentials.");
     }
+
     next();
   } catch (error) {
     console.error("Socket Middleware Error:", error.message);
