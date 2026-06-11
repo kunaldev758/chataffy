@@ -92,7 +92,7 @@ async function maybeRefreshClientSessionExpiry(req, res, userSession) {
     sessionExpiresInMs > 0 &&
     sessionExpiresInMs <= ONE_DAY_IN_SECONDS * 1000;
 
-    console.log("Should refresh client session?", { expiresInSeconds, sessionExpiresInMs, shouldRefresh });
+    // console.log("Should refresh client session?", { expiresInSeconds, sessionExpiresInMs, shouldRefresh });
   if (!shouldRefresh) return;
 
   userSession.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // extend 7 days

@@ -1367,11 +1367,20 @@ UserController.getClientByToken = async (req, res) => {
 // platform redirection login
 UserController.platformRedirectionLogin = async (req, res) => {
   try {
-    const { userId } = req.params;
-    console.log("userId is :", userId);
+    const { userId, shortLivedtoken } = req.params;
+    // console.log("userId is :", userId);
     const user = await User.findById(userId);
     if (!user || user.isDeleted) {
       return res.status(404).json({ message: "User not found" });
+    }
+
+    if(!shortLivedtoken){
+      return res.status(400).json({ message: "Short Lived Token is required" });
+    }
+
+    const decodedToken = jwt.verify(shortLivedtoken, process.env.JWT_SECRET_KEY);
+    if (!decodedToken) {
+      return res.status(400).json({ message: "Invalid or expired token" });
     }
 
     const agents = await Agent.find({
@@ -1386,21 +1395,24 @@ UserController.platformRedirectionLogin = async (req, res) => {
     }
 
     const appToken = user.generateAuthToken("local");
-    // Create UserSession for platform redirection
-    await UserSession.create({
-      userId: user._id,
-      platform: 'local',
-      token: appToken,
-      ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
-      deviceInfo: req.headers["user-agent"] || "unknown",
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-    });
+    // Create a new UserSession so multiple concurrent logins can coexist
+    let session = await UserSession.findOne({ userId: user._id, platform: 'local' }).lean();
+    if(!session){
+      session = await UserSession.create({
+        userId: user._id,
+        platform: 'local',
+        token: appToken,
+        ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+        deviceInfo: req.headers["user-agent"] || "unknown",
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+      });
+    }
     setClientSessionCookies(res, req, appToken);
 
     return res.status(200).json({
       status_code: 200,
       status: true,
-      token: appToken,
+      token: session.token,
       userId: user._id,
       isOnboarded: user.getIsOnboarded("local"),
       agents,
@@ -1595,5 +1607,51 @@ UserController.validateToken = async (req, res) => {
     res.status(500).json({ message: "Error in validate token" });
   }
 };
+
+UserController.generateShortLivedToken = async (req, res) => {
+  try {
+    const {userId, platform} = req.body;
+    if (!userId) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "User ID is required",
+      });
+    }
+    if (!platform) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Platform is required",
+      });
+    }
+    const user = await User.findById(userId).lean();
+    if (!user || user.isDeleted) {
+      return res
+        .status(404)
+        .json({ status_code: 404, status: false, message: "User not found" });
+    }
+
+    const token = jwt.sign(
+      { _id: user._id, role: user.role, platform: platform },
+      process.env.JWT_SECRET_KEY,
+      { expiresIn: "2m" },
+    );
+
+    return res.json({
+      status_code: 200,
+      status: true,
+      token,
+      message: "Short-lived token generated successfully",
+    });
+  } catch (error) {
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({
+      status_code: 500,
+      status: false,
+      message: "Failed to generate short-lived token",
+    });
+  }
+}
 
 module.exports = UserController;

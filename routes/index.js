@@ -183,7 +183,7 @@ router.post('/deleteTrainingData', middleware, scrapingController.deleteTraining
 router.post('/retrainTrainingData', middleware, scrapingController.retrainTrainingData);
 
 // platform redirection login route (for platform redirection login)
-router.get('/platform-redirection-login/:userId', UserController.platformRedirectionLogin);
+router.get('/platform-redirection-login/:userId/:shortLivedtoken', UserController.platformRedirectionLogin);
 router.post('/setWebAuthCookies', UserController.setWebAuthCookies);
 
 // Voice note audio upload
@@ -256,6 +256,9 @@ router.post('/chat-transcripts/settings/update', middleware, ChatTranscriptContr
 
 // Visitor management routes
 router.post('/leaveMessage', VisitorController.leaveMessage);
+
+// generate short lived token for platform redirection login
+router.post('/generate-short-lived-token', middleware, UserController.generateShortLivedToken);
 
 // Error handling middleware for multer errors
 router.use((error, req, res, next) => {
