@@ -1407,7 +1407,7 @@ UserController.platformRedirectionLogin = async (req, res) => {
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
       });
     }
-    setClientSessionCookies(res, req, appToken);
+    setClientSessionCookies(res, req, session.token);
 
     return res.status(200).json({
       status_code: 200,
