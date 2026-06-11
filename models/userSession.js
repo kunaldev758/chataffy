@@ -16,6 +16,12 @@ const userSession = new Schema(
       enum: ['local', 'google', 'bigcommerce', 'shopify'],
       default: 'local',
     },
+    ip:{
+      type: String,
+    },
+    deviceInfo:{
+      type:String,
+    },
     token: {
       type: String,
       required: true,

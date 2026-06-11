@@ -258,6 +258,8 @@ UserController.verifyEmail = async (req, res) => {
         userId: user._id,
         platform: 'local',
         token: authToken,
+        ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+        deviceInfo: req.headers["user-agent"] || "unknown",
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
       });
       if (req.io) {
@@ -281,6 +283,8 @@ UserController.verifyEmail = async (req, res) => {
       userId: user._id,
       platform: 'local',
       token,
+      ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+      deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
     await user.save();
@@ -531,6 +535,8 @@ UserController.loginUser = async (req, res) => {
       userId: user._id,
       platform: 'local',
       token,
+      ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+      deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
 
@@ -627,7 +633,7 @@ UserController.logoutUser = async (req, res) => {
     const user = await User.findById(userId);
     if (user) {
       // Invalidate all local platform sessions for this user
-      await UserSession.deleteMany({ userId: user._id, platform: 'local' });
+      await UserSession.findOneAndDelete({ userId: user._id, platform: 'local', token: req.authSession?.token });
       clearClientSessionCookies(res, req);
       const cookieOptions = getAuthCookieOptions(req);
       res.clearCookie("platform", cookieOptions);
@@ -943,6 +949,8 @@ UserController.googleOAuth = async (req, res) => {
       userId: user._id,
       platform: 'local',
       token: appToken,
+      ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+      deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
 
@@ -1327,6 +1335,8 @@ UserController.getClientByToken = async (req, res) => {
       userId: user._id,
       platform: 'local',
       token: appToken,
+      ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+      deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
 
@@ -1381,6 +1391,8 @@ UserController.platformRedirectionLogin = async (req, res) => {
       userId: user._id,
       platform: 'local',
       token: appToken,
+      ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+      deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
     setClientSessionCookies(res, req, appToken);

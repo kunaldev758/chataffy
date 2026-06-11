@@ -11,7 +11,7 @@ const { getAuthCookieOptions } = require("../helpers/helper");
 const { sendWelcomeEmail } = require("../services/emailService");
 const UserSession = require("../models/userSession");
 
-async function findOrReuseUserSession(user, platform, cookieToken) {
+async function findOrReuseUserSession(user, platform, cookieToken,req) {
   if (cookieToken && typeof cookieToken === "string") {
     const existing = await UserSession.findOne({
       userId: user._id,
@@ -28,6 +28,8 @@ async function findOrReuseUserSession(user, platform, cookieToken) {
     userId: user._id,
     platform,
     token,
+    ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+    deviceInfo: req.headers["user-agent"] || "unknown",
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
   });
   return token;
@@ -252,6 +254,7 @@ router.get("/auth/load", async (req, res) => {
       userData,
       'bigcommerce',
       req.headers.authorization?.replace("Bearer ", "") || req.cookies?.bc_token,
+      req
     );
 
     await userData.save();

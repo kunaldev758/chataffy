@@ -83,7 +83,7 @@ async function maybeRefreshClientSessionExpiry(req, res, userSession) {
   const expiresInSeconds =
     typeof decoded?.exp === "number" ? decoded.exp - nowInSeconds : null;
   const sessionExpiresInMs = userSession.expiresAt
-    ? userSession.expiresAt.getTime() - userSession.createdAt.getTime()
+    ? userSession.expiresAt.getTime() - Date.now()
     : null;
 
   // Refresh session expiry if less than 1 day remaining
