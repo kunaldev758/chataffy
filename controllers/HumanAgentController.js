@@ -242,6 +242,11 @@ exports.getAllHumanAgents = async (req, res) => {
       await Promise.all(saveTasks);
     }
 
+    await HumanAgent.populate(humanAgents, {
+      path: "assignedAgents",
+      select: "agentName website_name _id",
+    });
+
     res.json(humanAgents);
   } catch (error) {
     console.error("Error fetching human agents:", error);

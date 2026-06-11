@@ -11,6 +11,7 @@ const WebsiteData = require('../models/WebsiteData');
 const Client = require('../models/Client');
 const PlanService = require('../services/PlanService');
 const commonHelper = require('../helpers/commonHelper');
+const { isValidTimezone } = require('../helpers/timezoneHelper');
 
 const AIAgentController = {};
 
@@ -46,7 +47,7 @@ AIAgentController.getAgents = async (req, res) => {
 AIAgentController.createAgent = async (req, res) => {
   try {
     const userId = req.body.userId;
-    const { agentName } = req.body;
+    const { agentName, timezone } = req.body;
 
     if (!userId) {
       return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
@@ -81,7 +82,15 @@ AIAgentController.createAgent = async (req, res) => {
 
     // Create a widget for this new agent
     const widgetToken = crypto.randomBytes(8).toString('hex') + userId + agent._id;
-    const widget = new Widget({ userId, widgetToken, agentId: agent._id });
+    const widgetPayload = { userId, widgetToken, agentId: agent._id };
+    if (isValidTimezone(timezone)) {
+      widgetPayload.settings = {
+        timezone,
+        timezoneConfigured: true,
+        workingHours: { timezone },
+      };
+    }
+    const widget = new Widget(widgetPayload);
     await widget.save();
 
     const user = await User.findById(userId).select('isOnboarded');

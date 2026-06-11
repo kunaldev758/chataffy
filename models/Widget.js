@@ -119,6 +119,7 @@ const widgetSchema = new Schema(
         delay: { type: Number, default: 1000 } // milliseconds
       },
       timezone: { type: String, default: 'UTC' },
+      timezoneConfigured: { type: Boolean, default: false },
       workingHours: {
         enabled: { type: Boolean, default: false },
         timezone: { type: String, default: 'UTC' },
