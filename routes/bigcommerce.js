@@ -166,7 +166,7 @@ router.get("/auth/callback", async (req, res) => {
     );
 
     // sending installation email
-    await sendWelcomeEmail(
+    sendWelcomeEmail(
       user?.email ? user.email : `user-${Date.now()}@example.com`,
       "bigcommerce",
       storeName,
@@ -235,29 +235,27 @@ router.get("/auth/load", async (req, res) => {
     }
 
     if (req.io) {
-      req.io.emit("user-logged-in", { userId: userData._id });
+      setImmediate(() => req.io.emit("user-logged-in", { userId: userData._id }));
     }
 
     // If limit exceeded and not yet onboarded, treat as onboarded so the
     // embedded app skips the onboarding wizard and goes straight to the dashboard.
     let isOnboarded = userData.getIsOnboarded('bigcommerce');
-    if (!isOnboarded && await PlanService.isAgentLimitExceeded(store.userId)) {
+    const cookieToken = req.headers.authorization?.replace("Bearer ", "") || req.cookies?.bc_token;
+
+    const [agentLimitExceeded, token] = await Promise.all([
+      isOnboarded ? Promise.resolve(false) : PlanService.isAgentLimitExceeded(store.userId),
+      findOrReuseUserSession(userData, 'bigcommerce', cookieToken, req),
+    ]);
+
+    if (!isOnboarded && agentLimitExceeded) {
       isOnboarded = true;
-      if (!userData.isOnboarded || typeof userData.isOnboarded !== 'object') {
-        userData.isOnboarded = { local: false, shopify: false, bigcommerce: false };
-      }
+      userData.isOnboarded = userData.isOnboarded || { local: false, shopify: false, bigcommerce: false };
       userData.isOnboarded.bigcommerce = true;
       userData.markModified('isOnboarded');
+      await userData.save();
     }
 
-    const token = await findOrReuseUserSession(
-      userData,
-      'bigcommerce',
-      req.headers.authorization?.replace("Bearer ", "") || req.cookies?.bc_token,
-      req
-    );
-
-    await userData.save();
 
     const cookieOptions = getAuthCookieOptions(req);
     res.cookie("bc_token", token, cookieOptions);

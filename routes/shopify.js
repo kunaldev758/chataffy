@@ -275,7 +275,7 @@ router.get("/auth/callback", async (req, res) => {
     );
     
     console.log("[Shopify] sending welcome mail");
-    await sendWelcomeEmail(
+    sendWelcomeEmail(
       email,
       "shopify",
       displayName,
@@ -359,29 +359,26 @@ router.get("/auth/load", async (req, res) => {
     }
 
     if (req.io) {
-      req.io.emit("user-logged-in", { userId: userData._id });
+      setImmediate(() => req.io.emit("user-logged-in", { userId: userData._id }));
     }
 
     // If limit exceeded and not yet onboarded, treat as onboarded so the
     // embedded app skips the onboarding wizard and goes straight to the dashboard.
     let isOnboarded = userData.getIsOnboarded('shopify');
-    if (!isOnboarded && await PlanService.isAgentLimitExceeded(store.userId)) {
+    const cookieToken = req.headers.authorization?.replace("Bearer ", "") || req.cookies?.sf_token;
+
+    const [agentLimitExceeded, token] = await Promise.all([
+      isOnboarded ? Promise.resolve(false) : PlanService.isAgentLimitExceeded(store.userId),
+      findOrReuseUserSession(userData, 'shopify', cookieToken, req),
+    ]);
+
+    if (!isOnboarded && agentLimitExceeded) {
       isOnboarded = true;
-      if (!userData.isOnboarded || typeof userData.isOnboarded !== 'object') {
-        userData.isOnboarded = { local: false, shopify: false, bigcommerce: false };
-      }
+      userData.isOnboarded = userData.isOnboarded || { local: false, shopify: false, bigcommerce: false };
       userData.isOnboarded.shopify = true;
       userData.markModified('isOnboarded');
+      await userData.save();
     }
-
-    const token = await findOrReuseUserSession(
-      userData,
-      'shopify',
-      req.headers.authorization?.replace("Bearer ", "") || req.cookies?.sf_token,
-      req
-    );
-
-    await userData.save();
 
     const cookieOptions = getAuthCookieOptions(req);
     res.cookie("sf_token", token, cookieOptions);
