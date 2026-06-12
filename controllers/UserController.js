@@ -184,22 +184,18 @@ UserController.createUser = async (req, res) => {
 
     try {
       await sendVerificationEmail(user);
-      return res
-        .status(200)
-        .json({
-          status_code: 200,
-          status: true,
-          message: "User registered. Check your email for verification.",
-        });
+      return res.status(200).json({
+        status_code: 200,
+        status: true,
+        message: "User registered. Check your email for verification.",
+      });
     } catch (error) {
-      return res
-        .status(500)
-        .json({
-          status_code: 201,
-          status: false,
-          message: "Verification email sending failed",
-          error,
-        });
+      return res.status(500).json({
+        status_code: 201,
+        status: false,
+        message: "Verification email sending failed",
+        error,
+      });
     }
   } catch (error) {
     console.error("Error creating user:", error);
@@ -256,9 +252,11 @@ UserController.verifyEmail = async (req, res) => {
       // Create UserSession instead of storing on User
       await UserSession.create({
         userId: user._id,
-        platform: 'local',
+        platform: "local",
         token: authToken,
-        ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+        ip:
+          req.ip ||
+          (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
         deviceInfo: req.headers["user-agent"] || "unknown",
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
       });
@@ -281,9 +279,11 @@ UserController.verifyEmail = async (req, res) => {
     // Create UserSession instead of storing on User
     await UserSession.create({
       userId: user._id,
-      platform: 'local',
+      platform: "local",
       token,
-      ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+      ip:
+        req.ip ||
+        (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
       deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
@@ -316,13 +316,11 @@ UserController.forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
     if (!email || !String(email).trim()) {
-      return res
-        .status(400)
-        .json({
-          status_code: 400,
-          status: false,
-          message: "Email is required",
-        });
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Email is required",
+      });
     }
 
     const normalizedEmail = String(email).trim().toLowerCase();
@@ -354,13 +352,11 @@ UserController.forgotPassword = async (req, res) => {
 
     transporter.sendMail(mailOptions, (error) => {
       if (error) {
-        return res
-          .status(500)
-          .json({
-            status_code: 500,
-            status: false,
-            message: "Failed to send password reset email",
-          });
+        return res.status(500).json({
+          status_code: 500,
+          status: false,
+          message: "Failed to send password reset email",
+        });
       }
       return res
         .status(200)
@@ -368,13 +364,11 @@ UserController.forgotPassword = async (req, res) => {
     });
   } catch (error) {
     commonHelper.logErrorToFile(error);
-    return res
-      .status(500)
-      .json({
-        status_code: 500,
-        status: false,
-        message: "Failed to process password reset request",
-      });
+    return res.status(500).json({
+      status_code: 500,
+      status: false,
+      message: "Failed to process password reset request",
+    });
   }
 };
 
@@ -383,31 +377,25 @@ UserController.resetPassword = async (req, res) => {
   try {
     const { token, newPassword, confirmPassword } = req.body;
     if (!token) {
-      return res
-        .status(400)
-        .json({
-          status_code: 400,
-          status: false,
-          message: "Reset token is required",
-        });
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Reset token is required",
+      });
     }
     if (!newPassword || !confirmPassword) {
-      return res
-        .status(400)
-        .json({
-          status_code: 400,
-          status: false,
-          message: "New password and confirmation are required",
-        });
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "New password and confirmation are required",
+      });
     }
     if (newPassword !== confirmPassword) {
-      return res
-        .status(400)
-        .json({
-          status_code: 400,
-          status: false,
-          message: "Passwords do not match",
-        });
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Passwords do not match",
+      });
     }
     if (!isStrongPassword(newPassword)) {
       return res.status(400).json({
@@ -421,67 +409,55 @@ UserController.resetPassword = async (req, res) => {
     const resetToken = decodeURIComponent(String(token));
     const user = await User.findOne({ password_reset_token: resetToken });
     if (!user || user.isDeleted) {
-      return res
-        .status(400)
-        .json({
-          status_code: 400,
-          status: false,
-          message: "Invalid or expired reset link",
-        });
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Invalid or expired reset link",
+      });
     }
 
     try {
       const decoded = jwt.verify(resetToken, process.env.JWT_SECRET_KEY);
       if (decoded.purpose !== "password_reset") {
-        return res
-          .status(400)
-          .json({
-            status_code: 400,
-            status: false,
-            message: "Invalid reset link",
-          });
+        return res.status(400).json({
+          status_code: 400,
+          status: false,
+          message: "Invalid reset link",
+        });
       }
     } catch (err) {
       if (err.name === "TokenExpiredError") {
         user.password_reset_token = undefined;
         await user.save();
-        return res
-          .status(400)
-          .json({
-            status_code: 400,
-            status: false,
-            message: "Reset link has expired. Please request a new one.",
-          });
-      }
-      return res
-        .status(400)
-        .json({
+        return res.status(400).json({
           status_code: 400,
           status: false,
-          message: "Invalid reset link",
+          message: "Reset link has expired. Please request a new one.",
         });
+      }
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Invalid reset link",
+      });
     }
 
     user.password = newPassword;
     user.password_reset_token = undefined;
     await user.save();
 
-    return res
-      .status(200)
-      .json({
-        status_code: 200,
-        status: true,
-        message: "Password reset successfully. You can now sign in.",
-      });
+    return res.status(200).json({
+      status_code: 200,
+      status: true,
+      message: "Password reset successfully. You can now sign in.",
+    });
   } catch (error) {
     commonHelper.logErrorToFile(error);
-    return res
-      .status(500)
-      .json({
-        status_code: 500,
-        status: false,
-        message: "Failed to reset password",
-      });
+    return res.status(500).json({
+      status_code: 500,
+      status: false,
+      message: "Failed to reset password",
+    });
   }
 };
 
@@ -533,9 +509,11 @@ UserController.loginUser = async (req, res) => {
     // Create UserSession instead of storing on User
     await UserSession.create({
       userId: user._id,
-      platform: 'local',
+      platform: "local",
       token,
-      ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+      ip:
+        req.ip ||
+        (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
       deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
@@ -633,7 +611,11 @@ UserController.logoutUser = async (req, res) => {
     const user = await User.findById(userId);
     if (user) {
       // Invalidate all local platform sessions for this user
-      await UserSession.findOneAndDelete({ userId: user._id, platform: 'local', token: req.authSession?.token });
+      await UserSession.findOneAndDelete({
+        userId: user._id,
+        platform: "local",
+        token: req.authSession?.token,
+      });
       clearClientSessionCookies(res, req);
       const cookieOptions = getAuthCookieOptions(req);
       res.clearCookie("platform", cookieOptions);
@@ -947,9 +929,11 @@ UserController.googleOAuth = async (req, res) => {
     // Create UserSession instead of storing on User
     await UserSession.create({
       userId: user._id,
-      platform: 'local',
+      platform: "local",
       token: appToken,
-      ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+      ip:
+        req.ip ||
+        (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
       deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
@@ -1333,9 +1317,11 @@ UserController.getClientByToken = async (req, res) => {
     // Create UserSession instead of storing on User
     await UserSession.create({
       userId: user._id,
-      platform: 'local',
+      platform: "local",
       token: appToken,
-      ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+      ip:
+        req.ip ||
+        (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
       deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
@@ -1349,6 +1335,41 @@ UserController.getClientByToken = async (req, res) => {
       req.io.emit("user-logged-in", { userId: user._id });
     }
 
+    // find out the human Agent Id --->
+
+    // here we fetch the Human Agent and then return it ---->
+    const humanAgentData = await HumanAgent.findOne({
+      userId: user._id,
+      isClient: true,
+    })
+      .select("_id")
+      .lean();
+    // create human agent in case if it is not present --->
+
+    let humanAgent = null;
+    if (!humanAgentData) {
+      // create a new Human Agent for the client if not exists
+      try {
+        const agentId =
+          agents.length > 0 ? agents[0]._id : new mongoose.Types.ObjectId();
+        const humanAgent = new HumanAgent({
+          name: commonHelper.clientHumanAgentNameFromAgent({ _id: agentId }),
+          email: user.email,
+          password: crypto.randomBytes(16).toString("hex"), // Random password since client won't use it
+          userId: user._id,
+          status: "approved",
+          isClient: true,
+          avatar: "", // Default avatar path
+          assignedAgents: agents.map((a) => a._id), // Assign all existing agents to this human agent
+        });
+        await humanAgent.save();
+      } catch (error) {
+        console.error("Error creating human agent:", error);
+      }
+    }
+
+    console.log("humanAgentData : ", humanAgentData);
+
     return res.status(200).json({
       status_code: 200,
       status: true,
@@ -1356,8 +1377,11 @@ UserController.getClientByToken = async (req, res) => {
       userId: user._id,
       isOnboarded: user.getIsOnboarded("local"),
       agents,
+      humanAgentId: humanAgentData?._id ? humanAgentData._id : humanAgent?._id,
       message: "Signed in successfully",
     });
+
+    
   } catch (error) {
     console.error("Error getting client by token:", error);
     res.status(500).json({ message: "Error getting client by token" });
@@ -1374,11 +1398,14 @@ UserController.platformRedirectionLogin = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    if(!shortLivedtoken){
+    if (!shortLivedtoken) {
       return res.status(400).json({ message: "Short Lived Token is required" });
     }
 
-    const decodedToken = jwt.verify(shortLivedtoken, process.env.JWT_SECRET_KEY);
+    const decodedToken = jwt.verify(
+      shortLivedtoken,
+      process.env.JWT_SECRET_KEY,
+    );
     if (!decodedToken) {
       return res.status(400).json({ message: "Invalid or expired token" });
     }
@@ -1396,17 +1423,56 @@ UserController.platformRedirectionLogin = async (req, res) => {
 
     const appToken = user.generateAuthToken("local");
     // Create a new UserSession so multiple concurrent logins can coexist
-    let session = await UserSession.findOne({ userId: user._id, platform: 'local' }).lean();
-    if(!session){
+    let session = await UserSession.findOne({
+      userId: user._id,
+      platform: "local",
+    }).lean();
+    if (!session) {
       session = await UserSession.create({
         userId: user._id,
-        platform: 'local',
+        platform: "local",
         token: appToken,
-        ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+        ip:
+          req.ip ||
+          (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
         deviceInfo: req.headers["user-agent"] || "unknown",
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
       });
     }
+
+    // here we fetch the Human Agent and then return it ---->
+    const humanAgentData = await HumanAgent.findOne({
+      userId: user._id,
+      isClient: true,
+    })
+      .select("_id")
+      .lean();
+
+    // create human agent in case if it is not present --->
+
+    let humanAgent = null;
+    if (!humanAgentData) {
+      // create a new Human Agent for the client if not exists
+      try {
+        const agentId =
+          agents.length > 0 ? agents[0]._id : new mongoose.Types.ObjectId();
+        const humanAgent = new HumanAgent({
+          name: commonHelper.clientHumanAgentNameFromAgent({ _id: agentId }),
+          email: user.email,
+          password: crypto.randomBytes(16).toString("hex"), // Random password since client won't use it
+          userId: user._id,
+          status: "approved",
+          isClient: true,
+          avatar: "", // Default avatar path
+          assignedAgents: agents.map((a) => a._id), // Assign all existing agents to this human agent
+        });
+        await humanAgent.save();
+      } catch (error) {
+        console.error("Error creating human agent:", error);
+      }
+    }
+
+    console.log("humanAgentData : ", humanAgentData);
     setClientSessionCookies(res, req, session.token);
 
     return res.status(200).json({
@@ -1416,6 +1482,7 @@ UserController.platformRedirectionLogin = async (req, res) => {
       userId: user._id,
       isOnboarded: user.getIsOnboarded("local"),
       agents,
+      humanAgentId: humanAgentData?._id ? humanAgentData._id : humanAgent?._id,
       message: "Login successful",
     });
   } catch (error) {
@@ -1610,7 +1677,7 @@ UserController.validateToken = async (req, res) => {
 
 UserController.generateShortLivedToken = async (req, res) => {
   try {
-    const {userId, platform} = req.body;
+    const { userId, platform } = req.body;
     if (!userId) {
       return res.status(400).json({
         status_code: 400,
@@ -1652,6 +1719,6 @@ UserController.generateShortLivedToken = async (req, res) => {
       message: "Failed to generate short-lived token",
     });
   }
-}
+};
 
 module.exports = UserController;
