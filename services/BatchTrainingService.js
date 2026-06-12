@@ -25,7 +25,8 @@ class BatchTrainingService {
   }
 
 
-  async processDocumentAndTrain(documents, userId, agentId, qdrantIndexName) {
+  async processDocumentAndTrain(documents, userId, agentId, qdrantIndexName, options = {}) {
+    const { onProgress } = options;
     try {
       const splitter = new RecursiveCharacterTextSplitter({
         chunkSize: this.CHUNK_SIZE * this.CHARS_PER_TOKEN,
@@ -35,8 +36,10 @@ class BatchTrainingService {
 
       let allChunks = [];
       let chunkCountPerUrl = {};
+      const docTotal = documents.length;
 
-      for (const doc of documents) {
+      for (let docIndex = 0; docIndex < documents.length; docIndex++) {
+        const doc = documents[docIndex];
         const chunks = await splitter.createDocuments([doc.content]);
         chunkCountPerUrl[doc?.originalUrl] = chunks.length;
 
@@ -53,12 +56,47 @@ class BatchTrainingService {
         }));
 
         allChunks.push(...enhancedChunks);
+
+        if (onProgress) {
+          await onProgress({
+            phase: "training",
+            trainingProcessed: docIndex + 1,
+            trainingTotal: docTotal,
+            step: "chunking",
+          });
+        }
       }
 
       const vectorStore = new QdrantVectorStoreManager(qdrantIndexName);
       await vectorStore.createCollection();
 
-      const upsertResult = await vectorStore.upsertDocuments(allChunks, userId);
+      const upsertResult = await vectorStore.upsertDocuments(allChunks, userId, {
+        onProgress: onProgress
+          ? async (event) => {
+              if (event.step === "embedding") {
+                await onProgress({
+                  phase: "training",
+                  trainingProcessed: docTotal,
+                  trainingTotal: docTotal,
+                  embeddingProgress: event.embedded,
+                  embeddingTotal: event.total,
+                  step: "embedding",
+                });
+              } else if (event.step === "upserting") {
+                await onProgress({
+                  phase: "training",
+                  trainingProcessed: docTotal,
+                  trainingTotal: docTotal,
+                  embeddingProgress: event.total,
+                  embeddingTotal: event.total,
+                  upsertProgress: event.upserted,
+                  upsertTotal: event.total,
+                  step: "upserting",
+                });
+              }
+            }
+          : undefined,
+      });
       console.log("Upsert result response",upsertResult);
       return {
         success: upsertResult?.success,

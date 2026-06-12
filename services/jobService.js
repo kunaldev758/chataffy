@@ -11,6 +11,7 @@ const cheerio = require("cheerio");
 const urlModule = require("url");
 const TurndownService = require("turndown");
 const QdrantVectorStoreManager = require("./QdrantService");
+const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
 
 const redisConfig =
   process.env.ENVIRONMENT === "local"
@@ -391,63 +392,89 @@ new Worker(
       let lastProgressEmitTime = Date.now();
       const PROGRESS_EMIT_INTERVAL = 2000; // Emit progress every 2 seconds
 
-      // Helper function to calculate and emit progress
-      const emitProgress = async (
+      const emitScrapingProgress = async (
         currentIndex,
         totalCount,
         isProcessing = true,
       ) => {
-        const now = Date.now();
-        const elapsedTime = Math.floor(
-          (now - scrapingStartTime.getTime()) / 1000,
-        ); // seconds
-        const percentage =
-          totalCount > 0 ? Math.round((currentIndex / totalCount) * 100) : 0;
+        const scrapingProgress = buildTrainingProgressPayload({
+          startTime: scrapingStartTime,
+          phase: "scraping",
+          processed: currentIndex,
+          total: totalCount,
+          isProcessing,
+        });
 
-        // Calculate estimated time remaining
-        let estimatedTimeRemaining = null;
-        if (currentIndex > 0 && elapsedTime > 0) {
-          const avgTimePerUrl = elapsedTime / currentIndex;
-          const remainingUrls = totalCount - currentIndex;
-          estimatedTimeRemaining = Math.round(remainingUrls * avgTimePerUrl);
-        }
+        await job.updateProgress({
+          phase: "scraping",
+          scrapeCurrent: currentIndex,
+          scrapeTotal: totalCount,
+        });
 
-        // Format time as HH:MM:SS
-        const formatTime = (seconds) => {
-          const hrs = Math.floor(seconds / 3600);
-          const mins = Math.floor((seconds % 3600) / 60);
-          const secs = seconds % 60;
-          return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-        };
-
-        // Emit progress update
         appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
-          scrapingProgress: {
-            percentage,
-            processed: currentIndex,
-            total: totalCount,
-            elapsedTime: formatTime(elapsedTime),
-            elapsedSeconds: elapsedTime,
-            estimatedTimeRemaining: estimatedTimeRemaining
-              ? formatTime(estimatedTimeRemaining)
-              : null,
-            estimatedSecondsRemaining: estimatedTimeRemaining,
-            isProcessing,
-          },
+          scrapingProgress,
+        });
+      };
+
+      let lastTrainingEmitTime = 0;
+      const emitTrainingProgress = async ({
+        trainingProcessed,
+        trainingTotal,
+        embeddingProgress = 0,
+        embeddingTotal = 0,
+        upsertProgress = 0,
+        upsertTotal = 0,
+        trainingStep = "chunking",
+        force = false,
+      }) => {
+        const now = Date.now();
+        if (!force && now - lastTrainingEmitTime < PROGRESS_EMIT_INTERVAL) {
+          return;
+        }
+        lastTrainingEmitTime = now;
+
+        const scrapingProgress = buildTrainingProgressPayload({
+          startTime: scrapingStartTime,
+          phase: "training",
+          processed: totalUrlsCount,
+          total: totalUrlsCount,
+          trainingStep,
+          trainingProcessed,
+          trainingTotal,
+          embeddingProgress,
+          embeddingTotal,
+          upsertProgress,
+          upsertTotal,
+          isProcessing: true,
+        });
+
+        await job.updateProgress({
+          phase: "training",
+          scrapeCurrent: totalUrlsCount,
+          scrapeTotal: totalUrlsCount,
+          trainingCurrent: trainingProcessed,
+          trainingTotal,
+          trainingStep,
+          embeddingProgress,
+          embeddingTotal,
+          upsertProgress,
+          upsertTotal,
+        });
+
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
+          scrapingProgress,
         });
       };
 
       // Emit initial progress
-      await emitProgress(0, totalUrlsCount, true);
+      await emitScrapingProgress(0, totalUrlsCount, true);
 
       for (let i = 0; i < urls.length; i++) {
         const url = urls[i];
         try {
           console.log("Processing URL :", url);
-
-          // Extend lock by updating progress
-          await job.updateProgress({ current: i + 1, total: urls.length });
 
           // Emit progress updates periodically (every 2 seconds or every URL)
           const now = Date.now();
@@ -456,7 +483,7 @@ new Worker(
             i === 0 ||
             i === urls.length - 1
           ) {
-            await emitProgress(i + 1, totalUrlsCount, true);
+            await emitScrapingProgress(i + 1, totalUrlsCount, true);
             lastProgressEmitTime = now;
           }
 
@@ -671,35 +698,14 @@ new Worker(
         }
       }
 
-      // Emit progress after all URLs are scraped (before training phase)
-      const scrapedElapsedTime = Math.floor(
-        (Date.now() - scrapingStartTime.getTime()) / 1000,
-      );
-      const formatTimeAfterScrape = (seconds) => {
-        const hrs = Math.floor(seconds / 3600);
-        const mins = Math.floor((seconds % 3600) / 60);
-        const secs = seconds % 60;
-        return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-      };
-
       if (!stoppedForStorageLimit) {
-        await emitProgress(urls.length, totalUrlsCount, true);
+        await emitScrapingProgress(urls.length, totalUrlsCount, true);
 
-        // Emit update indicating training phase is starting
         if (scrapedDocs.length > 0) {
-          appEvents.emit("userEvent", agentId, "training-event", {
-            agent: await Agent.findOne({ _id: agentId }),
-            scrapingProgress: {
-              percentage: 100,
-              processed: urls.length,
-              total: totalUrlsCount,
-              elapsedTime: formatTimeAfterScrape(scrapedElapsedTime),
-              elapsedSeconds: scrapedElapsedTime,
-              estimatedTimeRemaining: null,
-              estimatedSecondsRemaining: null,
-              isProcessing: true,
-              phase: "training", // Indicates we're in training phase now
-            },
+          await emitTrainingProgress({
+            trainingProcessed: 0,
+            trainingTotal: scrapedDocs.length,
+            force: true,
           });
         }
       }
@@ -710,6 +716,22 @@ new Worker(
         userId,
         agentId,
         qdrantIndexName,
+        {
+          onProgress: async (progress) => {
+            if (stoppedForStorageLimit) return;
+            await emitTrainingProgress({
+              trainingProcessed: progress.trainingProcessed,
+              trainingTotal: progress.trainingTotal,
+              embeddingProgress: progress.embeddingProgress ?? 0,
+              embeddingTotal: progress.embeddingTotal ?? 0,
+              upsertProgress: progress.upsertProgress ?? 0,
+              upsertTotal: progress.upsertTotal ?? 0,
+              trainingStep: progress.step ?? "chunking",
+              force:
+                progress.step === "embedding" || progress.step === "upserting",
+            });
+          },
+        },
       );
 
       // Handle training failure
@@ -804,17 +826,6 @@ new Worker(
         },
       );
 
-      // Emit final progress (100%)
-      const finalElapsedTime = Math.floor(
-        (Date.now() - scrapingStartTime.getTime()) / 1000,
-      );
-      const formatTime = (seconds) => {
-        const hrs = Math.floor(seconds / 3600);
-        const mins = Math.floor((seconds % 3600) / 60);
-        const secs = seconds % 60;
-        return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-      };
-
       if (stoppedForStorageLimit && storageLimitEmitProgress) {
         appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
@@ -823,18 +834,24 @@ new Worker(
           scrapingProgress: storageLimitEmitProgress,
         });
       } else {
+        const trainTotal = scrapedDocs.length || totalUrlsCount;
+        const finalProgress = buildTrainingProgressPayload({
+          startTime: scrapingStartTime,
+          phase: "training",
+          processed: totalUrlsCount,
+          total: totalUrlsCount,
+          trainingStep: "upserting",
+          trainingProcessed: trainTotal,
+          trainingTotal: trainTotal,
+          embeddingProgress: trainTotal,
+          embeddingTotal: trainTotal,
+          upsertProgress: trainTotal,
+          upsertTotal: trainTotal,
+          isProcessing: false,
+        });
         appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
-          scrapingProgress: {
-            percentage: 100,
-            processed: totalUrlsCount,
-            total: totalUrlsCount,
-            elapsedTime: formatTime(finalElapsedTime),
-            elapsedSeconds: finalElapsedTime,
-            estimatedTimeRemaining: null,
-            estimatedSecondsRemaining: null,
-            isProcessing: false,
-          },
+          scrapingProgress: finalProgress,
         });
       }
     } catch (error) {

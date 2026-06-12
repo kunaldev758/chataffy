@@ -137,6 +137,7 @@ const initializeClientEvents = (io, socket) => {
   socket.on("get-agent-data", async () => {
     const agentData = await Agent.findOne({ _id: agentId });
     let webPagesTrainingStats = null;
+    let trainingProgress = null;
     try {
       webPagesTrainingStats = await ScrappingController.getWebPagesTrainingStats(
         userId,
@@ -145,10 +146,21 @@ const initializeClientEvents = (io, socket) => {
     } catch (e) {
       console.error("getWebPagesTrainingStats:", e);
     }
+    if (agentData?.dataTrainingStatus === 1) {
+      try {
+        trainingProgress = await ScrappingController.getActiveTrainingProgress(
+          userId,
+          agentId
+        );
+      } catch (e) {
+        console.error("getActiveTrainingProgress:", e);
+      }
+    }
     socket.emit("get-agent-data-response", {
       response: "Received data from message",
       agentData,
       webPagesTrainingStats,
+      trainingProgress,
     });
   });
 

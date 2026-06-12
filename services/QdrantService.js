@@ -40,7 +40,8 @@ class QdrantVectorStoreManager {
   //   return uuidv4();
   // }
 
-  async upsertDocuments(documents,userId) {
+  async upsertDocuments(documents, userId, options = {}) {
+    const { onProgress } = options;
     if (!documents || documents.length === 0) {
       console.log("No documents provided to upsert.");
       return { success: true, vectorCount: 0 };
@@ -71,6 +72,14 @@ class QdrantVectorStoreManager {
         }
         
         embeddings.push(...batchEmbeddings);
+
+        if (onProgress) {
+          await onProgress({
+            step: "embedding",
+            embedded: Math.min(i + batch.length, contents.length),
+            total: contents.length,
+          });
+        }
       }
 
       console.log(`Generated ${embeddings.length} embeddings, creating points...`);
@@ -155,6 +164,14 @@ class QdrantVectorStoreManager {
           // console.log(`Upserting batch ${batchNumber}/${totalBatches} (${batch.length} points)...`);
 
           await this.qdrantClient.upsert(this.collectionName, {points: batch,wait: true,});
+
+          if (onProgress) {
+            await onProgress({
+              step: "upserting",
+              upserted: Math.min(i + batch.length, points.length),
+              total: points.length,
+            });
+          }
 
           // totalUpserted += batch.length;
           // console.log(

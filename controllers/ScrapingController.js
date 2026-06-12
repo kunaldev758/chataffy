@@ -10,6 +10,7 @@ const axios = require("axios");
 const xml2js = require("xml2js");
 const cheerio = require("cheerio");
 const { urlProcessingQueue, deleteTrainingDataQueue, retrainTrainingDataQueue } = require("../services/jobService.js");
+const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
 const Agent = require("../models/Agent.js");
 const Widget = require("../models/Widget.js");
 const fs = require("fs");
@@ -1092,6 +1093,83 @@ async bulkInsertUrls(userId,agentId, urls) {
         error: error.message,
       });
     }
+  }
+
+  /**
+   * Reconstruct live training progress when the client reconnects mid-job.
+   */
+  async getActiveTrainingProgress(userId, agentId) {
+    const agent = await Agent.findOne({ _id: agentId }).lean();
+    if (!agent || agent.dataTrainingStatus !== 1) return null;
+
+    let total = agent.pagesAdded?.total || 0;
+    const startTime = agent.scrapingStartTime || new Date();
+
+    let phase = "scraping";
+    let processed = 0;
+    let trainingProcessed = 0;
+    let trainingTotal = 0;
+    let trainingStep = "chunking";
+    let embeddingProgress = 0;
+    let embeddingTotal = 0;
+    let upsertProgress = 0;
+    let upsertTotal = 0;
+
+    try {
+      const activeJobs = await urlProcessingQueue.getJobs(["active", "waiting"]);
+      const job = activeJobs.find(
+        (j) => j.data?.agentId?.toString() === agentId.toString(),
+      );
+
+      if (job?.data?.totalUrls) {
+        total = job.data.totalUrls;
+      }
+
+      if (job?.progress && typeof job.progress === "object") {
+        const p = job.progress;
+        if (p.phase === "training") {
+          phase = "training";
+          processed = p.scrapeTotal || total;
+          trainingProcessed = p.trainingCurrent || 0;
+          trainingTotal = p.trainingTotal || 0;
+          trainingStep = p.trainingStep || "chunking";
+          embeddingProgress = p.embeddingProgress || 0;
+          embeddingTotal = p.embeddingTotal || 0;
+          upsertProgress = p.upsertProgress || 0;
+          upsertTotal = p.upsertTotal || 0;
+        } else {
+          processed = p.scrapeCurrent ?? p.current ?? 0;
+        }
+      }
+    } catch (e) {
+      console.error("getActiveTrainingProgress job lookup:", e);
+    }
+
+    // If scrape finished but job is still active, assume training phase.
+    if (
+      phase === "scraping" &&
+      total > 0 &&
+      processed >= total
+    ) {
+      phase = "training";
+      trainingTotal = total;
+      trainingStep = "chunking";
+    }
+
+    return buildTrainingProgressPayload({
+      startTime,
+      phase,
+      processed: Math.min(processed, total) || (phase === "training" ? total : 0),
+      total,
+      trainingStep,
+      trainingProcessed,
+      trainingTotal: trainingTotal || (phase === "training" ? total : 0),
+      embeddingProgress,
+      embeddingTotal,
+      upsertProgress,
+      upsertTotal,
+      isProcessing: true,
+    });
   }
 
   /**
