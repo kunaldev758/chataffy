@@ -13,7 +13,6 @@ const UserSession = require("../models/userSession");
 const ONE_DAY_IN_SECONDS = 24 * 60 * 60;
 
 async function authenticateDecoded(req, res, decoded, token, cookieName) {
-  
   if (decoded?.purpose === "impersonation") {
     if (!decoded?._id || !decoded?.jti) {
       return null;
@@ -31,7 +30,12 @@ async function authenticateDecoded(req, res, decoded, token, cookieName) {
     req.body.userId = decoded._id;
     req.body.impersonatedBy = session.superAdminId;
     req.body.isImpersonating = true;
-    req.authSession = { portal: "client", cookieName, token, platform: "local" };
+    req.authSession = {
+      portal: "client",
+      cookieName,
+      token,
+      platform: "local",
+    };
     return true;
   }
 
@@ -57,12 +61,21 @@ async function authenticateDecoded(req, res, decoded, token, cookieName) {
     });
 
     // Session must exist and not be expired
-    if (!userSession || (userSession.expiresAt && userSession.expiresAt.getTime() <= Date.now())) {
+    if (
+      !userSession ||
+      (userSession.expiresAt && userSession.expiresAt.getTime() <= Date.now())
+    ) {
       return null;
     }
 
     req.body.userId = userId;
-    req.authSession = { portal: "client", cookieName, token, platform, sessionId: userSession._id };
+    req.authSession = {
+      portal: "client",
+      cookieName,
+      token,
+      platform,
+      sessionId: userSession._id,
+    };
     await maybeRefreshClientSessionExpiry(req, res, userSession);
     return true;
   }
@@ -92,7 +105,7 @@ async function maybeRefreshClientSessionExpiry(req, res, userSession) {
     sessionExpiresInMs > 0 &&
     sessionExpiresInMs <= ONE_DAY_IN_SECONDS * 1000;
 
-    // console.log("Should refresh client session?", { expiresInSeconds, sessionExpiresInMs, shouldRefresh });
+  // console.log("Should refresh client session?", { expiresInSeconds, sessionExpiresInMs, shouldRefresh });
   if (!shouldRefresh) return;
 
   userSession.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // extend 7 days
@@ -133,19 +146,19 @@ async function maybeRefreshAgentToken(req, res, humanAgent) {
     { expiresIn: "7d" },
   );
   res.cookie(AGENT_TOKEN, refreshedToken, cookieOptions);
-  
+
   // Also create/update UserSession for agent tokens for audit/tracking
-  const UserSession = require("../models/UserSession");
-  await UserSession.updateOne(
-    { userId: humanAgent.userId, portal: "agent", token: req.authSession?.token },
-    {
-      $set: {
-        token: refreshedToken,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      },
-    },
-    { upsert: true },
-  );
+  // const UserSession = require("../models/UserSession");
+  // await UserSession.updateOne(
+  //   { userId: humanAgent.userId, portal: "agent", token: req.authSession?.token },
+  //   {
+  //     $set: {
+  //       token: refreshedToken,
+  //       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+  //     },
+  //   },
+  //   { upsert: true },
+  // );
 }
 
 module.exports = async (req, res, next) => {
