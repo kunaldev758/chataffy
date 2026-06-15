@@ -13,6 +13,7 @@ const { urlProcessingQueue, deleteTrainingDataQueue, retrainTrainingDataQueue } 
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
 const Agent = require("../models/Agent.js");
 const Widget = require("../models/Widget.js");
+const { findDuplicateWebsiteAgent } = require("../helpers/websiteDuplicateHelper.js");
 const fs = require("fs");
 const path = require("path");
 
@@ -607,6 +608,25 @@ async bulkInsertUrls(userId,agentId, urls) {
           error: "Agent not found",
         });
       }
+
+      const duplicateAgent = await findDuplicateWebsiteAgent(
+        userId,
+        sitemapUrl,
+        agentId,
+      );
+      if (duplicateAgent) {
+        const existingName =
+          duplicateAgent.agentName ||
+          duplicateAgent.website_name ||
+          "your account";
+        return res.status(409).json({
+          success: false,
+          errorCode: "WEBSITE_ALREADY_EXISTS",
+          error: `This website is already added as "${existingName}".`,
+          existingAgentId: duplicateAgent._id,
+        });
+      }
+
       if (!skipBulkInsert && agent.isSitemapAdded == true && sitemapUrl) {
         return res.status(400).json({
           success: false,

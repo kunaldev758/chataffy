@@ -98,4 +98,9 @@ function clientHumanAgentNameFromAgent(agent) {
   return fallback;
 }
 
-module.exports = { logErrorToFile, clientHumanAgentNameFromAgent };
+module.exports = {
+  logErrorToFile,
+  clientHumanAgentNameFromAgent,
+  hostnameFromUrlLike,
+  looksLikeHostnameOrDomain,
+};

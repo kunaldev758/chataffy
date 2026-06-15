@@ -23,7 +23,7 @@ AIAgentController.getAgents = async (req, res) => {
       return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
     }
 
-    const agents = await Agent.find({ userId, isDeleted: false }).select('_id website_name agentName isActive lastTrained dataTrainingStatus pagesAdded filesAdded faqsAdded currentDataSize');
+    const agents = await Agent.find({ userId, isDeleted: false }).select('_id website_name agentName onboardingWebsiteUrl onboardingExtractedUrls isActive lastTrained dataTrainingStatus pagesAdded filesAdded faqsAdded currentDataSize');
 
     // Fetch widget isActive for each agent
     const agentIds = agents.map(a => a._id);
