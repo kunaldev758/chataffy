@@ -11,6 +11,24 @@ const xml2js = require("xml2js");
 const cheerio = require("cheerio");
 const { urlProcessingQueue, deleteTrainingDataQueue, retrainTrainingDataQueue } = require("../services/jobService.js");
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
+const {
+  filterAndDedupeWebUrls,
+  isScrapableWebUrl,
+  normalizeWebUrl,
+} = require("../utils/webUrlUtils.js");
+
+const MAX_DISCOVERED_URLS = 1500;
+
+function finalizeDiscoveredUrls(urls, max = MAX_DISCOVERED_URLS) {
+  const originalCount = Array.isArray(urls) ? urls.length : 0;
+  const cleaned = filterAndDedupeWebUrls(urls).slice(0, max);
+  if (originalCount !== cleaned.length) {
+    console.log(
+      `Cleaned URLs: ${originalCount} -> ${cleaned.length} (removed invalid, non-HTML, or duplicate URLs)`,
+    );
+  }
+  return cleaned;
+}
 const Agent = require("../models/Agent.js");
 const Widget = require("../models/Widget.js");
 const fs = require("fs");
@@ -114,16 +132,7 @@ async bulkInsertUrls(userId,agentId, urls) {
             }
 
             if (urls.length > 0) {
-              // Clean & limit consistent with existing behavior
-              const originalCount = urls.length;
-              urls = urls
-                .filter((url) => url && typeof url === "string")
-                .filter((url) => url.startsWith("http"))
-                .map((url) => url.trim())
-                .filter((url, index, self) => self.indexOf(url) === index);
-              console.log(`(robots.txt) Cleaned URLs: ${originalCount} -> ${urls.length}`);
-              if (urls.length > 1500) urls = urls.slice(0, 1500);
-              return urls;
+              return finalizeDiscoveredUrls(urls);
             }
           }
         } catch (e) {
@@ -150,15 +159,7 @@ async bulkInsertUrls(userId,agentId, urls) {
           }
         }
         if (urls.length > 0) {
-          const originalCount = urls.length;
-          urls = urls
-            .filter((url) => url && typeof url === "string")
-            .filter((url) => url.startsWith("http"))
-            .map((url) => url.trim())
-            .filter((url, index, self) => self.indexOf(url) === index);
-          console.log(`(common paths) Cleaned URLs: ${originalCount} -> ${urls.length}`);
-          if (urls.length > 1500) urls = urls.slice(0, 1500);
-          return urls;
+          return finalizeDiscoveredUrls(urls);
         }
 
         // 3) Fallback: extract links from homepage HTML (same-origin, limited)
@@ -176,22 +177,14 @@ async bulkInsertUrls(userId,agentId, urls) {
               if (!href) return;
               try {
                 const absolute = new URL(href, origin).toString();
-                if (absolute.startsWith(origin)) {
-                  sameOrigin.add(absolute);
-                }
+                if (!absolute.startsWith(origin)) return;
+                if (!isScrapableWebUrl(absolute)) return;
+                sameOrigin.add(normalizeWebUrl(absolute));
               } catch (_) {}
             });
-            urls = Array.from(sameOrigin).slice(0, 500); // conservative cap for homepage crawl
+            urls = finalizeDiscoveredUrls(Array.from(sameOrigin), 500);
 
             if (urls.length > 0) {
-              const originalCount = urls.length;
-              urls = urls
-                .filter((url) => url && typeof url === "string")
-                .filter((url) => url.startsWith("http"))
-                .map((url) => url.trim())
-                .filter((url, index, self) => self.indexOf(url) === index);
-              console.log(`(homepage) Cleaned URLs: ${originalCount} -> ${urls.length}`);
-              if (urls.length > 1500) urls = urls.slice(0, 1500);
               return urls;
             }
           }
@@ -243,9 +236,8 @@ async bulkInsertUrls(userId,agentId, urls) {
         urls = result.urlset.url.map((urlObj) => urlObj.loc[0]);
         console.log(`Found ${urls.length} URLs in regular sitemap: ${sitemapUrl}`);
         if (urls.length >= 1500) {
-          urls = urls.slice(0, 1500); // Take only first 5000 URLs
-          console.log(`URL limit reached. Returning first 5000 URLs from sitemap: ${sitemapUrl}`);
-          return urls;
+          console.log(`URL limit reached. Returning first ${MAX_DISCOVERED_URLS} URLs from sitemap: ${sitemapUrl}`);
+          return finalizeDiscoveredUrls(urls);
         }
       }
       // Handle sitemap index
@@ -267,9 +259,10 @@ async bulkInsertUrls(userId,agentId, urls) {
             urls.push(...nestedUrls);
             console.log(`Successfully extracted ${nestedUrls.length} URLs from nested sitemap: ${nestedSitemapUrl}`);
             if (urls.length >= 1500) {
-              urls = urls.slice(0, 1500); // Trim to exactly 5000 URLs
-              console.log(`URL limit of 5000 reached after processing nested sitemap. Stopping and returning 5000 URLs.`);
-              return urls;
+              console.log(
+                `URL limit of ${MAX_DISCOVERED_URLS} reached after processing nested sitemap. Stopping.`,
+              );
+              return finalizeDiscoveredUrls(urls);
             }
           } catch (error) {
             console.warn(`Failed to fetch nested sitemap ${nestedSitemapUrl}:`, error.message);
@@ -282,22 +275,7 @@ async bulkInsertUrls(userId,agentId, urls) {
         return [];
       }
   
-      // Filter and clean URLs
-      const originalCount = urls.length;
-      urls = urls
-        .filter((url) => url && typeof url === "string")
-        .filter((url) => url.startsWith("http"))
-        .map((url) => url.trim())
-        .filter((url, index, self) => self.indexOf(url) === index); // Remove duplicates
-  
-      console.log(`Cleaned URLs: ${originalCount} -> ${urls.length} (removed ${originalCount - urls.length} invalid/duplicate URLs)`);
-
-      if (urls.length > 1500) {
-        urls = urls.slice(0, 1500);
-        console.log(`Final URL count exceeded 5000 after cleaning. Trimmed to exactly 5000 URLs.`);
-      }
-      
-      return urls;
+      return finalizeDiscoveredUrls(urls);
   
     } catch (error) {
       // Log the error but don't throw - return empty array to continue processing
@@ -618,6 +596,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       if (sitemapUrl) {
         urls = await this.extractUrlsFromSitemap(sitemapUrl);
         await Agent.updateOne({ _id: agentId }, { $set: {isSitemapAdded: true} });
+        urls = finalizeDiscoveredUrls(urls);
         console.log(`Found ${urls.length} URLs in sitemap`);
       }
 
@@ -734,6 +713,8 @@ async bulkInsertUrls(userId,agentId, urls) {
           error: "urls must be provided",
         });
       }
+
+      urls = filterAndDedupeWebUrls(urls);
 
       const TrainingModel = await PlanService.getTrainingModel(userId,agentId);
       const plan = await PlanService.getUserPlan(userId,agentId);
@@ -912,11 +893,13 @@ async bulkInsertUrls(userId,agentId, urls) {
           : agent?.qdrantIndexNamePaid;
       const plan = await PlanService.getUserPlan(userId);
 
-      const remainingUrls = await Url.distinct("url", {
+      const remainingUrls = filterAndDedupeWebUrls(
+        await Url.distinct("url", {
         // userId: userId,
         agentId: agentId,
         trainStatus: 0,
-      });
+        }),
+      );
       if (remainingUrls.length <= 0) {
         await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
         appEvents.emit("userEvent", agentId, "training-event", {

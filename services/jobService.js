@@ -12,6 +12,59 @@ const urlModule = require("url");
 const TurndownService = require("turndown");
 const QdrantVectorStoreManager = require("./QdrantService");
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
+const {
+  isScrapableWebUrl,
+  isHtmlContentType,
+} = require("../utils/webUrlUtils.js");
+
+const NON_HTML_SKIP_ERROR =
+  "Non-HTML URL skipped. Use document upload for PDFs and other files.";
+
+async function markWebUrlScrapeFailed({
+  url,
+  userId,
+  agentId,
+  TrainingModel,
+  error,
+}) {
+  const existingFailRow = await TrainingModel.findOne({
+    userId,
+    agentId,
+    "webPage.url": url,
+  })
+    .select("trainingStatus")
+    .lean();
+  const prevTrainStatus = existingFailRow?.trainingStatus;
+
+  await TrainingModel.findOneAndUpdate(
+    { userId, agentId, "webPage.url": url },
+    {
+      $set: {
+        userId,
+        agentId,
+        type: 0,
+        trainingStatus: 2,
+        lastEdit: Date.now(),
+        error,
+        "webPage.url": url,
+      },
+    },
+    { upsert: true, setDefaultsOnInsert: true },
+  );
+
+  if (prevTrainStatus !== 2) {
+    const inc =
+      prevTrainStatus === 1
+        ? { "pagesAdded.success": -1, "pagesAdded.failed": 1 }
+        : { "pagesAdded.failed": 1 };
+    await Agent.updateOne({ _id: agentId }, { $inc: inc });
+  }
+
+  await Url.updateOne(
+    { url, agentId },
+    { $set: { trainStatus: 2, error } },
+  );
+}
 
 const redisConfig =
   process.env.ENVIRONMENT === "local"
@@ -476,6 +529,18 @@ new Worker(
         try {
           console.log("Processing URL :", url);
 
+          if (!isScrapableWebUrl(url)) {
+            console.log(`Skipping non-HTML URL: ${url}`);
+            await markWebUrlScrapeFailed({
+              url,
+              userId,
+              agentId,
+              TrainingModel,
+              error: NON_HTML_SKIP_ERROR,
+            });
+            continue;
+          }
+
           // Emit progress updates periodically (every 2 seconds or every URL)
           const now = Date.now();
           if (
@@ -495,7 +560,33 @@ new Worker(
             },
           });
 
+          const contentType = response.headers?.["content-type"] || "";
+          if (!isHtmlContentType(contentType)) {
+            console.log(
+              `Skipping non-HTML response for ${url}: ${contentType || "unknown"}`,
+            );
+            await markWebUrlScrapeFailed({
+              url,
+              userId,
+              agentId,
+              TrainingModel,
+              error: NON_HTML_SKIP_ERROR,
+            });
+            continue;
+          }
+
           const sourceCode = response?.data;
+
+          if (typeof sourceCode !== "string") {
+            await markWebUrlScrapeFailed({
+              url,
+              userId,
+              agentId,
+              TrainingModel,
+              error: "Response is not HTML text content",
+            });
+            continue;
+          }
 
           const processResult = await processWebPage(
             url,
@@ -1067,6 +1158,23 @@ new Worker(
         const prevStatus = entry.trainingStatus;
 
         try {
+          if (!isScrapableWebUrl(url)) {
+            console.log(`[retrainTrainingData] Skipping non-HTML URL: ${url}`);
+            await TrainingModel.updateOne(
+              { _id: entry._id },
+              {
+                $set: {
+                  trainingStatus: 2,
+                  error: NON_HTML_SKIP_ERROR,
+                  lastEdit: new Date(),
+                },
+              },
+            );
+            await applyWebPagePagesAddedDelta(prevStatus, 2);
+            failCount++;
+            continue;
+          }
+
           // 1. Delete old vectors from Qdrant
           const qdrantManager = new QdrantVectorStoreManager(qdrantIndexName);
           await qdrantManager.deleteByFields({
@@ -1083,9 +1191,46 @@ new Worker(
               "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
             },
           });
+
+          const contentType = response.headers?.["content-type"] || "";
+          if (!isHtmlContentType(contentType)) {
+            console.log(
+              `[retrainTrainingData] Skipping non-HTML response for ${url}: ${contentType || "unknown"}`,
+            );
+            await TrainingModel.updateOne(
+              { _id: entry._id },
+              {
+                $set: {
+                  trainingStatus: 2,
+                  error: NON_HTML_SKIP_ERROR,
+                  lastEdit: new Date(),
+                },
+              },
+            );
+            await applyWebPagePagesAddedDelta(prevStatus, 2);
+            failCount++;
+            continue;
+          }
+
+          if (typeof response?.data !== "string") {
+            await TrainingModel.updateOne(
+              { _id: entry._id },
+              {
+                $set: {
+                  trainingStatus: 2,
+                  error: "Response is not HTML text content",
+                  lastEdit: new Date(),
+                },
+              },
+            );
+            await applyWebPagePagesAddedDelta(prevStatus, 2);
+            failCount++;
+            continue;
+          }
+
           const processResult = await processWebPage(
             url,
-            response?.data,
+            response.data,
             footerCache,
           );
 
