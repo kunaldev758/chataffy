@@ -696,7 +696,8 @@ async bulkInsertUrls(userId,agentId, urls) {
   // Start sitemap scraping
   async startSitemapScraping(req, res) {
     try {
-      const { userId, urls, agentId } = req.body;
+      const { userId, agentId } = req.body;
+      let urls = req.body.urls;
 
       console.log("Received request to start sitemap scraping with data:", { userId, agentId, urlCount: urls ? urls.length : 0 });
       
