@@ -1657,6 +1657,11 @@ UserController.validateToken = async (req, res) => {
       isDeleted: false,
     }).select("_id agentName isActive");
 
+    const humanAgentData = await HumanAgent.findOne({
+      userId: user._id,
+      isClient: true,
+    });
+
     return res.json({
       status_code: 200,
       status: true,
@@ -1667,6 +1672,7 @@ UserController.validateToken = async (req, res) => {
       currentAgentId: agents?.[0]?._id || "",
       isOnboarded: user.isOnboarded,
       agents,
+      humanAgentId: humanAgentData?._id,
       message: "Login successful",
     });
   } catch (error) {
