@@ -648,7 +648,47 @@ Keep responses short, direct, friendly, and professional. Only use information e
       .join("\n\n---\n\n"); // Separate contexts clearly
   }
 
-  async queryQdrant(collectionName, queryEmbedding, topK, userId) {
+  buildSourcesFromMatches(matches) {
+    const seenSourceKeys = new Set();
+    return matches
+      .map((match) => {
+        const payload = match.payload || {};
+        const sourceType = payload.type !== undefined ? payload.type : null;
+        const title = payload.title || payload.url || null;
+        const url = payload.url || null;
+        return { type: sourceType, title, url };
+      })
+      .filter(({ type, title, url }) => {
+        if (type === null && !title && !url) return false;
+        const key = url || title;
+        if (!key || seenSourceKeys.has(key)) return false;
+        seenSourceKeys.add(key);
+        return true;
+      });
+  }
+
+  filterSourcesForAnswer(matches, answer) {
+    if (!matches?.length) return [];
+
+    const sorted = [...matches].sort((a, b) => b.score - a.score);
+    const maxScore = sorted[0].score;
+    const scoreGap = 0.08;
+
+    let filtered = sorted.filter((match) => match.score >= maxScore - scoreGap);
+
+    const answerLower = (answer || "").toLowerCase();
+    const urlReferenced = filtered.filter((match) => {
+      const url = match.payload?.url;
+      return url && answerLower.includes(url.toLowerCase());
+    });
+    if (urlReferenced.length > 0) {
+      return urlReferenced;
+    }
+
+    return filtered.slice(0, 2);
+  }
+
+   async queryQdrant(collectionName, queryEmbedding, topK, userId) {
     try {
       console.log(
         `[QueryController] Querying Qdrant collection: ${collectionName} with topK: ${topK}, userId: ${userId}`
@@ -1197,6 +1237,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       }
 
       let finalAnswer;
+      let usedKnowledgeBaseContext = false;
       // let completionUsage = null;
 
       // Check if message looks accidental or like test input
@@ -1205,8 +1246,8 @@ Keep responses short, direct, friendly, and professional. Only use information e
       // Check if visitor is requesting to connect to an agent
       const isAgentRequest = this.isAgentConnectionRequest(question);
       
-      // Handle simple greetings even without context
-      if (relevantMatches.length === 0 && this.isSimpleGreeting(question)) {
+      // Greetings should not pull in or cite knowledge-base pages
+      if (this.isSimpleGreeting(question)) {
         // For greetings, generate a friendly response even without context
         const { answer: greetingAnswer, usage: llmUsage } =
           await this.generateAnswer(
@@ -1256,6 +1297,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       } else {
         // 6. Get Context and Generate Answer via LLM
+        usedKnowledgeBaseContext = true;
         const context = this.getRelevantContext(relevantMatches);
 
         const { answer: generatedAnswer, usage: llmUsage } =
@@ -1273,31 +1315,14 @@ Keep responses short, direct, friendly, and professional. Only use information e
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       }
 
-      // 10. Prepare Sources from Qdrant matched payloads
-      // Use full retrieval set (not threshold-filtered) so citations appear even when
-      // scores are low, irrelevant redirect runs, or LLM context used only "relevant" hits.
-      const matchesForSources =
-        queryResponse.length > 0
-          ? [...queryResponse].sort((a, b) => b.score - a.score)
+      // Only show sources when the answer was grounded in retrieved knowledge,
+      // and limit to the pages that were actually relevant to the response.
+      const sources =
+        usedKnowledgeBaseContext && relevantMatches.length > 0
+          ? this.buildSourcesFromMatches(
+              this.filterSourcesForAnswer(relevantMatches, finalAnswer)
+            )
           : [];
-      const seenSourceKeys = new Set();
-      const sources = matchesForSources
-        .map((match) => {
-          const payload = match.payload || {};
-          const sourceType = payload.type !== undefined ? payload.type : null;
-          const title = payload.title || payload.url || null;
-          const url = payload.url || null;
-          return { type: sourceType, title, url };
-        })
-        .filter(({ type, title, url }) => {
-          // Keep only entries with some identifier
-          if (type === null && !title && !url) return false;
-          // Deduplicate by url (for webpages) or title (for others)
-          const key = url || title;
-          if (!key || seenSourceKeys.has(key)) return false;
-          seenSourceKeys.add(key);
-          return true;
-        });
 
       return {
         success: true,
