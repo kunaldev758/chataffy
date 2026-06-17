@@ -255,7 +255,7 @@ UserController.verifyEmail = async (req, res) => {
         platform: "local",
         token: authToken,
         ip:
-          req.ip ||
+          req.headers["x-client-ip"] || req.ip ||
           (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
         deviceInfo: req.headers["user-agent"] || "unknown",
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
@@ -282,7 +282,7 @@ UserController.verifyEmail = async (req, res) => {
       platform: "local",
       token,
       ip:
-        req.ip ||
+        req.headers["x-client-ip"] || req.ip ||
         (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
       deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
@@ -512,7 +512,7 @@ UserController.loginUser = async (req, res) => {
       platform: "local",
       token,
       ip:
-        req.ip ||
+        req.headers["x-client-ip"] || req.ip ||
         (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
       deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
@@ -932,7 +932,7 @@ UserController.googleOAuth = async (req, res) => {
       platform: "local",
       token: appToken,
       ip:
-        req.ip ||
+        req.headers["x-client-ip"] || req.ip ||
         (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
       deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
@@ -1320,7 +1320,7 @@ UserController.getClientByToken = async (req, res) => {
       platform: "local",
       token: appToken,
       ip:
-        req.ip ||
+        req.headers["x-client-ip"] || req.ip ||
         (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
       deviceInfo: req.headers["user-agent"] || "unknown",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
@@ -1433,7 +1433,7 @@ UserController.platformRedirectionLogin = async (req, res) => {
         platform: "local",
         token: appToken,
         ip:
-          req.ip ||
+          req.headers["x-client-ip"] || req.ip ||
           (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
         deviceInfo: req.headers["user-agent"] || "unknown",
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days

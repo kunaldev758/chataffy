@@ -28,7 +28,7 @@ async function findOrReuseUserSession(user, platform, cookieToken,req) {
     userId: user._id,
     platform,
     token,
-    ip: req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
+    ip: req.headers["x-client-ip"] || req.ip || (req.headers["x-forwarded-for"] || "").split(",").pop().trim(),
     deviceInfo: req.headers["user-agent"] || "unknown",
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
   });
