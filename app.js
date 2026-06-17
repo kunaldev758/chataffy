@@ -85,6 +85,17 @@ app.use('/api/paypal', paymentsRouter);
 app.use('/api/bigcommerce', bigcommerceRoutes);
 app.use("/api/shopify", shopifyRoutes);
 
+// check ip address ---> 
+
+app.get('/check-ip', (req, res) => {
+  res.json({
+    xClientIp: req.headers['x-client-ip'],
+    xForwardedFor: req.headers['x-forwarded-for'],
+    xRealIp: req.headers['x-real-ip'],
+    remoteAddress: req.socket.remoteAddress
+  });
+});
+
 // Schedule the plan expiry check to run every day at midnight
 cron.schedule('0 0 * * *', () => {
   console.log('Running plan expiry check...');
