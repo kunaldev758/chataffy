@@ -55,6 +55,17 @@ const FALSE_POSITIVE_RE = [
   /\bsales agent\b/i,
 ];
 
+/** Words/phrases that suggest the visitor may want a human — LLM only runs when these appear. */
+const HANDOFF_SIGNAL_RE =
+  /\b(agent|human|person|representative|rep|someone|staff|team member|team)\b|\b(speak|talk|connect|transfer|escalat(e|ion)|reach)\b|\b(live chat|live support|live agent|human agent|customer service|real person|not a bot)\b|\b(bot|useless|not helping|frustrated|annoyed)\b/i;
+
+/** Obvious FAQ questions — skip intent LLM when no handoff signals present. */
+const FAQ_QUESTION_RE =
+  /^(what|how|when|where|why|which|who|do you|does|did|can you|could you|is there|are there|tell me|explain|describe|list|show me)\b/i;
+
+const FAQ_TOPIC_RE =
+  /\b(service|services|product|products|price|prices|cost|shipping|delivery|return|refund|policy|policies|order|orders|feature|features|plan|plans|offer|offers|provide|providing|website|company|business|hours|location|payment|discount|subscription|trial|demo|integration|support hours)\b/i;
+
 const CLARIFIER_MESSAGE =
   "Would you like me to connect you with a live agent? Just say yes and I'll try to reach someone for you.";
 
@@ -88,6 +99,28 @@ function getLastAiMessage(messages) {
 
 function isHandoffOffer(text) {
   return HANDOFF_OFFER_RE.test(stripHtml(text));
+}
+
+/**
+ * True when the message (or pending handoff context) plausibly relates to wanting a human.
+ * Used to avoid an intent LLM call on plain FAQ questions.
+ */
+function hasHandoffSignals(message, recentMessages = []) {
+  const normalized = normalize(message);
+  if (!normalized) return false;
+
+  if (HANDOFF_SIGNAL_RE.test(normalized)) return true;
+
+  const lastAi = getLastAiMessage(recentMessages);
+  if (lastAi && isHandoffOffer(lastAi)) return true;
+
+  return false;
+}
+
+function looksLikeFaq(message) {
+  const normalized = normalize(message);
+  if (!normalized) return false;
+  return FAQ_QUESTION_RE.test(normalized) && FAQ_TOPIC_RE.test(normalized);
 }
 
 /**
@@ -139,6 +172,10 @@ function detectWithRules(message, recentMessages = []) {
     )
   ) {
     return { decision: "not_handoff", confidence: 0.85, reason: "greeting" };
+  }
+
+  if (looksLikeFaq(message) && !HANDOFF_SIGNAL_RE.test(normalized)) {
+    return { decision: "not_handoff", confidence: 0.88, reason: "faq_pattern" };
   }
 
   return { decision: "uncertain", confidence: 0 };
@@ -254,7 +291,7 @@ function rulesToResult(rules) {
 }
 
 /**
- * Full intent detection: rules first, LLM only when uncertain.
+ * Full intent detection: rules first, LLM only when uncertain AND handoff-like.
  */
 async function detectHandoffIntent(
   message,
@@ -266,6 +303,16 @@ async function detectHandoffIntent(
   const rules = detectWithRules(message, recentMessages);
   const fromRules = rulesToResult(rules);
   if (fromRules) return fromRules;
+
+  // No handoff signals → treat as normal FAQ, skip intent LLM entirely.
+  if (!hasHandoffSignals(message, recentMessages)) {
+    return {
+      isHandoff: false,
+      confidence: 0,
+      source: "rules",
+      reason: "no_handoff_signals",
+    };
+  }
 
   if (skipLlm || !USE_LLM) {
     return { isHandoff: false, confidence: 0, source: "rules" };
@@ -299,6 +346,7 @@ function isHandoffRequest(message, recentMessages = []) {
 module.exports = {
   detectHandoffIntent,
   detectWithRules,
+  hasHandoffSignals,
   isHandoffRequest,
   CLARIFIER_MESSAGE,
   LIVE_CHAT_UNAVAILABLE_MESSAGE,
