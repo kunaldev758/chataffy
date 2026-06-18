@@ -21,8 +21,110 @@ const {
   getClientIpFromSocket,
   resolveVisitorGeoForSocket,
 } = require("../services/geoService");
+const {
+  detectHandoffIntent,
+  LIVE_CHAT_UNAVAILABLE_MESSAGE,
+} = require("../services/HandoffIntentService");
 // Store active timeouts for agent connection requests
 const agentConnectionTimeouts = new Map();
+
+async function startAgentConnectionFlow(
+  io,
+  { conversationId, visitorId, userId, agentId, agentRoom },
+) {
+  const conversationRoom = `conversation-${conversationId}`;
+  const visitor = await Visitor.findById(visitorId).lean();
+
+  io.to(conversationRoom).emit("agent-connection-request", {
+    conversationId,
+    visitorId,
+    message: "Connecting to agent...",
+  });
+
+  const requestStartedAt = Date.now();
+  const agents = await HumanAgent.find({
+    assignedAgents: agentId,
+    status: "approved",
+  }).lean();
+
+  const baseNotificationData = {
+    conversationId,
+    visitorId,
+    agentId,
+    visitor,
+    message: "Visitor requested to connect to an agent",
+    timestamp: new Date(),
+    requestStartedAt,
+  };
+
+  if (agents.length > 0) {
+    for (const agent of agents) {
+      const notification =
+        await NotificationController.createAgentConnectionNotification(
+          agent._id,
+          conversationId,
+          visitorId,
+          userId,
+          "Visitor requested to connect to an agent",
+          agentId,
+        );
+
+      io.to([`user-${agent._id}`]).emit("agent-connection-notification", {
+        ...baseNotificationData,
+        notificationId: notification?._id,
+        humanAgentId: agent._id,
+      });
+    }
+  }
+
+  const timeoutId = setTimeout(async () => {
+    const updatedConversation =
+      await Conversation.findById(conversationId).lean();
+    if (updatedConversation && updatedConversation.aiChat === true) {
+      const timeoutMessage = await ChatMessageController.createChatMessage(
+        conversationId,
+        "",
+        "ai",
+        "Sorry, currently there is no active agent available. I'll continue helping you.",
+        userId,
+      );
+
+      io.to(conversationRoom).emit("conversation-append-message", {
+        chatMessage: timeoutMessage,
+      });
+      io.to(conversationRoom).emit("agent-connection-timeout", {
+        conversationId,
+      });
+      agentConnectionTimeouts.delete(conversationId.toString());
+    }
+  }, 20000);
+
+  agentConnectionTimeouts.set(conversationId.toString(), {
+    timeoutId,
+    requestStartedAt,
+  });
+}
+
+async function appendAiReply(io, conversationRoom, conversationId, userId, agentId, text) {
+  const html = text.startsWith("<") ? text : `<p>${text}</p>`;
+  const chatMessageResponse = await ChatMessageController.createChatMessage(
+    conversationId,
+    "",
+    "ai",
+    html,
+    userId,
+    agentId,
+  );
+  await chatMessageResponse.populate("agentId", "agentName");
+  const chatMessageObj = chatMessageResponse.toObject?.() ?? chatMessageResponse;
+  await Conversation.updateOne(
+    { _id: conversationId },
+    { $set: { lastMessage: stripHtml(text) } },
+  );
+  io.to(conversationRoom).emit("conversation-append-message", {
+    chatMessage: chatMessageObj,
+  });
+}
 
 const stripHtml = (html) =>
   (html || "")
@@ -503,152 +605,94 @@ const initializeVisitorEvents = (io, socket) => {
         });
         callback?.({ success: true, chatMessage: chatMessageObj, id });
         if (conversation.aiChat) {
+          const convRoom = conversationRoom || `conversation-${conversationId}`;
+
+          const recentMessages = await ChatMessage.find({
+            conversation_id: conversationId,
+          })
+            .sort({ createdAt: -1 })
+            .limit(8)
+            .select("sender_type message")
+            .lean();
+          recentMessages.reverse();
+
+          const intent = await detectHandoffIntent(message, recentMessages, {
+            userId,
+            agentId,
+          });
+
+          io.to(convRoom).emit("intermediate-response", {
+            message: "...replying",
+            conversationId,
+          });
+
+          if (intent.isHandoff) {
+            const agentData = await Agent.findOne({ _id: agentId })
+              .select("liveAgentSupport")
+              .lean();
+            if (agentData?.liveAgentSupport === true) {
+              await startAgentConnectionFlow(io, {
+                conversationId,
+                visitorId,
+                userId,
+                agentId,
+                agentRoom,
+              });
+              return;
+            }
+            await appendAiReply(
+              io,
+              convRoom,
+              conversationId,
+              userId,
+              agentId,
+              LIVE_CHAT_UNAVAILABLE_MESSAGE,
+            );
+            return;
+          }
+
+          if (intent.needsClarification) {
+            await appendAiReply(
+              io,
+              convRoom,
+              conversationId,
+              userId,
+              agentId,
+              intent.clarifierMessage,
+            );
+            return;
+          }
+
           const response_data = await QueryController.handleQuestionAnswer(
             userId,
             agentId,
             message,
             conversationId,
           );
-          io.to(conversationRoom).emit("intermediate-response", {
-            message: "...replying",
-            conversationId,
-          });
 
-          // Check if visitor requested agent connection and liveAgentSupport is enabled
           if (response_data.isAgentRequest) {
-            const agentData = await Agent.findOne({ _id: agentId }).lean();
-            if (agentData && agentData.liveAgentSupport === true) {
-              // Get visitor and conversation details for notification
-              const visitor = await Visitor.findById(visitorId).lean();
-              const conversationDoc =
-                await Conversation.findById(conversationId).lean();
-
-              // Emit agent connection request to visitor (show connecting state)
-              io.to(conversationRoom).emit("agent-connection-request", {
+            const agentData = await Agent.findOne({ _id: agentId })
+              .select("liveAgentSupport")
+              .lean();
+            if (agentData?.liveAgentSupport === true) {
+              await startAgentConnectionFlow(io, {
                 conversationId,
                 visitorId,
-                message: "Connecting to agent...",
-              });
-
-              // Same start time for countdown + sessionStorage dismiss key on every replay (e.g. check-pending).
-              const requestStartedAt = Date.now();
-
-              const agents = await HumanAgent.find({
-                assignedAgents: agentId,
-                status: "approved",
-                // isActive: true,
-              }).lean();
-
-              // Emit notification to client (AI agent room). Per-human-agent emits happen below (include notificationId).
-              const baseNotificationData = {
-                conversationId,
-                visitorId,
+                userId,
                 agentId,
-                visitor: visitor,
-                message: "Visitor requested to connect to an agent",
-                timestamp: new Date(),
-                requestStartedAt,
-              };
-
-              // io.to([agentRoom]).emit(
-              //   "agent-connection-notification",
-              //   baseNotificationData
-              // );
-
-              // Create per-agent DB notifications, then emit to each human agent room with notificationId
-              if (agents.length > 0) {
-                console.log("saving notifications for agents");
-                for (const agent of agents) {
-                  const notification =
-                    await NotificationController.createAgentConnectionNotification(
-                      agent._id,
-                      conversationId,
-                      visitorId,
-                      userId,
-                      "Visitor requested to connect to an agent",
-                      agentId,
-                    );
-
-                  io.to([`user-${agent._id}`]).emit(
-                    "agent-connection-notification",
-                    {
-                      ...baseNotificationData,
-                      notificationId: notification?._id,
-                      humanAgentId: agent._id,
-                    },
-                  );
-                }
-              }
-
-              // const notificationData = {
-              //   conversationId,
-              //   visitorId,
-              //   agentId,
-              //   visitor: visitor,
-              //   message: "Visitor requested to connect to an agent",
-              //   timestamp: new Date(),
-              //   requestStartedAt,
-              //   targetHumanAgentIds: agents.map((h) => h._id.toString()),
-              // };
-
-              // // Inbox listeners join user-<AI agent id>; human agents also join user-<HumanAgent id>.
-              // // Include both so active, assigned humans get live notifications from any inbox view.
-              // const notificationRooms = [
-              //   agentRoom,
-              //   ...agents.map((h) => `user-${h._id}`),
-              // ];
-              // io.to(notificationRooms).emit(
-              //   "agent-connection-notification",
-              //   notificationData
-              // );
-
-              // Set up 20-second timeout
-              const timeoutId = setTimeout(async () => {
-                // Check if conversation was already accepted
-                const updatedConversation =
-                  await Conversation.findById(conversationId).lean();
-                if (
-                  updatedConversation &&
-                  updatedConversation.aiChat === true
-                ) {
-                  // No agent accepted, continue in AI mode
-                  const timeoutMessage =
-                    await ChatMessageController.createChatMessage(
-                      conversationId,
-                      "",
-                      "ai",
-                      "Sorry, currently there is no active agent available. I'll continue helping you.",
-                      userId,
-                    );
-
-                  io.to(conversationRoom).emit("conversation-append-message", {
-                    chatMessage: timeoutMessage,
-                  });
-
-                  // Emit to visitor that connection failed
-                  io.to(conversationRoom).emit("agent-connection-timeout", {
-                    conversationId,
-                  });
-
-                  // Cancel notifications
-                  // io.to(`user-${userId}`).emit("agent-connection-cancelled", { conversationId });
-                  // agents.forEach(agent => {
-                  //   io.to().emit("agent-connection-cancelled", { conversationId });
-                  // });
-
-                  // Remove timeout from map
-                  agentConnectionTimeouts.delete(conversationId.toString());
-                }
-              }, 20000); // 20 seconds
-
-              // Store timeout + start time (check-pending replays need requestStartedAt for dismiss/sessionStorage)
-              agentConnectionTimeouts.set(conversationId.toString(), {
-                timeoutId,
-                requestStartedAt,
+                agentRoom,
               });
-
-              return; // Don't send AI response if agent connection is requested
+              return;
             }
+            await appendAiReply(
+              io,
+              convRoom,
+              conversationId,
+              userId,
+              agentId,
+              LIVE_CHAT_UNAVAILABLE_MESSAGE,
+            );
+            return;
           }
 
           if (response_data.success == true) {

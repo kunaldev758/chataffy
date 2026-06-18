@@ -10,6 +10,11 @@ const Agent = require("../models/Agent");
 const WebsiteData = require("../models/WebsiteData");
 const HumanAgent = require("../models/HumanAgent");
 const { logOpenAIUsage } = require("../services/UsageTrackingService");
+const {
+  detectHandoffIntent,
+  isHandoffRequest,
+  CLARIFIER_MESSAGE,
+} = require("../services/HandoffIntentService");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -287,55 +292,9 @@ class QuestionAnsweringSystem {
     return false;
   }
 
-  // Detect if the visitor is asking to connect to a live agent
-  isAgentConnectionRequest(question) {
-    const normalizedQuestion = question.toLowerCase().trim();
-    
-    // Keywords and phrases that indicate a request to speak with an agent
-    const agentKeywords = [
-      'speak to agent',
-      'talk to agent',
-      'connect to agent',
-      'live agent',
-      'human agent',
-      'real person',
-      'speak to human',
-      'talk to human',
-      'connect to human',
-      'speak to person',
-      'talk to person',
-      'connect to person',
-      'speak to someone',
-      'talk to someone',
-      'connect to someone',
-      'agent please',
-      'human please',
-      'person please',
-      'agent',
-      'human',
-      'representative',
-      'support agent',
-      'customer service',
-      'customer support',
-      'live chat',
-      'live support',
-      'can i speak',
-      'can i talk',
-      'i want to speak',
-      'i want to talk',
-      'need to speak',
-      'need to talk',
-      'want to speak',
-      'want to talk',
-      'let me speak',
-      'let me talk',
-      'transfer to agent',
-      'transfer to human',
-      'transfer to person'
-    ];
-    
-    // Check if question contains any agent connection keywords
-    return agentKeywords.some(keyword => normalizedQuestion.includes(keyword));
+  // Detect if the visitor is asking to connect to a live agent (rules-only, sync).
+  isAgentConnectionRequest(question, recentMessages = []) {
+    return isHandoffRequest(question, recentMessages);
   }
 
   // Determine appropriate max_tokens based on query type
@@ -928,6 +887,29 @@ Keep responses short, direct, friendly, and professional. Only use information e
       const chatSession = await this.getChatHistory(conversationId);
       const chatHistory = this.formatChatHistory(chatSession, question);
 
+      // Early handoff intent — skip embeddings/RAG when visitor wants a human.
+      const handoffIntent = await detectHandoffIntent(question, chatSession, {
+        userId,
+        agentId,
+        skipLlm: true,
+      });
+      if (handoffIntent.isHandoff) {
+        return {
+          success: true,
+          answer: null,
+          isAgentRequest: true,
+          conversationId,
+        };
+      }
+      if (handoffIntent.needsClarification) {
+        return {
+          success: true,
+          answer: `<p>${CLARIFIER_MESSAGE}</p>`,
+          isAgentRequest: false,
+          conversationId,
+        };
+      }
+
       // 3. Get Client, Widget, and WebsiteData
       const clientData = await Client.findOne({ userId }).lean();
       const agentData = await Agent.findOne({ _id: agentId }).lean();
@@ -970,7 +952,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
               ? revisedFromKb.sources
               : undefined,
           conversationId,
-          isAgentRequest: this.isAgentConnectionRequest(question),
+          isAgentRequest: this.isAgentConnectionRequest(question, chatSession),
         };
       }
 
@@ -1047,7 +1029,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             sources:
               structuralSources.length > 0 ? structuralSources : undefined,
             conversationId,
-            isAgentRequest: this.isAgentConnectionRequest(question),
+            isAgentRequest: this.isAgentConnectionRequest(question, chatSession),
           };
         }
 
@@ -1203,7 +1185,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       const isAccidental = this.isAccidentalOrTestMessage(question);
       
       // Check if visitor is requesting to connect to an agent
-      const isAgentRequest = this.isAgentConnectionRequest(question);
+      const isAgentRequest = this.isAgentConnectionRequest(question, chatSession);
       
       // Handle simple greetings even without context
       if (relevantMatches.length === 0 && this.isSimpleGreeting(question)) {
