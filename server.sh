@@ -1,15 +1,44 @@
 #!/bin/bash
 
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_SRC="${SCRIPT_DIR}/.env.production"
+SSH_KEY="C:/Users/sta/Desktop/chataffy-imp-data/chataffy-key1.pem"
+SSH_HOST="ubuntu@34.213.132.47"
+REMOTE_APP_DIR="/var/www/html/chataffy/chataffy"
+ENV_DST="${SSH_HOST}:${REMOTE_APP_DIR}/.env"
+
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$REPO_ROOT" ]; then
+  echo "ERROR: Could not find git repository (started from $SCRIPT_DIR)"
+  exit 1
+fi
+
+CURRENT_BRANCH="$(git -C "$REPO_ROOT" branch --show-current)"
+if [ -z "$CURRENT_BRANCH" ]; then
+  echo "ERROR: Could not determine current git branch in $REPO_ROOT"
+  exit 1
+fi
+
+if [ ! -f "$ENV_SRC" ]; then
+  echo "ERROR: $ENV_SRC not found"
+  exit 1
+fi
+
+if [ ! -f "$SSH_KEY" ]; then
+  echo "ERROR: SSH key not found at $SSH_KEY"
+  exit 1
+fi
+
 echo "========================================"
 echo "Starting Deployment Script"
 echo "========================================"
 
-CURRENT_BRANCH=$(git branch --show-current)
-
 echo "Local Current Branch: $CURRENT_BRANCH"
 echo "Connecting to EC2 Server..."
 
-ssh -i "C:\Users\sta\Desktop\chataffy-imp-data\chataffy-key1.pem" ubuntu@34.213.132.47 << EOF
+ssh -i "$SSH_KEY" "$SSH_HOST" << EOF
 
 set -e
 
@@ -23,14 +52,14 @@ whoami
 
 echo ""
 echo "Moving to Project Directory..."
-cd /var/www/html/chataffy/chataffy
+cd ${REMOTE_APP_DIR}
 
 echo "Current Directory:"
 pwd
 
 echo ""
 echo "Adding Git Safe Directory..."
-git config --global --add safe.directory /var/www/html/chataffy/chataffy
+git config --global --add safe.directory ${REMOTE_APP_DIR}
 
 echo ""
 echo "Checking Current Git Branch on Server..."
@@ -56,6 +85,22 @@ echo ""
 echo "Installing Dependencies..."
 npm install
 
+EOF
+
+echo ""
+echo "Backing up remote .env (if present)..."
+ssh -i "$SSH_KEY" "$SSH_HOST" \
+  "cp ${REMOTE_APP_DIR}/.env ${REMOTE_APP_DIR}/.env.bak.\$(date +%Y%m%d%H%M%S) 2>/dev/null || true"
+
+echo "Copying .env.production to production .env..."
+scp -i "$SSH_KEY" "$ENV_SRC" "$ENV_DST"
+
+ssh -i "$SSH_KEY" "$SSH_HOST" << EOF
+
+set -e
+
+cd ${REMOTE_APP_DIR}
+
 echo ""
 echo "Restarting PM2 Backend Process..."
 pm2 restart backend
@@ -69,7 +114,7 @@ echo "========================================"
 echo "Updating Nginx (subdomain config)"
 echo "========================================"
 
-NGINX_SRC="/var/www/html/chataffy/chataffy/nginx/nginx.conf"
+NGINX_SRC="${REMOTE_APP_DIR}/nginx/nginx.conf"
 NGINX_DST="/etc/nginx/sites-available/default"
 
 if [ ! -f "\$NGINX_SRC" ]; then
@@ -94,8 +139,7 @@ echo "Nginx status:"
 sudo systemctl status nginx --no-pager || true
 
 echo ""
-echo "Production env: ensure server .env matches env.production.example"
-echo "  (BASE_URL, CLIENT_URL, AGENT_URL, AUTH_COOKIE_DOMAIN, CORS_ORIGINS)"
+echo "Uploaded .env from local .env.production"
 echo ""
 echo "========================================"
 echo "Deployment Completed Successfully"
@@ -106,5 +150,3 @@ EOF
 echo ""
 echo "SSH Session Closed"
 echo "Deployment Script Finished"
-
-exit
