@@ -12,6 +12,15 @@ const EMBEDDING_DIMENSION = parseInt(
   10
 );
 
+const PAYLOAD_INDEX_SCHEMAS = {
+  user_id: "keyword",
+  agent_id: "keyword",
+  url: "keyword",
+  title: "keyword",
+  source_type: "keyword",
+  type: "integer",
+};
+
 class QdrantVectorStoreManager {
   constructor(collectionName) {
     if (!collectionName) {
@@ -253,32 +262,60 @@ class QdrantVectorStoreManager {
     }
   }
 
+  async ensurePayloadIndexes(fieldNames = null) {
+    const fields =
+      fieldNames ?? Object.keys(PAYLOAD_INDEX_SCHEMAS);
+
+    for (const fieldName of fields) {
+      const fieldSchema =
+        PAYLOAD_INDEX_SCHEMAS[fieldName] || "keyword";
+
+      try {
+        await this.qdrantClient.createPayloadIndex(this.collectionName, {
+          field_name: fieldName,
+          field_schema: fieldSchema,
+        });
+      } catch (error) {
+        const message = error.message || String(error);
+        if (!message.includes("already exists")) {
+          console.warn(
+            `Could not create payload index for "${fieldName}": ${message}`
+          );
+        }
+      }
+    }
+  }
+
   async createCollection() {
     try {
       const exists = await this.doesCollectionExist();
       if (exists) {
         console.log(`Collection "${this.collectionName}" already exists.`);
-        return true;
+      } else {
+        console.log(`Creating Qdrant collection "${this.collectionName}"...`);
+        await this.qdrantClient.createCollection(this.collectionName, {
+          vectors: {
+            size: EMBEDDING_DIMENSION,
+            distance: "Cosine",
+          },
+          optimizers_config: {
+            default_segment_number: 2,
+          },
+          replication_factor: 1,
+        });
+        console.log(`Collection "${this.collectionName}" created successfully.`);
       }
 
-      console.log(`Creating Qdrant collection "${this.collectionName}"...`);
-      await this.qdrantClient.createCollection(this.collectionName, {
-        vectors: {
-          size: EMBEDDING_DIMENSION,
-          distance: "Cosine",
-        },
-        optimizers_config: {
-          default_segment_number: 2,
-        },
-        replication_factor: 1,
-      });
-
-      console.log(`Collection "${this.collectionName}" created successfully.`);
+      await this.ensurePayloadIndexes();
       return true;
     } catch (error) {
       console.error(`Error creating collection: ${error}`);
       return false;
     }
+  }
+
+  async ensureCollection() {
+    return this.createCollection();
   }
 
   async search(queryEmbedding, k = 5) {
@@ -494,7 +531,8 @@ class QdrantVectorStoreManager {
         throw new Error("No filter fields provided for deletion.");
       }
 
-      // Build Qdrant filter
+      await this.ensurePayloadIndexes(Object.keys(filterFields));
+
       const must = Object.entries(filterFields).map(([key, value]) => ({
         key,
         match: { value },
@@ -502,7 +540,6 @@ class QdrantVectorStoreManager {
 
       const filter = { must };
 
-      // Perform the delete operation
       const result = await this.qdrantClient.delete(this.collectionName, {
         filter,
         wait: true,

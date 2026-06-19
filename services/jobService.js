@@ -1116,8 +1116,15 @@ const retrainTrainingDataQueue = new Queue("retrainTrainingDataQueue", {
 new Worker(
   "retrainTrainingDataQueue",
   async (job) => {
-    const { entries, userId, agentId, qdrantIndexName, TrainingModelName } =
-      job.data;
+    const {
+      entries,
+      userId,
+      agentId,
+      qdrantIndexName,
+      TrainingModelName,
+      startTime,
+      totalEntries: jobTotalEntries,
+    } = job.data;
     const batchService = new batchTrainingService();
     const Agent = require("../models/Agent");
 
@@ -1126,10 +1133,98 @@ new Worker(
         ? require("../models/TrainingListFreeUsers")
         : require("../models/OpenaiTrainingList");
 
+    const retrainStartTime = startTime ? new Date(startTime) : new Date();
+    const validEntries = (entries || []).filter((e) => e.webPage?.url);
+    const totalEntries = jobTotalEntries || validEntries.length;
+    let lastProgressEmitTime = Date.now();
+    const PROGRESS_EMIT_INTERVAL = 2000;
+    let lastTrainingEmitTime = 0;
+    let processedCount = 0;
+
+    const emitScrapingProgress = async (
+      currentIndex,
+      totalCount,
+      isProcessing = true,
+    ) => {
+      const scrapingProgress = buildTrainingProgressPayload({
+        startTime: retrainStartTime,
+        phase: "scraping",
+        processed: currentIndex,
+        total: totalCount,
+        isProcessing,
+      });
+
+      await job.updateProgress({
+        phase: "scraping",
+        scrapeCurrent: currentIndex,
+        scrapeTotal: totalCount,
+      });
+
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
+        scrapingProgress,
+      });
+    };
+
+    const emitTrainingProgress = async ({
+      trainingProcessed,
+      trainingTotal,
+      embeddingProgress = 0,
+      embeddingTotal = 0,
+      upsertProgress = 0,
+      upsertTotal = 0,
+      trainingStep = "chunking",
+      force = false,
+    }) => {
+      const now = Date.now();
+      if (!force && now - lastTrainingEmitTime < PROGRESS_EMIT_INTERVAL) {
+        return;
+      }
+      lastTrainingEmitTime = now;
+
+      const scrapingProgress = buildTrainingProgressPayload({
+        startTime: retrainStartTime,
+        phase: "training",
+        processed: totalEntries,
+        total: totalEntries,
+        trainingStep,
+        trainingProcessed,
+        trainingTotal,
+        embeddingProgress,
+        embeddingTotal,
+        upsertProgress,
+        upsertTotal,
+        isProcessing: true,
+      });
+
+      await job.updateProgress({
+        phase: "training",
+        scrapeCurrent: totalEntries,
+        scrapeTotal: totalEntries,
+        trainingCurrent: trainingProcessed,
+        trainingTotal,
+        trainingStep,
+        embeddingProgress,
+        embeddingTotal,
+        upsertProgress,
+        upsertTotal,
+      });
+
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
+        scrapingProgress,
+      });
+    };
+
     try {
       await Agent.updateOne(
         { _id: agentId },
-        { $set: { dataTrainingStatus: 1 } },
+        {
+          $set: {
+            dataTrainingStatus: 1,
+            scrapingStartTime: retrainStartTime,
+          },
+        },
       );
       appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
@@ -1151,39 +1246,66 @@ new Worker(
         await Agent.updateOne({ _id: agentId }, { $inc: filtered });
       }
 
-      for (const entry of entries) {
-        const url = entry.webPage?.url;
-        if (!url) continue;
+      const markEntryFailedAndContinue = async ({
+        entry,
+        prevStatus,
+        error,
+      }) => {
+        await TrainingModel.updateOne(
+          { _id: entry._id },
+          {
+            $set: {
+              trainingStatus: 2,
+              error,
+              lastEdit: new Date(),
+            },
+          },
+        );
+        await applyWebPagePagesAddedDelta(prevStatus, 2);
+        failCount++;
+        processedCount++;
+        await emitScrapingProgress(
+          processedCount,
+          totalEntries,
+          processedCount < totalEntries,
+        );
+      };
 
+      await emitScrapingProgress(0, totalEntries, true);
+
+      for (let i = 0; i < validEntries.length; i++) {
+        const entry = validEntries[i];
+        const url = entry.webPage.url;
         const prevStatus = entry.trainingStatus;
+
+        const now = Date.now();
+        if (
+          now - lastProgressEmitTime >= PROGRESS_EMIT_INTERVAL ||
+          i === 0 ||
+          i === validEntries.length - 1
+        ) {
+          await emitScrapingProgress(processedCount, totalEntries, true);
+          lastProgressEmitTime = now;
+        }
 
         try {
           if (!isScrapableWebUrl(url)) {
             console.log(`[retrainTrainingData] Skipping non-HTML URL: ${url}`);
-            await TrainingModel.updateOne(
-              { _id: entry._id },
-              {
-                $set: {
-                  trainingStatus: 2,
-                  error: NON_HTML_SKIP_ERROR,
-                  lastEdit: new Date(),
-                },
-              },
-            );
-            await applyWebPagePagesAddedDelta(prevStatus, 2);
-            failCount++;
+            await markEntryFailedAndContinue({
+              entry,
+              prevStatus,
+              error: NON_HTML_SKIP_ERROR,
+            });
             continue;
           }
 
-          // 1. Delete old vectors from Qdrant
           const qdrantManager = new QdrantVectorStoreManager(qdrantIndexName);
           await qdrantManager.deleteByFields({
-            user_id: userId,
-            agent_id: agentId,
+            user_id: userId?.toString(),
+            agent_id: agentId?.toString(),
             url,
           });
 
-          // 2. Scrape webpage
           const response = await axios.get(url, {
             timeout: 30000,
             maxContentLength: 50 * 1024 * 1024,
@@ -1197,34 +1319,20 @@ new Worker(
             console.log(
               `[retrainTrainingData] Skipping non-HTML response for ${url}: ${contentType || "unknown"}`,
             );
-            await TrainingModel.updateOne(
-              { _id: entry._id },
-              {
-                $set: {
-                  trainingStatus: 2,
-                  error: NON_HTML_SKIP_ERROR,
-                  lastEdit: new Date(),
-                },
-              },
-            );
-            await applyWebPagePagesAddedDelta(prevStatus, 2);
-            failCount++;
+            await markEntryFailedAndContinue({
+              entry,
+              prevStatus,
+              error: NON_HTML_SKIP_ERROR,
+            });
             continue;
           }
 
           if (typeof response?.data !== "string") {
-            await TrainingModel.updateOne(
-              { _id: entry._id },
-              {
-                $set: {
-                  trainingStatus: 2,
-                  error: "Response is not HTML text content",
-                  lastEdit: new Date(),
-                },
-              },
-            );
-            await applyWebPagePagesAddedDelta(prevStatus, 2);
-            failCount++;
+            await markEntryFailedAndContinue({
+              entry,
+              prevStatus,
+              error: "Response is not HTML text content",
+            });
             continue;
           }
 
@@ -1235,18 +1343,11 @@ new Worker(
           );
 
           if (!processResult?.content) {
-            await TrainingModel.updateOne(
-              { _id: entry._id },
-              {
-                $set: {
-                  trainingStatus: 2,
-                  error: "Failed to process/minify web page content",
-                  lastEdit: new Date(),
-                },
-              },
-            );
-            await applyWebPagePagesAddedDelta(prevStatus, 2);
-            failCount++;
+            await markEntryFailedAndContinue({
+              entry,
+              prevStatus,
+              error: "Failed to process/minify web page content",
+            });
             continue;
           }
 
@@ -1255,7 +1356,6 @@ new Worker(
           const oldDataSize = entry.dataSize || 0;
           const dataSizeDelta = contentSize - oldDataSize;
 
-          // 3. Update MongoDB
           const scrapedDoc = {
             type: 0,
             content,
@@ -1269,31 +1369,44 @@ new Worker(
             originalUrl: url,
           };
 
-          // 4. Upsert vectors to Qdrant
+          await emitTrainingProgress({
+            trainingProcessed: processedCount,
+            trainingTotal: totalEntries,
+            force: true,
+          });
+
           const result = await batchService.processDocumentAndTrain(
             [scrapedDoc],
             userId,
             agentId,
             qdrantIndexName,
+            {
+              onProgress: async (progress) => {
+                await emitTrainingProgress({
+                  trainingProcessed: processedCount,
+                  trainingTotal: totalEntries,
+                  embeddingProgress: progress.embeddingProgress ?? 0,
+                  embeddingTotal: progress.embeddingTotal ?? 0,
+                  upsertProgress: progress.upsertProgress ?? 0,
+                  upsertTotal: progress.upsertTotal ?? 0,
+                  trainingStep: progress.step ?? "chunking",
+                  force:
+                    progress.step === "embedding" ||
+                    progress.step === "upserting",
+                });
+              },
+            },
           );
 
           if (!result.success) {
-            await TrainingModel.updateOne(
-              { _id: entry._id },
-              {
-                $set: {
-                  trainingStatus: 2,
-                  error: result.error || "Failed to upsert vectors",
-                  lastEdit: new Date(),
-                },
-              },
-            );
-            await applyWebPagePagesAddedDelta(prevStatus, 2);
-            failCount++;
+            await markEntryFailedAndContinue({
+              entry,
+              prevStatus,
+              error: result.error || "Failed to upsert vectors",
+            });
             continue;
           }
 
-          // 5. Update MongoDB with new content and status
           await TrainingModel.updateOne(
             { _id: entry._id },
             {
@@ -1310,36 +1423,59 @@ new Worker(
 
           await applyWebPagePagesAddedDelta(prevStatus, 1);
 
-          // 6. Increment currentDataSize (delta: new - old)
           await Client.updateOne(
             { userId },
             { $inc: { currentDataSize: dataSizeDelta } },
           );
 
           successCount++;
+          processedCount++;
+          await emitScrapingProgress(
+            processedCount,
+            totalEntries,
+            processedCount < totalEntries,
+          );
         } catch (err) {
           console.error(`[retrainTrainingData] Error retraining ${url}:`, err);
-          await TrainingModel.updateOne(
-            { _id: entry._id },
-            {
-              $set: {
-                trainingStatus: 2,
-                error: err?.message || "Scraping failed",
-                lastEdit: new Date(),
-              },
-            },
-          );
-          await applyWebPagePagesAddedDelta(prevStatus, 2);
-          failCount++;
+          await markEntryFailedAndContinue({
+            entry,
+            prevStatus,
+            error: err?.message || "Scraping failed",
+          });
         }
       }
 
+      await emitScrapingProgress(totalEntries, totalEntries, false);
+
       await Agent.updateOne(
         { _id: agentId },
-        { $set: { dataTrainingStatus: 0 } },
+        {
+          $set: {
+            dataTrainingStatus: 0,
+            scrapingStartTime: null,
+            lastTrained: new Date(),
+          },
+        },
       );
+
+      const finalProgress = buildTrainingProgressPayload({
+        startTime: retrainStartTime,
+        phase: "training",
+        processed: totalEntries,
+        total: totalEntries,
+        trainingStep: "upserting",
+        trainingProcessed: totalEntries,
+        trainingTotal: totalEntries,
+        embeddingProgress: totalEntries,
+        embeddingTotal: totalEntries,
+        upsertProgress: totalEntries,
+        upsertTotal: totalEntries,
+        isProcessing: false,
+      });
+
       appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
+        scrapingProgress: finalProgress,
       });
 
       console.log(
@@ -1349,7 +1485,7 @@ new Worker(
       console.error("[retrainTrainingData] Job failed:", error);
       await Agent.updateOne(
         { _id: agentId },
-        { $set: { dataTrainingStatus: 0 } },
+        { $set: { dataTrainingStatus: 0, scrapingStartTime: null } },
       );
       appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
