@@ -1121,12 +1121,24 @@ async bulkInsertUrls(userId,agentId, urls) {
 
     try {
       const activeJobs = await urlProcessingQueue.getJobs(["active", "waiting"]);
-      const job = activeJobs.find(
+      let job = activeJobs.find(
         (j) => j.data?.agentId?.toString() === agentId.toString(),
       );
 
+      if (!job) {
+        const retrainJobs = await retrainTrainingDataQueue.getJobs([
+          "active",
+          "waiting",
+        ]);
+        job = retrainJobs.find(
+          (j) => j.data?.agentId?.toString() === agentId.toString(),
+        );
+      }
+
       if (job?.data?.totalUrls) {
         total = job.data.totalUrls;
+      } else if (job?.data?.totalEntries) {
+        total = job.data.totalEntries;
       }
 
       if (job?.progress && typeof job.progress === "object") {
@@ -1858,6 +1870,8 @@ async bulkInsertUrls(userId,agentId, urls) {
         agentId,
       }).lean();
 
+      console.log("checking entries : ",entries);
+
       if (entries.length === 0) {
         return res.status(404).json({
           success: false,
@@ -1969,12 +1983,35 @@ async bulkInsertUrls(userId,agentId, urls) {
         });
       }
 
+      const scrapingStartTime = new Date();
+      await Agent.updateOne(
+        { _id: agentId },
+        {
+          $set: {
+            dataTrainingStatus: 1,
+            scrapingStartTime,
+          },
+        },
+      );
+      appEvents.emit("userEvent", agentId, "training-event", {
+        agent: await Agent.findOne({ _id: agentId }),
+        scrapingProgress: buildTrainingProgressPayload({
+          startTime: scrapingStartTime,
+          phase: "scraping",
+          processed: 0,
+          total: webpageEntries.length,
+          isProcessing: true,
+        }),
+      });
+
       await retrainTrainingDataQueue.add("retrainTrainingData", {
         entries: webpageEntries,
         userId: userId?.toString(),
         agentId: agentId?.toString(),
         qdrantIndexName,
         TrainingModelName,
+        startTime: scrapingStartTime.getTime(),
+        totalEntries: webpageEntries.length,
       });
 
       res.status(200).json({
