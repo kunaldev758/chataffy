@@ -1870,6 +1870,8 @@ async bulkInsertUrls(userId,agentId, urls) {
         agentId,
       }).lean();
 
+      console.log("checking entries : ",entries);
+
       if (entries.length === 0) {
         return res.status(404).json({
           success: false,

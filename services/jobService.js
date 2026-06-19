@@ -1231,6 +1231,8 @@ new Worker(
       });
 
       const footerCache = {};
+      const pendingRetrainItems = [];
+      const qdrantManager = new QdrantVectorStoreManager(qdrantIndexName);
       let successCount = 0;
       let failCount = 0;
 
@@ -1246,11 +1248,7 @@ new Worker(
         await Agent.updateOne({ _id: agentId }, { $inc: filtered });
       }
 
-      const markEntryFailedAndContinue = async ({
-        entry,
-        prevStatus,
-        error,
-      }) => {
+      const markEntryFailed = async ({ entry, prevStatus, error }) => {
         await TrainingModel.updateOne(
           { _id: entry._id },
           {
@@ -1263,6 +1261,10 @@ new Worker(
         );
         await applyWebPagePagesAddedDelta(prevStatus, 2);
         failCount++;
+      };
+
+      const markEntryFailedAndContinue = async (args) => {
+        await markEntryFailed(args);
         processedCount++;
         await emitScrapingProgress(
           processedCount,
@@ -1299,12 +1301,16 @@ new Worker(
             continue;
           }
 
-          const qdrantManager = new QdrantVectorStoreManager(qdrantIndexName);
-          await qdrantManager.deleteByFields({
+          const deleteResult = await qdrantManager.deleteByFields({
             user_id: userId?.toString(),
             agent_id: agentId?.toString(),
             url,
           });
+          if (!deleteResult.success) {
+            throw new Error(
+              `Failed to delete old vectors: ${deleteResult.error}`,
+            );
+          }
 
           const response = await axios.get(url, {
             timeout: 30000,
@@ -1356,79 +1362,27 @@ new Worker(
           const oldDataSize = entry.dataSize || 0;
           const dataSizeDelta = contentSize - oldDataSize;
 
-          const scrapedDoc = {
-            type: 0,
+          pendingRetrainItems.push({
+            entry,
+            prevStatus,
+            url,
             content,
-            dataSize: contentSize,
-            metadata: {
-              url: webPageURL,
-              title,
-              metaDescription,
-              type: "webpage",
+            contentSize,
+            dataSizeDelta,
+            scrapedDoc: {
+              type: 0,
+              content,
+              dataSize: contentSize,
+              metadata: {
+                url: webPageURL,
+                title,
+                metaDescription,
+                type: "webpage",
+              },
+              originalUrl: url,
             },
-            originalUrl: url,
-          };
-
-          await emitTrainingProgress({
-            trainingProcessed: processedCount,
-            trainingTotal: totalEntries,
-            force: true,
           });
 
-          const result = await batchService.processDocumentAndTrain(
-            [scrapedDoc],
-            userId,
-            agentId,
-            qdrantIndexName,
-            {
-              onProgress: async (progress) => {
-                await emitTrainingProgress({
-                  trainingProcessed: processedCount,
-                  trainingTotal: totalEntries,
-                  embeddingProgress: progress.embeddingProgress ?? 0,
-                  embeddingTotal: progress.embeddingTotal ?? 0,
-                  upsertProgress: progress.upsertProgress ?? 0,
-                  upsertTotal: progress.upsertTotal ?? 0,
-                  trainingStep: progress.step ?? "chunking",
-                  force:
-                    progress.step === "embedding" ||
-                    progress.step === "upserting",
-                });
-              },
-            },
-          );
-
-          if (!result.success) {
-            await markEntryFailedAndContinue({
-              entry,
-              prevStatus,
-              error: result.error || "Failed to upsert vectors",
-            });
-            continue;
-          }
-
-          await TrainingModel.updateOne(
-            { _id: entry._id },
-            {
-              $set: {
-                content,
-                dataSize: contentSize,
-                trainingStatus: 1,
-                lastEdit: new Date(),
-                chunkCount: result.totalChunks || 0,
-                "webPage.url": url,
-              },
-            },
-          );
-
-          await applyWebPagePagesAddedDelta(prevStatus, 1);
-
-          await Client.updateOne(
-            { userId },
-            { $inc: { currentDataSize: dataSizeDelta } },
-          );
-
-          successCount++;
           processedCount++;
           await emitScrapingProgress(
             processedCount,
@@ -1442,6 +1396,85 @@ new Worker(
             prevStatus,
             error: err?.message || "Scraping failed",
           });
+        }
+      }
+
+      if (pendingRetrainItems.length > 0) {
+        await emitTrainingProgress({
+          trainingProcessed: 0,
+          trainingTotal: pendingRetrainItems.length,
+          force: true,
+        });
+
+        const result = await batchService.processDocumentAndTrain(
+          pendingRetrainItems.map((item) => item.scrapedDoc),
+          userId,
+          agentId,
+          qdrantIndexName,
+          {
+            onProgress: async (progress) => {
+              await emitTrainingProgress({
+                trainingProcessed: progress.trainingProcessed ?? 0,
+                trainingTotal:
+                  progress.trainingTotal ?? pendingRetrainItems.length,
+                embeddingProgress: progress.embeddingProgress ?? 0,
+                embeddingTotal: progress.embeddingTotal ?? 0,
+                upsertProgress: progress.upsertProgress ?? 0,
+                upsertTotal: progress.upsertTotal ?? 0,
+                trainingStep: progress.step ?? "chunking",
+                force:
+                  progress.step === "embedding" ||
+                  progress.step === "upserting",
+              });
+            },
+          },
+        );
+
+        if (!result.success) {
+          for (const item of pendingRetrainItems) {
+            await markEntryFailed({
+              entry: item.entry,
+              prevStatus: item.prevStatus,
+              error: result.error || "Failed to upsert vectors",
+            });
+          }
+        } else {
+          for (const item of pendingRetrainItems) {
+            const failed = result.failedUrls?.includes(item.url);
+            if (failed) {
+              await markEntryFailed({
+                entry: item.entry,
+                prevStatus: item.prevStatus,
+                error: "Failed to upsert vectors",
+              });
+              continue;
+            }
+
+            await TrainingModel.updateOne(
+              { _id: item.entry._id },
+              {
+                $set: {
+                  content: item.content,
+                  dataSize: item.contentSize,
+                  trainingStatus: 1,
+                  lastEdit: new Date(),
+                  chunkCount: result.chunkCountPerUrl?.[item.url] || 0,
+                  "webPage.url": item.url,
+                },
+              },
+            );
+
+            await applyWebPagePagesAddedDelta(item.prevStatus, 1);
+
+            if (item.dataSizeDelta !== 0) {
+              await Client.updateOne(
+                { userId },
+                { $inc: { currentDataSize: item.dataSizeDelta } },
+              );
+            }
+
+            successCount++;
+          }
         }
       }
 
