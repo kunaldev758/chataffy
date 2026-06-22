@@ -10,6 +10,7 @@ const Url = require('../models/Url');
 const WebsiteData = require('../models/WebsiteData');
 const Client = require('../models/Client');
 const PlanService = require('../services/PlanService');
+const QdrantVectorStoreManager = require('../services/QdrantService');
 const commonHelper = require('../helpers/commonHelper');
 const { isValidTimezone } = require('../helpers/timezoneHelper');
 
@@ -229,6 +230,8 @@ AIAgentController.deleteAgent = async (req, res) => {
 
     // Hard delete from all related collections in parallel
     await Promise.all([
+      new QdrantVectorStoreManager(agent.qdrantIndexName).deleteCollection(),
+      new QdrantVectorStoreManager(agent.qdrantIndexNamePaid).deleteCollection(),
       Agent.findByIdAndDelete(agentId),
       Widget.deleteMany({ agentId }),
       TrainingListFreeUsers.deleteMany({ agentId }),
