@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_SRC="${SCRIPT_DIR}/.env.production"
 SSH_KEY="C:/Users/sta/Desktop/chataffy-imp-data/chataffy-live.pem"
 SSH_HOST="ubuntu@44.203.85.96"
-REMOTE_APP_DIR="/var/www/chataffy.com/chataffy"
+REMOTE_APP_DIR="/var/www/chataffy.com/chataffy_be"
 ENV_DST="${SSH_HOST}:${REMOTE_APP_DIR}/.env"
 
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
