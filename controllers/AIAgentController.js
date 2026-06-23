@@ -13,6 +13,7 @@ const PlanService = require('../services/PlanService');
 const QdrantVectorStoreManager = require('../services/QdrantService');
 const commonHelper = require('../helpers/commonHelper');
 const { isValidTimezone } = require('../helpers/timezoneHelper');
+const NotificationModel = require('../models/Notification');
 
 const AIAgentController = {};
 
@@ -242,6 +243,7 @@ AIAgentController.deleteAgent = async (req, res) => {
         { assignedAgents: agentId },
         { $pull: { assignedAgents: new mongoose.Types.ObjectId(agentId) } }
       ),
+      NotificationModel.deleteMany({ agentId }),
     ]);
 
     return res.status(200).json({ status_code: 200, status: true, message: 'Agent deleted successfully' });
