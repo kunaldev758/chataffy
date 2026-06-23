@@ -16,7 +16,7 @@ async function findOrReuseUserSession(user, platform, cookieToken,req) {
     const existing = await UserSession.findOne({
       userId: user._id,
       platform,
-      token: cookieToken,
+      // token: cookieToken,
     });
     if (existing && (!existing.expiresAt || existing.expiresAt.getTime() > Date.now())) {
       return cookieToken;

@@ -52,7 +52,7 @@ class PlanService {
       limits: {
         maxStorage: 1000 * 1024, // 1000KB
         maxQueries: 100,
-        maxAgentsPerAccount:1,
+        maxAgentsPerAccount:2,
         maxHumanAgentsPerAccount:1,
       },
       status: 'active',
