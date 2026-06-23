@@ -2,6 +2,21 @@
 
 set -e
 
+# Load NVM
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+echo "Node Version:"
+node -v
+
+echo "NPM Version:"
+npm -v
+
+echo ""
+echo "========================================"
+
+
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_SRC="${SCRIPT_DIR}/.env.production"
 SSH_KEY="C:/Users/sta/Desktop/chataffy-imp-data/chataffy-live.pem"
