@@ -15,16 +15,16 @@ const { sendWelcomeEmail } = require("../services/emailService");
 const UserSession = require("../models/userSession");
 
 async function findOrReuseUserSession(user, platform, cookieToken,req) {
-  if (cookieToken && typeof cookieToken === "string") {
+  // if (cookieToken && typeof cookieToken === "string") {
     const existing = await UserSession.findOne({
       userId: user._id,
       platform,
       // token: cookieToken,
-    });
+    }).lean();
     if (existing && (!existing.expiresAt || existing.expiresAt.getTime() > Date.now())) {
-      return cookieToken;
+      return existing.token;
     }
-  }
+  // }
 
   const token = user.generateAuthToken(platform);
   await UserSession.create({
