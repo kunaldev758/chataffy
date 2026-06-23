@@ -5,7 +5,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_SRC="${SCRIPT_DIR}/.env.production"
 SSH_KEY="C:/Users/sta/Desktop/chataffy-imp-data/chataffy-live.pem"
-SSH_HOST="ubuntu@44.203.85.96/"
+SSH_HOST="ubuntu@44.203.85.96"
 REMOTE_APP_DIR="/var/www/chataffy.com/chataffy"
 ENV_DST="${SSH_HOST}:${REMOTE_APP_DIR}/.env"
 
