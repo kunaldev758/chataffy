@@ -275,6 +275,9 @@ AIAgentController.completeOnboarding = async (req, res) => {
       };
     }
     user.isOnboarded[platform] = true;
+    if(platform !== 'local') {
+      user.isOnboarded.local = true;
+    }
     await user.save();
 
     return res.status(200).json({ status_code: 200, status: true, message: 'Onboarding completed' });
