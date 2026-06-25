@@ -648,6 +648,57 @@ Keep responses short, direct, friendly, and professional. Only use information e
       .join("\n\n---\n\n"); // Separate contexts clearly
   }
 
+  // Skip legal/utility pages that rarely contain the answer content
+  isUtilitySource(title, url) {
+    const haystack = `${title || ""} ${url || ""}`.toLowerCase();
+    const utilityPatterns = [
+      /privacy[-\s]?policy/,
+      /terms[-\s]?(of[-\s]?(use|service)|and[-\s]?conditions)/,
+      /cookie[-\s]?policy/,
+      /\/contact(?:\/|$|\?|#)/,
+      /\bcontact[-\s]us\b/,
+      /\/legal(?:\/|$|\?|#)/,
+      /disclaimer/,
+      /\bgdpr\b/,
+      /\/cookies(?:\/|$|\?|#)/,
+    ];
+    return utilityPatterns.some((pattern) => pattern.test(haystack));
+  }
+
+  // Build deduplicated source citations from Qdrant matches used in the answer
+  buildSourcesFromMatches(matches, options = {}) {
+    const { maxSources = 3, scoreGap = 0.03 } = options;
+    if (!matches?.length) return [];
+
+    const sorted = [...matches].sort((a, b) => (b.score || 0) - (a.score || 0));
+    const topScore = sorted[0]?.score || 0;
+    const minCitationScore =
+      topScore > 0 ? Math.max(0, topScore - scoreGap) : 0;
+
+    const seenSourceKeys = new Set();
+    const sources = [];
+
+    for (const match of sorted) {
+      if (sources.length >= maxSources) break;
+      if ((match.score || 0) < minCitationScore) continue;
+
+      const payload = match.payload || {};
+      const sourceType = payload.type !== undefined ? payload.type : null;
+      const title = payload.title || payload.url || null;
+      const url = payload.url || null;
+
+      if (sourceType === null && !title && !url) continue;
+      if (this.isUtilitySource(title, url)) continue;
+
+      const key = url || title;
+      if (!key || seenSourceKeys.has(key)) continue;
+      seenSourceKeys.add(key);
+      sources.push({ type: sourceType, title, url });
+    }
+
+    return sources;
+  }
+
   async queryQdrant(collectionName, queryEmbedding, topK, userId) {
     try {
       console.log(
@@ -1035,11 +1086,13 @@ Keep responses short, direct, friendly, and professional. Only use information e
             })
             .filter(({ type, title, url }) => {
               if (type === null && !title && !url) return false;
+              if (this.isUtilitySource(title, url)) return false;
               const key = url || title;
               if (!key || seenStructuralKeys.has(key)) return false;
               seenStructuralKeys.add(key);
               return true;
-            });
+            })
+            .slice(0, 3);
 
           return {
             success: true,
@@ -1197,6 +1250,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       }
 
       let finalAnswer;
+      let usedKnowledgeBaseContext = false;
       // let completionUsage = null;
 
       // Check if message looks accidental or like test input
@@ -1256,6 +1310,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       } else {
         // 6. Get Context and Generate Answer via LLM
+        usedKnowledgeBaseContext = true;
         const context = this.getRelevantContext(relevantMatches);
 
         const { answer: generatedAnswer, usage: llmUsage } =
@@ -1273,31 +1328,10 @@ Keep responses short, direct, friendly, and professional. Only use information e
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       }
 
-      // 10. Prepare Sources from Qdrant matched payloads
-      // Use full retrieval set (not threshold-filtered) so citations appear even when
-      // scores are low, irrelevant redirect runs, or LLM context used only "relevant" hits.
-      const matchesForSources =
-        queryResponse.length > 0
-          ? [...queryResponse].sort((a, b) => b.score - a.score)
-          : [];
-      const seenSourceKeys = new Set();
-      const sources = matchesForSources
-        .map((match) => {
-          const payload = match.payload || {};
-          const sourceType = payload.type !== undefined ? payload.type : null;
-          const title = payload.title || payload.url || null;
-          const url = payload.url || null;
-          return { type: sourceType, title, url };
-        })
-        .filter(({ type, title, url }) => {
-          // Keep only entries with some identifier
-          if (type === null && !title && !url) return false;
-          // Deduplicate by url (for webpages) or title (for others)
-          const key = url || title;
-          if (!key || seenSourceKeys.has(key)) return false;
-          seenSourceKeys.add(key);
-          return true;
-        });
+      // Only cite pages whose scraped content was actually sent to the LLM
+      const sources = usedKnowledgeBaseContext
+        ? this.buildSourcesFromMatches(relevantMatches)
+        : [];
 
       return {
         success: true,
