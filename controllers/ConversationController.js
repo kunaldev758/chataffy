@@ -8,48 +8,60 @@ const emailService = require("../services/emailService");
 const ConversationController = {};
 
 //get all old conversation
-ConversationController.getAllOldConversations = async (visitor_id, ip) => {
+ConversationController.getAllOldConversations = async (visitor_id, ip, agentId) => {
   try {
-    if (!visitor_id) return [];
-    let visitorsMap = [];
+    if (!visitor_id || !agentId) return [];
 
-    // By default, fetch conversations for the current visitor id.
-    // If IP is provided, expand the query to include all visitors with the same
-    // IP for the same user/agent context.
+    const baseVisitor = await Visitor.findById(visitor_id).lean();
+    if (!baseVisitor) return [];
+
+    const activeAgentId = String(agentId);
+
+    // Never leak chats from another agent/website for this visitor.
+    if (baseVisitor.agentId && String(baseVisitor.agentId) !== activeAgentId) {
+      return [];
+    }
+
     let visitorIds = [visitor_id];
-    if (ip) {
-      const baseVisitor = await Visitor.findById(visitor_id).lean();
-      if (baseVisitor) {
-        const visitorsWithSameIp = await Visitor.find({
-          ip,
-          userId: baseVisitor.userId,
-          agentId: baseVisitor.agentId,
-        })
-          .select("_id name")
-          .lean();
-        if (visitorsWithSameIp.length > 0) {
-          visitorIds = visitorsWithSameIp.map((v) => v._id);
-          visitorsMap = new Map(visitorsWithSameIp.map((v) => [v._id.toString(), {_id: v._id, name: v.name}]));
-        }
+    let visitorsMap = new Map();
+
+    // Same-IP visitors, but only for this agent/website.
+    const resolvedIp = ip || baseVisitor.ip;
+    if (resolvedIp) {
+      const visitorsWithSameIp = await Visitor.find({
+        ip: resolvedIp,
+        userId: baseVisitor.userId,
+        agentId: activeAgentId,
+      })
+        .select("_id name")
+        .lean();
+
+      if (visitorsWithSameIp.length > 0) {
+        visitorIds = visitorsWithSameIp.map((v) => v._id);
+        visitorsMap = new Map(
+          visitorsWithSameIp.map((v) => [v._id.toString(), { _id: v._id, name: v.name }]),
+        );
       }
     }
 
-    // Fetch all conversations for matched visitors (open and closed)
-    let conversations = await Conversation.find({
-      visitor: { $in: visitorIds },
+    const conversations = await Conversation.find({
+      visitor: { $in: visitorIds.map((id) => String(id)) },
+      userId: baseVisitor.userId,
+      agentId: activeAgentId,
       is_started: true,
     }).sort({ createdAt: -1 });
 
-    // For each conversation, get the last message and add it to the `message` field
     const updatedConversations = await Promise.all(
       conversations.map(async (conv) => {
         const lastMessage = await ChatMessage.findOne({ conversation_id: conv._id })
           .sort({ createdAt: -1 });
 
+        const visitorKey = conv.visitor?.toString?.() || String(conv.visitor);
+
         return {
           ...conv.toObject(),
-          visitor: visitorsMap.get(conv.visitor.toString()) || conv.visitor,
-          message: lastMessage?.message || null, // Add message field
+          visitor: visitorsMap.get(visitorKey) || conv.visitor,
+          message: lastMessage?.message || null,
         };
       })
     );
