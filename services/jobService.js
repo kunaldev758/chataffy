@@ -990,7 +990,7 @@ new Worker(
       console.log(error);
     }
   },
-  { connection: redisConfig, concurrency: 1 },
+  { connection: redisConfig, concurrency: 3 },
 );
 
 // Delete training data queue - runs in background
@@ -1527,7 +1527,7 @@ new Worker(
       throw error;
     }
   },
-  { connection: redisConfig, concurrency: 1 },
+  { connection: redisConfig, concurrency: 2 },
 );
 
 const transcriptEmailQueue = new Queue("transcriptEmailQueue", {
