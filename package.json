@@ -11,6 +11,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@bull-board/api": "^8.0.1",
+    "@bull-board/express": "^8.0.1",
     "@dqbd/tiktoken": "^1.0.20",
     "@paypal/checkout-server-sdk": "^1.0.3",
     "@qdrant/js-client-rest": "^1.14.1",

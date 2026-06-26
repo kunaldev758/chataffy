@@ -12,6 +12,8 @@ const { downgradeExpiredPlans } = require('./services/planCronService');
 const bigcommerceRoutes = require("./routes/bigcommerce");
 const shopifyRoutes = require("./routes/shopify");
 const { initializeSocketController } = require("./socket");
+const { setupBullBoard, BULL_BOARD_BASE_PATH } = require("./services/bullBoard");
+const { verifySuperAdminToken } = require("./middleware/verifySuperAdminToken");
 
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
@@ -81,6 +83,11 @@ app.use(
 );
 app.use("/uploads", express.static(uploadsDir));
 app.use("/api", apiRoutes);
+app.use(
+  BULL_BOARD_BASE_PATH,
+  verifySuperAdminToken,
+  setupBullBoard(),
+);
 app.use('/api/paypal', paymentsRouter);
 app.use('/api/bigcommerce', bigcommerceRoutes);
 app.use("/api/shopify", shopifyRoutes);
