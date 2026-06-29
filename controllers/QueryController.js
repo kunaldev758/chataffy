@@ -344,6 +344,9 @@ class QuestionAnsweringSystem {
       const count = this.extractRequestedCount(question, 5);
       return Math.min(2000, 300 + count * 120);
     }
+    if (responseMode === "contact") {
+      return 800;
+    }
     if (responseMode === "page_links") {
       const count = this.extractRequestedCount(question, 5);
       return Math.min(1200, 200 + count * 100);
@@ -437,6 +440,7 @@ class QuestionAnsweringSystem {
   /**
    * Classify retrieval strategy:
    * - IN_PAGE_LIST: products/items/prices on a page (e.g. featured products on homepage)
+   * - CONTACT_INFO: social media, phone, email, address, hours (footer content)
    * - PAGE_LINKS: navigation — list of distinct pages/URLs
    * - SEMANTIC: default factual Q&A via embeddings
    */
@@ -459,13 +463,31 @@ class QuestionAnsweringSystem {
         q
       );
 
+    const wantsContactInfo =
+      /\bsocial\s*media\b/.test(q) ||
+      /\b(facebook|instagram|twitter|tiktok|youtube|linkedin|pinterest)\b/.test(
+        q
+      ) ||
+      /\b(follow\s+us|find\s+us\s+on)\b/.test(q) ||
+      /\b(office\s+hours|business\s+hours|phone\s+number|mailing\s+address)\b/.test(
+        q
+      ) ||
+      (/\b(phone|email|e-mail|address|contact|hours|fax|call\s+us|reach\s+us|mailing)\b/.test(
+        q
+      ) &&
+        !/\b(support\s+ticket|submit\s+a\s+ticket|product)\b/.test(q)) ||
+      (/\b(give\s+me|show\s+me|what\s+are|list)\b/.test(q) &&
+        /\bsocial\b/.test(q));
+
     const wantsPageLinks =
-      /\b(links?|urls?)\b/.test(q) ||
-      /\bshow\s+me\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
-      /\blist\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
-      (/\b(pages?)\b/.test(q) && !wantsInPageList) ||
-      (/\b(collections?)\b/.test(q) &&
-        !/\b(products?|items?|featured|price|prices)\b/.test(q));
+      !wantsContactInfo &&
+      ((/\b(links?|urls?)\b/.test(q) &&
+        !/\b(social\s*media|social)\b/.test(q)) ||
+        /\bshow\s+me\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
+        /\blist\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
+        (/\b(pages?)\b/.test(q) && !wantsInPageList) ||
+        (/\b(collections?)\b/.test(q) &&
+          !/\b(products?|items?|featured|price|prices)\b/.test(q)));
 
     const hasListHint = /\b(list|show|give\s+me|how\s+many|all\b|top\b)\b/.test(
       q
@@ -473,6 +495,7 @@ class QuestionAnsweringSystem {
     const hasProductWord = /\b(products?|items?)\b/.test(q);
 
     if (wantsInPageList) return "IN_PAGE_LIST";
+    if (wantsContactInfo) return "CONTACT_INFO";
     if (wantsPageLinks) return "PAGE_LINKS";
     if (hasListHint && hasProductWord) return "IN_PAGE_LIST";
     if (hasListHint) return "PAGE_LINKS";
@@ -519,6 +542,69 @@ class QuestionAnsweringSystem {
     }
 
     return merged.sort((a, b) => (b.score || 0) - (a.score || 0));
+  }
+
+  prioritizeFooterChunks(matches) {
+    const footer = [];
+    const rest = [];
+    for (const m of matches || []) {
+      const text = (m.payload?.text || "").toLowerCase();
+      if (text.includes("footer links")) {
+        footer.push(m);
+      } else {
+        rest.push(m);
+      }
+    }
+    return [...footer, ...rest];
+  }
+
+  extractContactKeywords(query) {
+    const q = (query || "").toLowerCase();
+    const keywords = new Set(this.extractKeywords(query));
+
+    const platformNames = [
+      "facebook",
+      "instagram",
+      "twitter",
+      "youtube",
+      "tiktok",
+      "linkedin",
+      "pinterest",
+    ];
+
+    for (const name of platformNames) {
+      if (q.includes(name)) keywords.add(name);
+    }
+
+    if (/\bsocial\b/.test(q) || /\bsocial\s*media\b/.test(q)) {
+      for (const name of platformNames) keywords.add(name);
+      keywords.add("footer");
+    }
+
+    if (/\b(phone|call|text|fax|tel)\b/.test(q)) {
+      keywords.add("phone");
+      keywords.add("call");
+      keywords.add("footer");
+    }
+
+    if (/\b(email|e-mail|mailto)\b/.test(q)) {
+      keywords.add("email");
+      keywords.add("footer");
+    }
+
+    if (/\b(address|mailing|location)\b/.test(q)) {
+      keywords.add("address");
+      keywords.add("mailing");
+      keywords.add("footer");
+    }
+
+    if (/\b(hours|office)\b/.test(q)) {
+      keywords.add("hours");
+      keywords.add("footer");
+    }
+
+    keywords.add("footer");
+    return Array.from(keywords).filter((w) => w.length > 2);
   }
 
   buildInPageListContext(matches) {
@@ -581,7 +667,9 @@ class QuestionAnsweringSystem {
       "the","a","an","and","or","of","for","to","in","on","with","all","show",
       "list","give","me","links","url","urls","how","many","top","best","your",
       "their","our","my","there","is","are","do","you","please","products",
-      "collections","link","give","items","item"
+      "collections","link","give","items","item","what","when","where","have",
+      "get","can","could","would","will","that","this","from","about","been",
+      "media",
     ]);
     return (query || "")
       .toLowerCase()
@@ -689,6 +777,8 @@ Keep responses short, direct, friendly, and professional. Only use information e
       systemPrompt += `\n\n---\n\n### List / Catalog Responses\n\nWhen the user asks for a list of products or items:\n\n- List **every** matching item found in the context — do not omit any\n- Include product name, price (if present), and link for each item\n- Use clean HTML: a brief lead (optional), then a <ul> of <li> entries\n- Format links: <a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">text</a>\n- Never claim information is missing if it appears in the context below\n- You may use more than 2 sentences when listing multiple items`;
     } else if (responseMode === "page_links") {
       systemPrompt += `\n\n---\n\n### Page Link Responses\n\nWhen listing site pages, use a <ul> of linked page titles. Keep the intro brief.`;
+    } else if (responseMode === "contact") {
+      systemPrompt += `\n\n---\n\n### Contact & Social Media Responses\n\nWhen the user asks for social media, phone, email, address, or hours:\n\n- List **every** matching profile URL, phone, email, and address from the context\n- Use clean HTML with a <ul> of <li> entries\n- Format links: <a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">platform name</a>\n- Never claim social links or contact details are missing if they appear in the context\n- Include platform names (Facebook, Instagram, etc.) with their URLs`;
     }
 
     let answerInstructions;
@@ -706,6 +796,15 @@ Keep responses short, direct, friendly, and professional. Only use information e
     - Write as a real human customer support agent would - natural, friendly, and conversational
     - Format as an HTML list of page links from the context
     - Keep the intro to 1-2 sentences`;
+    } else if (responseMode === "contact") {
+      answerInstructions = `Instructions:
+    - Write as a helpful customer support agent for ${organisation}
+    - The user wants contact info and/or social media profiles from the context below
+    - List **every** social media URL (Facebook, Instagram, Twitter/X, YouTube, TikTok, etc.) found in the context
+    - Also include phone, email, address, and office hours if present and relevant to the question
+    - Use clean HTML with <ul> and <li> tags; link each profile: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">Platform</a>
+    - **CRITICAL**: If social URLs appear in the context (including footer), include them — never say we don't have social media links
+    - Only use information from the context; do not invent URLs`;
     } else {
       answerInstructions = `Instructions:
     - Write as a real human customer support agent would - natural, friendly, and conversational
@@ -1204,6 +1303,75 @@ Keep responses short, direct, friendly, and professional. Only use information e
         );
       }
 
+      if (intent === "CONTACT_INFO") {
+        const keywords = this.extractContactKeywords(question);
+
+        const footerPoints = await this.structuralFetchByKeywords(
+          collectionName,
+          ["footer links", "footer"],
+          userIdString,
+          150
+        );
+
+        const keywordPoints = await this.structuralFetchByKeywords(
+          collectionName,
+          keywords,
+          userIdString,
+          250
+        );
+
+        const semanticMatches = await this.queryQdrant(
+          collectionName,
+          questionEmbedding,
+          12,
+          userIdString
+        );
+
+        let mergedMatches = this.mergeRetrievalResults(semanticMatches, [
+          ...footerPoints,
+          ...keywordPoints,
+        ]);
+        mergedMatches = this.prioritizeFooterChunks(mergedMatches);
+
+        if (mergedMatches.length > 0) {
+          const contextBlocks = this.buildInPageListContext(mergedMatches);
+          const contactContext = `The user is asking about contact information, social media profiles, phone, email, address, or business hours for ${companyName}. Use ONLY the content below. Include every social media URL and relevant contact detail found. Do not say information is missing if it appears below.\n\n${contextBlocks}`;
+
+          const { answer: contactAnswer, usage: contactUsage } =
+            await this.generateAnswer(
+              question,
+              contactContext,
+              chatHistory,
+              companyName,
+              websiteData,
+              { responseMode: "contact" }
+            );
+
+          if (contactUsage) {
+            logOpenAIUsage({
+              userId,
+              agentId,
+              tokens: contactUsage.total_tokens,
+              requests: 1,
+            });
+          }
+
+          return {
+            success: true,
+            answer: contactAnswer,
+            sources: this.matchesToSources(mergedMatches),
+            conversationId,
+            isAgentRequest: this.isAgentConnectionRequest(question),
+          };
+        }
+
+        console.warn(
+          `[QueryController] CONTACT_INFO intent but no matching chunks for keywords [${keywords.join(
+            ", "
+          )}]. Falling back to semantic search.`
+        );
+      }
+
       if (intent === "PAGE_LINKS") {
         const keywords = this.extractKeywords(question);
         const requestedCount = this.extractRequestedCount(question, requestedTopK);
@@ -1280,7 +1448,9 @@ Keep responses short, direct, friendly, and professional. Only use information e
                 this.extractRequestedCount(question, requestedTopK) * 3
               )
             )
-          : requestedTopK;
+          : intent === "CONTACT_INFO"
+            ? 12
+            : requestedTopK;
 
       // Query Qdrant (semantic)
       // Filter by user_id (owner) - Qdrant payload stores user_id, not agent_id, for filtering
@@ -1479,6 +1649,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         // Get Context and Generate Answer via LLM
         const context = this.getRelevantContext(relevantMatches);
         const listFallback = intent === "IN_PAGE_LIST";
+        const contactFallback = intent === "CONTACT_INFO";
         const requestedCount = this.extractRequestedCount(
           question,
           requestedTopK
@@ -1493,7 +1664,9 @@ Keep responses short, direct, friendly, and professional. Only use information e
             websiteData,
             listFallback
               ? { responseMode: "list", requestedCount }
-              : {}
+              : contactFallback
+                ? { responseMode: "contact" }
+                : {}
           );
         finalAnswer = generatedAnswer;
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });

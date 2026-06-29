@@ -84,6 +84,47 @@ function companyNameFromDomain(hostname) {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+const SOCIAL_PLATFORM_LABELS = [
+  { pattern: /facebook\.com/i, label: "Facebook" },
+  { pattern: /instagram\.com/i, label: "Instagram" },
+  { pattern: /twitter\.com|x\.com/i, label: "Twitter / X" },
+  { pattern: /youtube\.com/i, label: "YouTube" },
+  { pattern: /tiktok\.com/i, label: "TikTok" },
+  { pattern: /linkedin\.com/i, label: "LinkedIn" },
+  { pattern: /pinterest\.com/i, label: "Pinterest" },
+];
+
+/** Label icon-only footer links (e.g. social icons) so RAG can match platform names. */
+function enrichFooterHtml(footerHTML) {
+  if (!footerHTML) return footerHTML;
+  const $ = cheerio.load(footerHTML, { decodeEntities: true });
+
+  $("a").each((_, el) => {
+    const href = $(el).attr("href") || "";
+    if (!href) return;
+
+    for (const { pattern, label } of SOCIAL_PLATFORM_LABELS) {
+      if (pattern.test(href)) {
+        $(el).empty().text(`${label}: ${href}`);
+        return;
+      }
+    }
+
+    if (href.startsWith("mailto:")) {
+      const email = href.replace(/^mailto:/i, "").split("?")[0];
+      if (email) $(el).text(`Email: ${email}`);
+      return;
+    }
+
+    if (href.startsWith("tel:")) {
+      const phone = href.replace(/^tel:/i, "");
+      if (phone) $(el).text(`Phone: ${phone}`);
+    }
+  });
+
+  return $.root().html() || footerHTML;
+}
+
 // Helper function to extract website metadata from HTML
 const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
   const metadata = {
@@ -306,7 +347,8 @@ const processWebPage = async (url, sourceCode, footerCache = {}) => {
 
     // Append footer content once per domain
     if (footerHTML) {
-      const footerMarkdown = turndownService.turndown(footerHTML);
+      const enrichedFooter = enrichFooterHtml(footerHTML);
+      const footerMarkdown = turndownService.turndown(enrichedFooter);
       markdown += `\n\n---\n**Footer Links (from ${domain})**\n${footerMarkdown}`;
     }
 
