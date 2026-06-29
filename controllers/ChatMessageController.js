@@ -1,5 +1,6 @@
 const ChatMessage = require("../models/ChatMessage");
 const Conversation = require("../models/Conversation");
+const Visitor = require("../models/Visitor");
 
 const ChatMessageController = {};
 
@@ -103,8 +104,6 @@ ChatMessageController.getAllOldChatMessages = async (req, res) => {
         })
         .lean();
       
-      // Get conversation feedback data
-      const Conversation = require("../models/Conversation");
       const conversation = await Conversation.findById(conversation_id).lean();
       let conversationData = null;
       if (conversation) {
@@ -114,10 +113,17 @@ ChatMessageController.getAllOldChatMessages = async (req, res) => {
         };
       }
 
+      const visitor = conversation?.visitor
+        ? await Visitor.findById(conversation.visitor).lean()
+        : null;
+
       res.json({
         chatMessages: chatMessages,
         conversationOpenStatus: conversation?.conversationOpenStatus ?? null,
         conversationFeedback: conversationData,
+        visitor,
+        aiChat: conversation?.aiChat,
+        visitorClosed: conversation?.visitorClosed ?? false,
       });
     } else {
       throw new error();

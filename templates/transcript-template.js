@@ -207,6 +207,7 @@ exports.chatTranscriptTemplate = (data) => {
           line-height: 1.45;
           white-space: pre-wrap;
           word-break: break-word;
+          text-align: left;
         }
         .chat-msg__reply {
           margin-bottom: 8px;
