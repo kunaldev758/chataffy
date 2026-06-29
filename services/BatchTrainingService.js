@@ -31,7 +31,7 @@ class BatchTrainingService {
       const splitter = new RecursiveCharacterTextSplitter({
         chunkSize: this.CHUNK_SIZE * this.CHARS_PER_TOKEN,
         chunkOverlap: this.CHUNK_OVERLAP * this.CHARS_PER_TOKEN,
-        separators: ["\n\n", "\n", ". ", " ", ""]
+        separators: ["\n## ", "\n### ", "\n\n", "\n", ". ", " ", ""]
       });
 
       let allChunks = [];

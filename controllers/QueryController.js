@@ -339,7 +339,16 @@ class QuestionAnsweringSystem {
   }
 
   // Determine appropriate max_tokens based on query type
-  determineMaxTokens(question) {
+  determineMaxTokens(question, responseMode = "brief") {
+    if (responseMode === "list") {
+      const count = this.extractRequestedCount(question, 5);
+      return Math.min(2000, 300 + count * 120);
+    }
+    if (responseMode === "page_links") {
+      const count = this.extractRequestedCount(question, 5);
+      return Math.min(1200, 200 + count * 100);
+    }
+
     const normalizedQuestion = question.toLowerCase().trim();
     
     // Keywords that indicate queries requiring longer responses
@@ -425,23 +434,137 @@ class QuestionAnsweringSystem {
     return 200;
   }
 
-  // Simple intent detector to pick structural vs semantic retrieval
-  detectIntent(query) {
+  /**
+   * Classify retrieval strategy:
+   * - IN_PAGE_LIST: products/items/prices on a page (e.g. featured products on homepage)
+   * - PAGE_LINKS: navigation — list of distinct pages/URLs
+   * - SEMANTIC: default factual Q&A via embeddings
+   */
+  classifyQueryIntent(query) {
     const q = (query || "").toLowerCase();
-    const structuralHints = [
-      "list",
-      "show",
-      "give me",
-      "links",
-      "how many",
-      "all ",
-      "urls",
-      "products",
-      "collections",
-      "top "
-    ];
-    const hasHint = structuralHints.some((h) => q.includes(h));
-    return hasHint ? "STRUCTURAL" : "SEMANTIC";
+
+    const wantsInPageList =
+      /\b(featured|homepage|home\s*page|main\s*page)\b/.test(q) ||
+      /\b(list|show|give\s+me|what\s+are|tell\s+me)\b[\s\S]{0,50}\b(products?|items?)\b/.test(
+        q
+      ) ||
+      /\b(all|every|each)\b[\s\S]{0,40}\b(products?|items?)\b/.test(q) ||
+      /\b(products?|items?)\b[\s\S]{0,40}\b(price|prices|cost|pricing)\b/.test(
+        q
+      ) ||
+      /\b(price|prices|cost|pricing)\b[\s\S]{0,40}\b(products?|items?)\b/.test(
+        q
+      ) ||
+      /\bwhat(?:'s| is)\s+on\s+(?:the\s+|your\s+)?(?:homepage|home\s*page|main\s*page)\b/.test(
+        q
+      );
+
+    const wantsPageLinks =
+      /\b(links?|urls?)\b/.test(q) ||
+      /\bshow\s+me\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
+      /\blist\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
+      (/\b(pages?)\b/.test(q) && !wantsInPageList) ||
+      (/\b(collections?)\b/.test(q) &&
+        !/\b(products?|items?|featured|price|prices)\b/.test(q));
+
+    const hasListHint = /\b(list|show|give\s+me|how\s+many|all\b|top\b)\b/.test(
+      q
+    );
+    const hasProductWord = /\b(products?|items?)\b/.test(q);
+
+    if (wantsInPageList) return "IN_PAGE_LIST";
+    if (wantsPageLinks) return "PAGE_LINKS";
+    if (hasListHint && hasProductWord) return "IN_PAGE_LIST";
+    if (hasListHint) return "PAGE_LINKS";
+    return "SEMANTIC";
+  }
+
+  /** @deprecated Use classifyQueryIntent */
+  detectIntent(query) {
+    const intent = this.classifyQueryIntent(query);
+    return intent === "PAGE_LINKS" ? "STRUCTURAL" : intent;
+  }
+
+  isHomepageUrl(url) {
+    if (!url || typeof url !== "string") return false;
+    try {
+      const path = new URL(url).pathname;
+      return path === "/" || path === "";
+    } catch {
+      return /\/$/.test(url) && !url.replace(/^https?:\/\/[^/]+/, "").includes("/", 1);
+    }
+  }
+
+  mergeRetrievalResults(semanticMatches, keywordPoints) {
+    const seen = new Set();
+    const merged = [];
+
+    const addMatch = (match, defaultScore = 0) => {
+      const payload = match.payload || match;
+      const text = payload?.text || payload?.pageContent || "";
+      const url = payload?.url || "";
+      const key = `${url}::${text.slice(0, 120)}`;
+      if (!text || seen.has(key)) return;
+      seen.add(key);
+      merged.push({
+        id: match.id || key,
+        score: match.score ?? defaultScore,
+        payload,
+      });
+    };
+
+    for (const m of semanticMatches || []) addMatch(m, m.score);
+    for (const p of keywordPoints || []) {
+      addMatch({ id: p.id, payload: p.payload || p }, 0.45);
+    }
+
+    return merged.sort((a, b) => (b.score || 0) - (a.score || 0));
+  }
+
+  buildInPageListContext(matches) {
+    const byUrl = new Map();
+
+    for (const match of matches || []) {
+      const payload = match.payload || {};
+      const url = payload.url || "unknown";
+      const title = payload.title || url;
+      const text = payload.text || payload.pageContent || "";
+      if (!text) continue;
+
+      if (!byUrl.has(url)) {
+        byUrl.set(url, { title, url, texts: [] });
+      }
+      const entry = byUrl.get(url);
+      if (!entry.texts.includes(text)) {
+        entry.texts.push(text);
+      }
+    }
+
+    return Array.from(byUrl.values())
+      .map(
+        ({ title, url, texts }) =>
+          `Source: ${title} (${url})\n---\n${texts.join("\n\n")}\n---`
+      )
+      .join("\n\n");
+  }
+
+  matchesToSources(matches) {
+    const seenSourceKeys = new Set();
+    return (matches || [])
+      .map((match) => {
+        const payload = match.payload || {};
+        const sourceType = payload.type !== undefined ? payload.type : null;
+        const title = payload.title || payload.url || null;
+        const url = payload.url || null;
+        return { type: sourceType, title, url };
+      })
+      .filter(({ type, title, url }) => {
+        if (type === null && !title && !url) return false;
+        const key = url || title;
+        if (!key || seenSourceKeys.has(key)) return false;
+        seenSourceKeys.add(key);
+        return true;
+      });
   }
 
   extractRequestedCount(question, fallback = 5) {
@@ -526,9 +649,10 @@ class QuestionAnsweringSystem {
     chatHistory,
     organisation,
     websiteData = null,
-    // fallbackMessage,
-    // email
+    answerOptions = {}
   ) {
+    const { responseMode = "brief", requestedCount = 5 } = answerOptions;
+
     // Build dynamic system prompt if websiteData is available, otherwise use fallback
     let systemPrompt;
     if (websiteData && (organisation || websiteData.company_name)) {
@@ -561,19 +685,29 @@ You ALWAYS speak as ${organisation || "the company"} in a natural, conversationa
 Keep responses short, direct, friendly, and professional. Only use information extracted from ${organisation || "the company"}'s website.`;
     }
 
-    const userPrompt = `Context from knowledge base:
-    ---
-    ${context}
-    ---
-    
-    Previous conversation history:
-    ---
-    ${chatHistory || "No previous conversation"}
-    ---
-    
-    Current question: ${question}
-    
-    Instructions:
+    if (responseMode === "list") {
+      systemPrompt += `\n\n---\n\n### List / Catalog Responses\n\nWhen the user asks for a list of products or items:\n\n- List **every** matching item found in the context — do not omit any\n- Include product name, price (if present), and link for each item\n- Use clean HTML: a brief lead (optional), then a <ul> of <li> entries\n- Format links: <a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">text</a>\n- Never claim information is missing if it appears in the context below\n- You may use more than 2 sentences when listing multiple items`;
+    } else if (responseMode === "page_links") {
+      systemPrompt += `\n\n---\n\n### Page Link Responses\n\nWhen listing site pages, use a <ul> of linked page titles. Keep the intro brief.`;
+    }
+
+    let answerInstructions;
+    if (responseMode === "list") {
+      answerInstructions = `Instructions:
+    - Write as a helpful customer support agent for ${organisation}
+    - The user wants a **complete list** of items from the context below
+    - List **every** matching product/item (up to ${requestedCount} if a number was requested, otherwise all found in context)
+    - For each item include: name, price (if shown), and a link when available
+    - Use clean HTML with <ul> and <li> tags
+    - **CRITICAL**: If names and prices appear in the context, include them — never say the homepage doesn't show that information
+    - Only use information from the context; do not invent products`;
+    } else if (responseMode === "page_links") {
+      answerInstructions = `Instructions:
+    - Write as a real human customer support agent would - natural, friendly, and conversational
+    - Format as an HTML list of page links from the context
+    - Keep the intro to 1-2 sentences`;
+    } else {
+      answerInstructions = `Instructions:
     - Write as a real human customer support agent would - natural, friendly, and conversational
     - Use natural language with contractions (I'm, we're, you're) and casual phrases
     - **BE BRIEF**: Answer in 1-2 sentences maximum - get straight to the point, no fluff
@@ -596,10 +730,25 @@ Keep responses short, direct, friendly, and professional. Only use information e
     - Be empathetic and understanding, not robotic or dismissive
     - Keep it chat-like and human, not formal or scripted
     - **REMEMBER: Maximum 1-2 sentences total - be direct and concise**`;
+    }
+
+    const userPrompt = `Context from knowledge base:
+    ---
+    ${context}
+    ---
+    
+    Previous conversation history:
+    ---
+    ${chatHistory || "No previous conversation"}
+    ---
+    
+    Current question: ${question}
+    
+    ${answerInstructions}`;
 
     try {
       // Determine dynamic max_tokens based on query type
-      const dynamicMaxTokens = this.determineMaxTokens(question);
+      const dynamicMaxTokens = this.determineMaxTokens(question, responseMode);
       
       // Log when dynamic token limit is applied (only if different from default)
       if (dynamicMaxTokens > 200) {
@@ -979,10 +1128,83 @@ Keep responses short, direct, friendly, and professional. Only use information e
         throw new Error("Failed to generate question embedding.");
       }
 
-      // Intent detection to choose retrieval mode (list/show/… pages)
-      const intent = this.detectIntent(question);
+      // Intent detection to choose retrieval mode
+      const intent = this.classifyQueryIntent(question);
+      console.log(`[QueryController] Query intent: ${intent}`);
 
-      if (intent === "STRUCTURAL") {
+      if (intent === "IN_PAGE_LIST") {
+        const keywords = this.extractKeywords(question);
+        const requestedCount = this.extractRequestedCount(question, requestedTopK);
+        const retrievalTopK = Math.max(10, Math.min(20, requestedCount * 3));
+
+        const semanticMatches = await this.queryQdrant(
+          collectionName,
+          questionEmbedding,
+          retrievalTopK,
+          userIdString
+        );
+
+        const keywordPoints = await this.structuralFetchByKeywords(
+          collectionName,
+          keywords.length > 0 ? keywords : ["featured", "product"],
+          userIdString,
+          Math.max(200, requestedCount * 15)
+        );
+
+        let mergedMatches = this.mergeRetrievalResults(
+          semanticMatches,
+          keywordPoints
+        );
+
+        if (/\b(homepage|home\s*page|main\s*page)\b/i.test(question)) {
+          const homepageMatches = mergedMatches.filter((m) =>
+            this.isHomepageUrl(m.payload?.url)
+          );
+          if (homepageMatches.length > 0) {
+            mergedMatches = homepageMatches;
+          }
+        }
+
+        if (mergedMatches.length > 0) {
+          const contextBlocks = this.buildInPageListContext(mergedMatches);
+          const listContext = `The user wants a complete list of items from ${companyName}'s website. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below.\n\n${contextBlocks}`;
+
+          const { answer: listAnswer, usage: listUsage } =
+            await this.generateAnswer(
+              question,
+              listContext,
+              chatHistory,
+              companyName,
+              websiteData,
+              { responseMode: "list", requestedCount }
+            );
+
+          if (listUsage) {
+            logOpenAIUsage({
+              userId,
+              agentId,
+              tokens: listUsage.total_tokens,
+              requests: 1,
+            });
+          }
+
+          return {
+            success: true,
+            answer: listAnswer,
+            sources: this.matchesToSources(mergedMatches),
+            conversationId,
+            isAgentRequest: this.isAgentConnectionRequest(question),
+          };
+        }
+
+        console.warn(
+          `[QueryController] IN_PAGE_LIST intent but no matching chunks for keywords [${keywords.join(
+            ", "
+          )}]. Falling back to semantic search.`
+        );
+      }
+
+      if (intent === "PAGE_LINKS") {
         const keywords = this.extractKeywords(question);
         const requestedCount = this.extractRequestedCount(question, requestedTopK);
 
@@ -1013,7 +1235,8 @@ Keep responses short, direct, friendly, and professional. Only use information e
               structuralContext,
               chatHistory,
               companyName,
-              websiteData
+              websiteData,
+              { responseMode: "page_links", requestedCount }
             );
           if (structuralUsage) {
             logOpenAIUsage({
@@ -1024,22 +1247,9 @@ Keep responses short, direct, friendly, and professional. Only use information e
             });
           }
 
-          const seenStructuralKeys = new Set();
-          const structuralSources = topItems
-            .map((payload) => {
-              const sourceType =
-                payload.type !== undefined ? payload.type : null;
-              const title = payload.title || payload.url || null;
-              const url = payload.url || null;
-              return { type: sourceType, title, url };
-            })
-            .filter(({ type, title, url }) => {
-              if (type === null && !title && !url) return false;
-              const key = url || title;
-              if (!key || seenStructuralKeys.has(key)) return false;
-              seenStructuralKeys.add(key);
-              return true;
-            });
+          const structuralSources = this.matchesToSources(
+            topItems.map((payload) => ({ payload }))
+          );
 
           return {
             success: true,
@@ -1051,9 +1261,9 @@ Keep responses short, direct, friendly, and professional. Only use information e
           };
         }
 
-        // If no structural hits, fall back to semantic path below
+        // If no page-link hits, fall back to semantic path below
         console.warn(
-          `[QueryController] STRUCTURAL intent detected but no matching payload results for keywords [${keywords.join(
+          `[QueryController] PAGE_LINKS intent detected but no matching payload results for keywords [${keywords.join(
             ", "
           )}]. Falling back to semantic search.`
         );
@@ -1061,12 +1271,23 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       // Semantic path: reuse embedding from above
 
-      // 6. Query Qdrant (semantic)
+      const semanticTopK =
+        intent === "IN_PAGE_LIST"
+          ? Math.max(
+              10,
+              Math.min(
+                20,
+                this.extractRequestedCount(question, requestedTopK) * 3
+              )
+            )
+          : requestedTopK;
+
+      // Query Qdrant (semantic)
       // Filter by user_id (owner) - Qdrant payload stores user_id, not agent_id, for filtering
       const queryResponse = await this.queryQdrant(
         collectionName,
         questionEmbedding,
-        requestedTopK,
+        semanticTopK,
         userIdString
       );
 
@@ -1255,8 +1476,13 @@ Keep responses short, direct, friendly, and professional. Only use information e
       finalAnswer = irrelaventAnswer;
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       } else {
-        // 6. Get Context and Generate Answer via LLM
+        // Get Context and Generate Answer via LLM
         const context = this.getRelevantContext(relevantMatches);
+        const listFallback = intent === "IN_PAGE_LIST";
+        const requestedCount = this.extractRequestedCount(
+          question,
+          requestedTopK
+        );
 
         const { answer: generatedAnswer, usage: llmUsage } =
           await this.generateAnswer(
@@ -1265,9 +1491,9 @@ Keep responses short, direct, friendly, and professional. Only use information e
             chatHistory,
             companyName,
             websiteData,
-            // widgetData.fallbackMessage ||
-            //   "I couldn't find specific information about your question in the knowledge base. You might contact support",
-            // widgetData.email || "support@example.com"
+            listFallback
+              ? { responseMode: "list", requestedCount }
+              : {}
           );
         finalAnswer = generatedAnswer;
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
