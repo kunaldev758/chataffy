@@ -11,6 +11,11 @@ const WebsiteData = require("../models/WebsiteData");
 const HumanAgent = require("../models/HumanAgent");
 const { logOpenAIUsage } = require("../services/UsageTrackingService");
 const { routeQuery, ROUTES, isLiveAgentRequest } = require("../services/QueryRouter");
+const {
+  expandQueryForRetrieval,
+  isProductLinkRequest,
+  isEcommerceCatalogQuery,
+} = require("../utils/queryContextExpansion");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -577,31 +582,41 @@ class QuestionAnsweringSystem {
     const q = (question || "").toLowerCase();
     return (
       /\b(featured|homepage|home\s*page|main\s*page)\b/.test(q) ||
-      /\b(list|show|give\s+me|what\s+are)\b[\s\S]{0,50}\b(products?|items?)\b/.test(
+      /\b(list|show|give\s+me|what\s+are|share)\b[\s\S]{0,50}\b(products?|items?|options?|styles?|lashes?)\b/.test(
         q
       ) ||
-      /\b(all|every|each)\b[\s\S]{0,40}\b(products?|items?)\b/.test(q) ||
-      /\b(products?|items?)\b[\s\S]{0,40}\b(price|prices|cost|pricing)\b/.test(
+      (/\b(urls?|links?)\b/.test(q) &&
+        /\b\d{1,2}\s*mm\b/.test(q) &&
+        /\b(lash|lashes|product)\b/.test(q)) ||
+      /\b(all|every|each)\b[\s\S]{0,40}\b(products?|items?|lashes?)\b/.test(q) ||
+      /\b(products?|items?|lashes?)\b[\s\S]{0,40}\b(price|prices|cost|pricing)\b/.test(
         q
       ) ||
       /\bwhat(?:'s| is)\s+on\s+(?:the\s+|your\s+)?(?:homepage|home\s*page|main\s*page)\b/.test(
         q
-      )
+      ) ||
+      (/\b\d{1,2}\s*mm\b/.test(q) &&
+        /\b(options?|styles?|products?|lashes?|share|more)\b/.test(q))
     );
   }
 
   isExplicitPageLinksQuestion(question) {
     const q = (question || "").toLowerCase();
     if (this.isExplicitInPageListQuestion(question)) return false;
+    if (isProductLinkRequest(question)) return true;
     return (
       (/\b(links?|urls?)\b/.test(q) &&
-        /\b(list|show|give|all|every|how\s+many)\b/.test(q)) ||
+        /\b(list|show|give|share|send|all|every|how\s+many|more)\b/.test(q)) ||
+      (/\b(url|link)\b/.test(q) &&
+        /\b\d{1,2}\s*mm\b/.test(q) &&
+        /\b(lash|lashes|product|style|collection)\b/.test(q)) ||
       /\bshow\s+me\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
+      /\b(share|send)\b[\s\S]{0,40}\b(urls?|links?)\b/.test(q) ||
       /\blist\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
       (/\b(pages?)\b/.test(q) &&
-        /\b(list|show|give|all|site|website)\b/.test(q)) ||
+        /\b(list|show|give|share|all|site|website)\b/.test(q)) ||
       (/\b(collections?)\b/.test(q) &&
-        /\b(list|show|all|pages?|links?)\b/.test(q))
+        /\b(list|show|all|pages?|links?|share)\b/.test(q))
     );
   }
 
@@ -652,13 +667,17 @@ class QuestionAnsweringSystem {
     companyName,
     semanticMatches,
     getQuestionEmbedding,
+    wantsProductLinks = false,
   }) {
     const maxSemantic = this.getMaxSemanticScore(semanticMatches);
     const hasGoodSemantic = maxSemantic >= 0.32;
     const requestedCount = this.extractRequestedCount(question, requestedTopK);
 
     if (subIntent === "IN_PAGE_LIST") {
-      if (!this.isExplicitInPageListQuestion(question)) {
+      if (
+        !this.isExplicitInPageListQuestion(question) &&
+        !wantsProductLinks
+      ) {
         console.log(
           "[QueryController] IN_PAGE_LIST skipped: not an explicit catalog/homepage request"
         );
@@ -764,7 +783,10 @@ class QuestionAnsweringSystem {
     }
 
     if (subIntent === "PAGE_LINKS") {
-      if (!this.isExplicitPageLinksQuestion(question)) {
+      if (
+        !this.isExplicitPageLinksQuestion(question) &&
+        !wantsProductLinks
+      ) {
         console.log(
           "[QueryController] PAGE_LINKS skipped: not an explicit page/URL listing request"
         );
@@ -784,11 +806,12 @@ class QuestionAnsweringSystem {
         keywords,
         keywordPoints
       );
+      const minPages = wantsProductLinks ? 1 : 2;
 
       if (
-        uniquePages.length >= 2 &&
-        structuralHits >= 1 &&
-        (hasGoodSemantic || uniquePages.length >= 3)
+        uniquePages.length >= minPages &&
+        (structuralHits >= 1 || wantsProductLinks) &&
+        (hasGoodSemantic || uniquePages.length >= minPages)
       ) {
         const topItems = uniquePages.slice(0, requestedCount);
         const pagesLines = topItems
@@ -818,6 +841,16 @@ class QuestionAnsweringSystem {
         semanticMatches,
         keywordPoints
       );
+      if (mergedMatches.length > 0 && wantsProductLinks) {
+        const contextBlocks = this.buildInPageListContext(mergedMatches);
+        return {
+          context: `The user wants product or collection page links from ${companyName}. Use ONLY the content below. Include every matching URL as a clickable link. Do not say products are unavailable if they appear below.\n\n${contextBlocks}`,
+          matches: mergedMatches,
+          responseMode: "list",
+          requestedCount,
+        };
+      }
+
       if (mergedMatches.length === 0) return null;
 
       console.log(
@@ -1010,7 +1043,15 @@ class QuestionAnsweringSystem {
     websiteData = null,
     answerOptions = {}
   ) {
-    const { responseMode = "brief", requestedCount = 5, userLanguage } = answerOptions;
+    const {
+      responseMode = "brief",
+      requestedCount = 5,
+      userLanguage,
+      wantsProductUrls = false,
+    } = answerOptions;
+
+    const effectiveMode =
+      wantsProductUrls && responseMode === "brief" ? "list" : responseMode;
 
     // Build dynamic system prompt if websiteData is available, otherwise use fallback
     let systemPrompt;
@@ -1044,11 +1085,14 @@ You ALWAYS speak as ${organisation || "the company"} in a natural, conversationa
 Keep responses short, direct, friendly, and professional. Only use information extracted from ${organisation || "the company"}'s website.`;
     }
 
-    if (responseMode === "list") {
+    if (effectiveMode === "list") {
       systemPrompt += `\n\n---\n\n### List / Catalog Responses\n\nWhen the user asks for a list of products or items:\n\n- List **every** matching item found in the context — do not omit any\n- Include product name, price (if present), and link for each item\n- Use clean HTML: a brief lead (optional), then a <ul> of <li> entries\n- Format links: <a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">text</a>\n- Never claim information is missing if it appears in the context below\n- You may use more than 2 sentences when listing multiple items`;
-    } else if (responseMode === "page_links") {
+      if (wantsProductUrls) {
+        systemPrompt += `\n- **CRITICAL**: The user asked for URLs/links — every product or collection you mention MUST include its URL from the context\n- Do NOT say a size or product line does not exist if the context or conversation history shows it does\n- Do NOT contradict a link or collection you or the user mentioned earlier in the conversation\n- If the context has a collection page for the requested size (e.g. 10-12mm), link to it — do not invent different minimum sizes`;
+      }
+    } else if (effectiveMode === "page_links") {
       systemPrompt += `\n\n---\n\n### Page Link Responses\n\nWhen listing site pages, use a <ul> of linked page titles. Keep the intro brief.`;
-    } else if (responseMode === "contact") {
+    } else if (effectiveMode === "contact") {
       systemPrompt += `\n\n---\n\n### Contact & Social Media Responses\n\nWhen the user asks for social media, phone, email, address, or hours:\n\n- List **every** matching profile URL, phone, email, and address from the context\n- Use clean HTML with a <ul> of <li> entries\n- Format links: <a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">platform name</a>\n- Never claim social links or contact details are missing if they appear in the context\n- Include platform names (Facebook, Instagram, etc.) with their URLs`;
     }
 
@@ -1057,21 +1101,21 @@ Keep responses short, direct, friendly, and professional. Only use information e
     }
 
     let answerInstructions;
-    if (responseMode === "list") {
+    if (effectiveMode === "list") {
       answerInstructions = `Instructions:
     - Write as a helpful customer support agent for ${organisation}
     - The user wants a **complete list** of items from the context below
     - List **every** matching product/item (up to ${requestedCount} if a number was requested, otherwise all found in context)
-    - For each item include: name, price (if shown), and a link when available
-    - Use clean HTML with <ul> and <li> tags
-    - **CRITICAL**: If names and prices appear in the context, include them — never say the homepage doesn't show that information
-    - Only use information from the context; do not invent products`;
-    } else if (responseMode === "page_links") {
+    - For each item include: name, price (if shown), and a clickable link when a URL is in the context
+    - Use clean HTML with <ul> and <li> tags; format links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>
+    - **CRITICAL**: If names, prices, or URLs appear in the context, include them — never say products or sizes are unavailable if they appear below or in conversation history
+    - Only use information from the context and conversation; do not invent products, sizes, or URLs`;
+    } else if (effectiveMode === "page_links") {
       answerInstructions = `Instructions:
     - Write as a real human customer support agent would - natural, friendly, and conversational
     - Format as an HTML list of page links from the context
     - Keep the intro to 1-2 sentences`;
-    } else if (responseMode === "contact") {
+    } else if (effectiveMode === "contact") {
       answerInstructions = `Instructions:
     - Write as a helpful customer support agent for ${organisation}
     - The user wants contact info and/or social media profiles from the context below
@@ -1122,7 +1166,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
     try {
       // Determine dynamic max_tokens based on query type
-      const dynamicMaxTokens = this.determineMaxTokens(question, responseMode);
+      const dynamicMaxTokens = this.determineMaxTokens(question, effectiveMode);
       
       // Log when dynamic token limit is applied (only if different from default)
       if (dynamicMaxTokens > 200) {
@@ -1159,16 +1203,22 @@ Keep responses short, direct, friendly, and professional. Only use information e
     }
   }
 
-  // Simplified context extraction for Qdrant results
+  // Context extraction for Qdrant results — always include source URL/title when available
   getRelevantContext(matches) {
     return matches
       .map((match) => {
-        // Qdrant stores text in payload.text
-        const text = match.payload?.text || match.payload?.pageContent || "";
+        const payload = match.payload || {};
+        const text = payload.text || payload.pageContent || "";
+        const url = payload.url || "";
+        const title = payload.title || url || "";
+        if (!text) return "";
+        if (url) {
+          return `Source: ${title} (${url})\n---\n${text}\n---`;
+        }
         return text;
       })
-      .filter((text) => text.length > 0) // Remove empty contexts
-      .join("\n\n---\n\n"); // Separate contexts clearly
+      .filter((text) => text.length > 0)
+      .join("\n\n");
   }
 
   async queryQdrant(collectionName, queryEmbedding, topK, userId) {
@@ -1499,6 +1549,20 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       const websiteLanguage = websiteData?.primary_language || "en";
 
+      const queryExpansion = expandQueryForRetrieval(question, chatSession);
+      const {
+        retrievalQuery,
+        wasExpanded,
+        wantsProductLinks,
+        isCatalogQuery,
+      } = queryExpansion;
+
+      if (wasExpanded) {
+        console.log(
+          `[QueryController] Expanded retrieval query: "${retrievalQuery}"`
+        );
+      }
+
       const routing = await routeQuery(question, {
         chatMessages: chatSession,
         websiteLanguage,
@@ -1564,12 +1628,22 @@ Keep responses short, direct, friendly, and professional. Only use information e
       }
 
       const subIntent = routing.subIntent || null;
-      const keywordSource = routing.rewrittenQuery || question;
+      let effectiveSubIntent = subIntent;
+      if (wantsProductLinks && !effectiveSubIntent) {
+        effectiveSubIntent = /\b\d{1,2}\s*mm\b/i.test(retrievalQuery)
+          ? "IN_PAGE_LIST"
+          : "PAGE_LINKS";
+      } else if (isCatalogQuery && wasExpanded && !effectiveSubIntent) {
+        effectiveSubIntent = "IN_PAGE_LIST";
+      }
+
+      const keywordSource = routing.rewrittenQuery || retrievalQuery;
 
       let questionEmbedding = null;
       const getQuestionEmbedding = async () => {
         if (!questionEmbedding) {
-          questionEmbedding = await this.embeddingModel.embedQuery(question);
+          questionEmbedding =
+            await this.embeddingModel.embedQuery(retrievalQuery);
           if (!questionEmbedding) {
             throw new Error("Failed to generate question embedding.");
           }
@@ -1577,8 +1651,8 @@ Keep responses short, direct, friendly, and professional. Only use information e
         return questionEmbedding;
       };
 
-      const semanticTopK =
-        subIntent === "IN_PAGE_LIST"
+      let semanticTopK =
+        effectiveSubIntent === "IN_PAGE_LIST"
           ? Math.max(
               10,
               Math.min(
@@ -1586,25 +1660,55 @@ Keep responses short, direct, friendly, and professional. Only use information e
                 this.extractRequestedCount(question, requestedTopK) * 3
               )
             )
-          : subIntent === "CONTACT_INFO"
+          : effectiveSubIntent === "CONTACT_INFO"
             ? 12
-            : subIntent === "PAGE_LINKS"
+            : effectiveSubIntent === "PAGE_LINKS"
               ? Math.max(
                   requestedTopK,
                   this.extractRequestedCount(question, requestedTopK) * 2
                 )
               : requestedTopK;
 
-      const queryResponse = await this.queryQdrant(
+      if (isCatalogQuery || wantsProductLinks) {
+        semanticTopK = Math.max(semanticTopK, 15);
+      }
+
+      let queryResponse = await this.queryQdrant(
         collectionName,
         await getQuestionEmbedding(),
         semanticTopK,
         userIdString
       );
 
-      if (subIntent) {
+      if (isCatalogQuery || wasExpanded) {
+        const sizeKeywords = (queryExpansion.topics?.sizes || []).map((s) =>
+          s.replace(/mm$/i, "")
+        );
+        const catalogKeywords = [
+          ...new Set([
+            ...this.extractKeywords(keywordSource),
+            ...sizeKeywords,
+            "lash",
+            "lashes",
+            "collection",
+          ]),
+        ].filter((k) => k.length > 2);
+
+        const keywordPoints = await this.structuralFetchByKeywords(
+          collectionName,
+          catalogKeywords,
+          userIdString,
+          250
+        );
+        queryResponse = this.mergeRetrievalResults(
+          queryResponse,
+          keywordPoints
+        );
+      }
+
+      if (effectiveSubIntent) {
         const specialized = await this.trySpecializedRetrieval({
-          subIntent,
+          subIntent: effectiveSubIntent,
           question,
           keywordSource,
           collectionName,
@@ -1613,6 +1717,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           companyName,
           semanticMatches: queryResponse,
           getQuestionEmbedding,
+          wantsProductLinks,
         });
 
         if (specialized) {
@@ -1626,6 +1731,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
               {
                 responseMode: specialized.responseMode,
                 requestedCount: specialized.requestedCount,
+                wantsProductUrls: wantsProductLinks,
                 ...langOpts,
               }
             );
@@ -1841,11 +1947,13 @@ Keep responses short, direct, friendly, and professional. Only use information e
       } else {
         // Get Context and Generate Answer via LLM
         const context = this.getRelevantContext(relevantMatches);
+        const wantsUrls = wantsProductLinks || isProductLinkRequest(question);
         const listFallback =
-          subIntent === "IN_PAGE_LIST" &&
-          this.isExplicitInPageListQuestion(question);
+          wantsUrls ||
+          (effectiveSubIntent === "IN_PAGE_LIST" &&
+            this.isExplicitInPageListQuestion(question));
         const contactFallback =
-          subIntent === "CONTACT_INFO" &&
+          effectiveSubIntent === "CONTACT_INFO" &&
           this.isPrimarilyContactQuestion(question);
         const requestedCount = this.extractRequestedCount(
           question,
@@ -1860,10 +1968,15 @@ Keep responses short, direct, friendly, and professional. Only use information e
             companyName,
             websiteData,
             listFallback
-              ? { responseMode: "list", requestedCount, ...langOpts }
+              ? {
+                  responseMode: "list",
+                  requestedCount,
+                  wantsProductUrls: wantsUrls,
+                  ...langOpts,
+                }
               : contactFallback
                 ? { responseMode: "contact", ...langOpts }
-                : langOpts
+                : { wantsProductUrls: wantsUrls, ...langOpts }
           );
         finalAnswer = generatedAnswer;
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });

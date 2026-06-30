@@ -1,6 +1,11 @@
 require("dotenv").config();
 const { OpenAI } = require("openai");
 const { normalizeLanguageCode, detectLanguageFromText } = require("../utils/websiteLanguage");
+const {
+  detectCatalogFollowUp,
+  isProductLinkRequest,
+  expandQueryForRetrieval,
+} = require("../utils/queryContextExpansion");
 
 const ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano";
 
@@ -101,19 +106,24 @@ function classifyStructuralSubIntent(query) {
 
   const wantsInPageList =
     /\b(featured|homepage|home\s*page|main\s*page)\b/.test(q) ||
-    /\b(list|show|give\s+me|what\s+are|tell\s+me)\b[\s\S]{0,50}\b(products?|items?)\b/.test(
+    /\b(list|show|give\s+me|what\s+are|tell\s+me|share)\b[\s\S]{0,50}\b(products?|items?|options?|styles?|lashes?)\b/.test(
       q
     ) ||
-    /\b(all|every|each)\b[\s\S]{0,40}\b(products?|items?)\b/.test(q) ||
-    /\b(products?|items?)\b[\s\S]{0,40}\b(price|prices|cost|pricing)\b/.test(
+    /\b(urls?|links?)\b/.test(q) &&
+      /\b\d{1,2}\s*mm\b/.test(q) &&
+      /\b(lash|lashes|product)\b/.test(q) ||
+    /\b(all|every|each)\b[\s\S]{0,40}\b(products?|items?|lashes?)\b/.test(q) ||
+    /\b(products?|items?|lashes?)\b[\s\S]{0,40}\b(price|prices|cost|pricing)\b/.test(
       q
     ) ||
-    /\b(price|prices|cost|pricing)\b[\s\S]{0,40}\b(products?|items?)\b/.test(
+    /\b(price|prices|cost|pricing)\b[\s\S]{0,40}\b(products?|items?|lashes?)\b/.test(
       q
     ) ||
     /\bwhat(?:'s| is)\s+on\s+(?:the\s+|your\s+)?(?:homepage|home\s*page|main\s*page)\b/.test(
       q
-    );
+    ) ||
+    (/\b\d{1,2}\s*mm\b/.test(q) &&
+      /\b(options?|styles?|products?|lashes?|share|more)\b/.test(q));
 
   const wantsContactInfo =
     /\bsocial\s*media\b/.test(q) ||
@@ -141,14 +151,18 @@ function classifyStructuralSubIntent(query) {
     !wantsContactInfo &&
     ((/\b(links?|urls?)\b/.test(q) &&
       !/\b(social\s*media|social)\b/.test(q) &&
-      /\b(list|show|give\s+me|all|every|how\s+many)\b/.test(q)) ||
+      /\b(list|show|give|share|send|all|every|how\s+many|more)\b/.test(q)) ||
+      (/\b(url|link)\b/.test(q) &&
+        /\b\d{1,2}\s*mm\b/.test(q) &&
+        /\b(lash|lashes|product|style|collection)\b/.test(q)) ||
       /\bshow\s+me\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
+      /\b(share|send)\b[\s\S]{0,40}\b(urls?|links?)\b/.test(q) ||
       /\blist\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
       (/\b(pages?)\b/.test(q) &&
-        /\b(list|show|give|all|site|website)\b/.test(q) &&
+        /\b(list|show|give|share|all|site|website)\b/.test(q) &&
         !wantsInPageList) ||
       (/\b(collections?)\b/.test(q) &&
-        /\b(list|show|all|pages?|links?)\b/.test(q) &&
+        /\b(list|show|all|pages?|links?|share)\b/.test(q) &&
         !/\b(products?|items?|featured|price|prices)\b/.test(q)));
 
   const hasListHint = /\b(list|show|give\s+me|how\s+many|all\b|top\b)\b/.test(
@@ -259,6 +273,24 @@ function applyRuleEngine(question, { chatMessages } = {}) {
         userLanguage,
         confidence: 0.9,
         source: "rules_follow_up",
+      }),
+    };
+  }
+
+  if (detectCatalogFollowUp(question, chatMessages)) {
+    const { retrievalQuery } = expandQueryForRetrieval(question, chatMessages);
+    const subIntent = isProductLinkRequest(question)
+      ? SUB_INTENTS.PAGE_LINKS
+      : classifyStructuralSubIntent(retrievalQuery) || SUB_INTENTS.IN_PAGE_LIST;
+    return {
+      confident: true,
+      result: buildRouteResult({
+        route: ROUTES.HYBRID,
+        subIntent,
+        userLanguage,
+        confidence: 0.9,
+        rewrittenQuery: retrievalQuery !== question ? retrievalQuery : null,
+        source: "rules_catalog_follow_up",
       }),
     };
   }
