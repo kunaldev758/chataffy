@@ -6,6 +6,7 @@ const {
   isProductLinkRequest,
   expandQueryForRetrieval,
 } = require("../utils/queryContextExpansion");
+const { normalizeQueryText } = require("../utils/queryNormalization");
 
 const ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano";
 
@@ -239,9 +240,10 @@ function buildRouteResult({
 }
 
 function applyRuleEngine(question, { chatMessages } = {}) {
-  const userLanguage = detectUserLanguageFromQuestion(question);
+  const normalizedQuestion = normalizeQueryText(question);
+  const userLanguage = detectUserLanguageFromQuestion(normalizedQuestion);
 
-  if (isSimpleGreeting(question)) {
+  if (isSimpleGreeting(normalizedQuestion)) {
     return {
       confident: true,
       result: buildRouteResult({
@@ -253,7 +255,7 @@ function applyRuleEngine(question, { chatMessages } = {}) {
     };
   }
 
-  if (isLiveAgentRequest(question)) {
+  if (isLiveAgentRequest(normalizedQuestion)) {
     return {
       confident: true,
       result: buildRouteResult({
@@ -265,7 +267,7 @@ function applyRuleEngine(question, { chatMessages } = {}) {
     };
   }
 
-  if (detectFollowUpAcceptance(question, chatMessages)) {
+  if (detectFollowUpAcceptance(normalizedQuestion, chatMessages)) {
     return {
       confident: true,
       result: buildRouteResult({
@@ -277,9 +279,12 @@ function applyRuleEngine(question, { chatMessages } = {}) {
     };
   }
 
-  if (detectCatalogFollowUp(question, chatMessages)) {
-    const { retrievalQuery } = expandQueryForRetrieval(question, chatMessages);
-    const subIntent = isProductLinkRequest(question)
+  if (detectCatalogFollowUp(normalizedQuestion, chatMessages)) {
+    const { retrievalQuery } = expandQueryForRetrieval(
+      normalizedQuestion,
+      chatMessages
+    );
+    const subIntent = isProductLinkRequest(normalizedQuestion)
       ? SUB_INTENTS.PAGE_LINKS
       : classifyStructuralSubIntent(retrievalQuery) || SUB_INTENTS.IN_PAGE_LIST;
     return {
@@ -289,13 +294,13 @@ function applyRuleEngine(question, { chatMessages } = {}) {
         subIntent,
         userLanguage,
         confidence: 0.9,
-        rewrittenQuery: retrievalQuery !== question ? retrievalQuery : null,
+        rewrittenQuery: retrievalQuery !== normalizedQuestion ? retrievalQuery : null,
         source: "rules_catalog_follow_up",
       }),
     };
   }
 
-  const subIntent = classifyStructuralSubIntent(question);
+  const subIntent = classifyStructuralSubIntent(normalizedQuestion);
   if (subIntent) {
     const route = routeFromSubIntent(subIntent);
     return {

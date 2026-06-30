@@ -12,6 +12,8 @@ const EMBEDDING_DIMENSION = parseInt(
   10
 );
 
+const { extractSearchTerms } = require("../utils/searchTerms");
+
 const PAYLOAD_INDEX_SCHEMAS = {
   user_id: "keyword",
   agent_id: "keyword",
@@ -101,12 +103,21 @@ class QdrantVectorStoreManager {
           metadata.user_id = metadata.user_id.toString();
         }
         
+        const pageContent = doc.pageContent || "";
+        const title = metadata.title || "";
+        const url = metadata.url || "";
+
         return {
           id: uuidv4(),
           vector: embeddings[i],
           payload: {
             ...metadata,
-            text: doc.pageContent,
+            text: pageContent,
+            search_terms: extractSearchTerms({
+              text: pageContent,
+              title,
+              url,
+            }),
             created_at: new Date().toISOString(),
           },
         };

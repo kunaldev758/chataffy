@@ -16,6 +16,10 @@ const {
   isProductLinkRequest,
   isEcommerceCatalogQuery,
 } = require("../utils/queryContextExpansion");
+const {
+  normalizeUserQuery,
+  buildRetrievalKeywords,
+} = require("../utils/queryNormalization");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -668,6 +672,7 @@ class QuestionAnsweringSystem {
     semanticMatches,
     getQuestionEmbedding,
     wantsProductLinks = false,
+    catalogKeywords = null,
   }) {
     const maxSemantic = this.getMaxSemanticScore(semanticMatches);
     const hasGoodSemantic = maxSemantic >= 0.32;
@@ -684,7 +689,10 @@ class QuestionAnsweringSystem {
         return null;
       }
 
-      const keywords = this.extractKeywords(keywordSource);
+      const keywords =
+        catalogKeywords && catalogKeywords.length > 0
+          ? catalogKeywords
+          : this.extractKeywords(keywordSource);
       const keywordPoints = await this.structuralFetchByKeywords(
         collectionName,
         keywords.length > 0 ? keywords : ["featured", "product"],
@@ -958,12 +966,48 @@ class QuestionAnsweringSystem {
   }
 
   extractRequestedCount(question, fallback = 5) {
-    const match = (question || "").match(/\b(\d+)\b/);
-    if (match) {
-      const parsed = parseInt(match[1], 10);
-      if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+    const q = (question || "").toLowerCase();
+    const withoutSizes = q
+      .replace(/\b\d{1,2}\s*-\s*\d{1,2}\s*mm\b/gi, " ")
+      .replace(/\b\d{1,2}\s*mm\b/gi, " ")
+      .replace(/\b\d{1,2}-\d{1,2}mm\b/gi, " ");
+
+    const quantityMatch =
+      withoutSizes.match(
+        /\b(?:top|first|give\s+me|show\s+me|list|need)\s+(\d+)\b/i
+      ) ||
+      withoutSizes.match(
+        /\b(\d+)\s+(?:products?|items?|options?|styles?|lashes?|urls?|links?)\b/i
+      );
+
+    if (quantityMatch) {
+      const parsed = parseInt(quantityMatch[1], 10);
+      if (!Number.isNaN(parsed) && parsed > 0 && parsed <= 50) {
+        return parsed;
+      }
     }
+
     return fallback;
+  }
+
+  buildCatalogKeywords(keywordSource, queryNorm = {}) {
+    const fromSource = this.extractKeywords(keywordSource);
+    const fromNorm = queryNorm.retrievalKeywords || [];
+    const sizeKeywords = (queryNorm.sizes || []).flatMap((s) => {
+      const compact = s.replace(/\s/g, "");
+      const numOnly = compact.replace(/mm$/i, "");
+      return [compact, numOnly].filter((k) => k.length > 2);
+    });
+
+    return [
+      ...new Set([
+        ...fromSource,
+        ...fromNorm,
+        ...buildRetrievalKeywords(keywordSource, queryNorm.sizes || []),
+        ...sizeKeywords,
+        ...(queryNorm.morphologyHints || []),
+      ]),
+    ].filter((k) => k.length > 2);
   }
 
   extractKeywords(query) {
@@ -1021,9 +1065,19 @@ class QuestionAnsweringSystem {
         const url = (p.payload?.url || "").toLowerCase();
         const title = (p.payload?.title || "").toLowerCase();
         const text = (p.payload?.text || "").toLowerCase();
-        return keywords.some(
-          (k) => url.includes(k) || title.includes(k) || text.includes(k)
+        const searchTerms = (p.payload?.search_terms || []).map((t) =>
+          String(t).toLowerCase()
         );
+
+        return keywords.some((k) => {
+          const key = k.toLowerCase();
+          if (url.includes(key) || title.includes(key) || text.includes(key)) {
+            return true;
+          }
+          return searchTerms.some(
+            (term) => term.includes(key) || key.includes(term)
+          );
+        });
       });
 
       points.push(...filtered);
@@ -1549,21 +1603,42 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       const websiteLanguage = websiteData?.primary_language || "en";
 
-      const queryExpansion = expandQueryForRetrieval(question, chatSession);
+      const queryNorm = normalizeUserQuery(question);
+      const normalizedQuestion = queryNorm.normalized;
+
+      if (normalizedQuestion !== question.trim()) {
+        console.log(
+          `[QueryController] Normalized query: "${question.trim()}" → "${normalizedQuestion}"`
+        );
+      }
+
+      const queryExpansion = expandQueryForRetrieval(
+        normalizedQuestion,
+        chatSession,
+        { sizes: queryNorm.sizes }
+      );
       const {
         retrievalQuery,
         wasExpanded,
         wantsProductLinks,
         isCatalogQuery,
+        currentSizes,
       } = queryExpansion;
+
+      const embeddingQuery = queryNorm.enrichForEmbedding(retrievalQuery);
 
       if (wasExpanded) {
         console.log(
           `[QueryController] Expanded retrieval query: "${retrievalQuery}"`
         );
       }
+      if (embeddingQuery !== retrievalQuery) {
+        console.log(
+          `[QueryController] Enriched embedding query: "${embeddingQuery}"`
+        );
+      }
 
-      const routing = await routeQuery(question, {
+      const routing = await routeQuery(normalizedQuestion, {
         chatMessages: chatSession,
         websiteLanguage,
         openaiClient: openai,
@@ -1629,21 +1704,37 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       const subIntent = routing.subIntent || null;
       let effectiveSubIntent = subIntent;
+      const hasSizeFilter =
+        (queryNorm.sizes?.length > 0 || currentSizes?.length > 0) &&
+        /\b(lash|lashes|product|style|collection)\b/i.test(normalizedQuestion);
+
       if (wantsProductLinks && !effectiveSubIntent) {
-        effectiveSubIntent = /\b\d{1,2}\s*mm\b/i.test(retrievalQuery)
+        effectiveSubIntent = /\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(retrievalQuery)
           ? "IN_PAGE_LIST"
           : "PAGE_LINKS";
-      } else if (isCatalogQuery && wasExpanded && !effectiveSubIntent) {
+      } else if (
+        isCatalogQuery &&
+        (wasExpanded || hasSizeFilter) &&
+        !effectiveSubIntent
+      ) {
+        effectiveSubIntent = "IN_PAGE_LIST";
+      } else if (hasSizeFilter && !effectiveSubIntent) {
         effectiveSubIntent = "IN_PAGE_LIST";
       }
 
       const keywordSource = routing.rewrittenQuery || retrievalQuery;
+      const catalogKeywords = this.buildCatalogKeywords(keywordSource, {
+        ...queryNorm,
+        sizes: queryNorm.sizes?.length
+          ? queryNorm.sizes
+          : currentSizes || [],
+      });
 
       let questionEmbedding = null;
       const getQuestionEmbedding = async () => {
         if (!questionEmbedding) {
           questionEmbedding =
-            await this.embeddingModel.embedQuery(retrievalQuery);
+            await this.embeddingModel.embedQuery(embeddingQuery);
           if (!questionEmbedding) {
             throw new Error("Failed to generate question embedding.");
           }
@@ -1680,20 +1771,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         userIdString
       );
 
-      if (isCatalogQuery || wasExpanded) {
-        const sizeKeywords = (queryExpansion.topics?.sizes || []).map((s) =>
-          s.replace(/mm$/i, "")
-        );
-        const catalogKeywords = [
-          ...new Set([
-            ...this.extractKeywords(keywordSource),
-            ...sizeKeywords,
-            "lash",
-            "lashes",
-            "collection",
-          ]),
-        ].filter((k) => k.length > 2);
-
+      if (isCatalogQuery || wasExpanded || queryNorm.sizes?.length > 0) {
         const keywordPoints = await this.structuralFetchByKeywords(
           collectionName,
           catalogKeywords,
@@ -1718,6 +1796,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           semanticMatches: queryResponse,
           getQuestionEmbedding,
           wantsProductLinks,
+          catalogKeywords,
         });
 
         if (specialized) {
@@ -1950,8 +2029,9 @@ Keep responses short, direct, friendly, and professional. Only use information e
         const wantsUrls = wantsProductLinks || isProductLinkRequest(question);
         const listFallback =
           wantsUrls ||
+          hasSizeFilter ||
           (effectiveSubIntent === "IN_PAGE_LIST" &&
-            this.isExplicitInPageListQuestion(question));
+            this.isExplicitInPageListQuestion(normalizedQuestion));
         const contactFallback =
           effectiveSubIntent === "CONTACT_INFO" &&
           this.isPrimarilyContactQuestion(question);

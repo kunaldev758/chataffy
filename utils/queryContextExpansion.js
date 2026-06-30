@@ -3,20 +3,10 @@
  * so embeddings retrieve the same products/collections across turns.
  */
 
-function extractSizeTokens(text) {
-  const sizes = new Set();
-  const input = text || "";
-
-  for (const m of input.matchAll(/\b(\d{1,2})\s*[-–]\s*(\d{1,2})\s*mm\b/gi)) {
-    sizes.add(`${m[1]}-${m[2]}mm`);
-    sizes.add(`${m[1]}mm`);
-    sizes.add(`${m[2]}mm`);
-  }
-  for (const m of input.matchAll(/\b(\d{1,2})\s*mm\b/gi)) {
-    sizes.add(`${m[1]}mm`);
-  }
-  return Array.from(sizes);
-}
+const {
+  normalizeQueryText,
+  extractSizeTokens,
+} = require("./queryNormalization");
 
 function extractCollectionHints(text) {
   const hints = new Set();
@@ -50,10 +40,10 @@ function isProductLinkRequest(question) {
 }
 
 function isEcommerceCatalogQuery(question) {
-  const q = (question || "").toLowerCase();
+  const q = normalizeQueryText(question).toLowerCase();
   return (
     isProductLinkRequest(question) ||
-    /\b\d{1,2}\s*mm\b/.test(q) ||
+    /\b\d{1,2}(?:-\d{1,2})?mm\b/.test(q) ||
     /\b(lashes?|lash|collection|catalog|products?|styles?|variants?)\b/.test(q)
   );
 }
@@ -65,7 +55,7 @@ function extractTopicsFromHistory(chatMessages, limit = 8) {
 
   const recent = (chatMessages || []).slice(-limit);
   for (const msg of recent) {
-    const text = msg.message || "";
+    const text = normalizeQueryText(msg.message || "");
     for (const s of extractSizeTokens(text)) sizes.add(s);
     for (const c of extractCollectionHints(text)) collections.add(c);
     if (/\b(lashes?|lash)\b/i.test(text)) terms.add("lash");
@@ -81,16 +71,24 @@ function extractTopicsFromHistory(chatMessages, limit = 8) {
 
 /**
  * Build a richer query string for embedding + keyword search.
+ * @param {string} question - already normalized visitor message
+ * @param {object[]} chatMessages
+ * @param {{ sizes?: string[] }} [options]
  */
-function expandQueryForRetrieval(question, chatMessages = []) {
-  const q = (question || "").trim();
+function expandQueryForRetrieval(question, chatMessages = [], options = {}) {
+  const q = normalizeQueryText(question);
   const wordCount = q.split(/\s+/).filter(Boolean).length;
   const topics = extractTopicsFromHistory(chatMessages);
 
   const parts = [q];
   const qLower = q.toLowerCase();
 
-  const userSizes = extractSizeTokens(q);
+  const userSizes =
+    options.sizes?.length > 0 ? options.sizes : extractSizeTokens(q);
+  const allSizes = [
+    ...new Set([...userSizes, ...topics.sizes]),
+  ];
+
   const historyOnlySizes = topics.sizes.filter(
     (s) => !userSizes.some((u) => u.replace(/\s/g, "") === s.replace(/\s/g, ""))
   );
@@ -113,11 +111,11 @@ function expandQueryForRetrieval(question, chatMessages = []) {
 
   const isShortFollowUp =
     wordCount <= 7 ||
-    (/\b\d{1,2}\s*mm\b/i.test(q) && wordCount <= 10) ||
+    (/\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(q) && wordCount <= 10) ||
     /^(okay|ok|yes|share|more)\b/i.test(qLower);
 
   const hasCatalogThread =
-    topics.sizes.length > 0 ||
+    allSizes.length > 0 ||
     topics.collections.length > 0 ||
     (chatMessages || []).some((m) =>
       /\b(mm|lash|lashes|collection|url|link|super\s*natural)\b/i.test(
@@ -134,7 +132,8 @@ function expandQueryForRetrieval(question, chatMessages = []) {
 
   return {
     retrievalQuery,
-    topics,
+    topics: { ...topics, sizes: allSizes },
+    currentSizes: userSizes,
     wasExpanded: retrievalQuery.trim() !== q,
     wantsProductLinks: isProductLinkRequest(q),
     isCatalogQuery: isEcommerceCatalogQuery(q),
@@ -142,7 +141,7 @@ function expandQueryForRetrieval(question, chatMessages = []) {
 }
 
 function detectCatalogFollowUp(question, chatMessages) {
-  const q = (question || "").trim();
+  const q = normalizeQueryText(question);
   if (!q || !chatMessages?.length) return false;
   const wordCount = q.split(/\s+/).filter(Boolean).length;
   if (wordCount > 10) return false;
@@ -160,7 +159,7 @@ function detectCatalogFollowUp(question, chatMessages) {
   if (!hasCatalogThread) return false;
 
   return (
-    /\b\d{1,2}\s*mm\b/i.test(q) ||
+    /\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(q) ||
     isProductLinkRequest(q) ||
     /\b(options?|styles?|more|share|urls?|links?)\b/i.test(q) ||
     wordCount <= 5
