@@ -124,20 +124,31 @@ function classifyStructuralSubIntent(query) {
     /\b(office\s+hours|business\s+hours|phone\s+number|mailing\s+address)\b/.test(
       q
     ) ||
-    (/\b(phone|email|e-mail|address|contact|hours|fax|call\s+us|reach\s+us|mailing)\b/.test(
+    (/\b(how\s+(?:do\s+i\s+)?contact|contact\s+(?:info|details|number)|reach\s+us|call\s+us)\b/.test(
       q
     ) &&
-      !/\b(support\s+ticket|submit\s+a\s+ticket|product)\b/.test(q)) ||
+      !/\b(refund|return|policy|billing|order|shipping|warranty|cancel|product)\b/.test(
+        q
+      )) ||
+    (/\b(phone|email|e-mail|address|hours|fax|mailing)\b/.test(q) &&
+      !/\b(support\s+ticket|submit\s+a\s+ticket|product|refund|policy|billing|order)\b/.test(
+        q
+      )) ||
     (/\b(give\s+me|show\s+me|what\s+are|list)\b/.test(q) &&
       /\bsocial\b/.test(q));
 
   const wantsPageLinks =
     !wantsContactInfo &&
-    ((/\b(links?|urls?)\b/.test(q) && !/\b(social\s*media|social)\b/.test(q)) ||
+    ((/\b(links?|urls?)\b/.test(q) &&
+      !/\b(social\s*media|social)\b/.test(q) &&
+      /\b(list|show|give\s+me|all|every|how\s+many)\b/.test(q)) ||
       /\bshow\s+me\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
       /\blist\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
-      (/\b(pages?)\b/.test(q) && !wantsInPageList) ||
+      (/\b(pages?)\b/.test(q) &&
+        /\b(list|show|give|all|site|website)\b/.test(q) &&
+        !wantsInPageList) ||
       (/\b(collections?)\b/.test(q) &&
+        /\b(list|show|all|pages?|links?)\b/.test(q) &&
         !/\b(products?|items?|featured|price|prices)\b/.test(q)));
 
   const hasListHint = /\b(list|show|give\s+me|how\s+many|all\b|top\b)\b/.test(
@@ -149,16 +160,16 @@ function classifyStructuralSubIntent(query) {
   if (wantsContactInfo) return SUB_INTENTS.CONTACT_INFO;
   if (wantsPageLinks) return SUB_INTENTS.PAGE_LINKS;
   if (hasListHint && hasProductWord) return SUB_INTENTS.IN_PAGE_LIST;
-  if (hasListHint) return SUB_INTENTS.PAGE_LINKS;
   return null;
 }
 
 function routeFromSubIntent(subIntent) {
-  if (subIntent === SUB_INTENTS.IN_PAGE_LIST || subIntent === SUB_INTENTS.CONTACT_INFO) {
+  if (
+    subIntent === SUB_INTENTS.IN_PAGE_LIST ||
+    subIntent === SUB_INTENTS.CONTACT_INFO ||
+    subIntent === SUB_INTENTS.PAGE_LINKS
+  ) {
     return ROUTES.HYBRID;
-  }
-  if (subIntent === SUB_INTENTS.PAGE_LINKS) {
-    return ROUTES.STRUCTURAL;
   }
   return ROUTES.SEMANTIC_RAG;
 }
@@ -305,8 +316,11 @@ function parseRouterJson(content) {
     ) {
       if (!subIntent) {
         subIntent = classifyStructuralSubIntent(
-          rewrittenQuery || parsed.originalQuery || ""
+          rewrittenQuery || question
         );
+      }
+      if (resolvedRoute === ROUTES.STRUCTURAL) {
+        resolvedRoute = ROUTES.HYBRID;
       }
     }
 
@@ -314,9 +328,14 @@ function parseRouterJson(content) {
     if (confidence < 0.4) {
       finalRoute = ROUTES.SEMANTIC_RAG;
       subIntent = null;
-    } else if (confidence < 0.6 && finalRoute !== ROUTES.LIVE_AGENT) {
+    } else if (confidence < 0.65 && finalRoute !== ROUTES.LIVE_AGENT) {
       finalRoute = ROUTES.SEMANTIC_RAG;
       subIntent = null;
+    } else if (
+      finalRoute === ROUTES.HYBRID &&
+      !subIntent
+    ) {
+      finalRoute = ROUTES.SEMANTIC_RAG;
     }
 
     return buildRouteResult({
@@ -352,15 +371,16 @@ async function llmRoute(question, options = {}) {
 Classify the visitor message into exactly one route:
 - GREETING: simple hello/hi with no real question
 - LIVE_AGENT: wants a human agent, representative, or live support
-- STRUCTURAL: needs keyword/page listing (PAGE_LINKS only — distinct pages or URLs)
-- HYBRID: needs both keyword search and semantic search (IN_PAGE_LIST or CONTACT_INFO)
-- SEMANTIC_RAG: factual Q&A about the business (default)
+- HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), homepage product catalog with prices, or contact/social profiles
+- SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
 
-For STRUCTURAL or HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
+IMPORTANT: Prefer SEMANTIC_RAG for pricing, features, policies, how-to, and general questions even if they contain words like "show" or "list". Only use HYBRID for explicit listing/navigation/contact requests.
+
+For HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
 
 Detect userLanguage: ISO 639-1 code for the language the visitor wrote in (e.g. en, de, hi).
 
-If route is STRUCTURAL or HYBRID and userLanguage differs from website language, provide rewrittenQuery: search keywords/phrases in the website language (${websiteLanguage}) for keyword matching. Otherwise rewrittenQuery can be null.
+If route is HYBRID and userLanguage differs from website language, provide rewrittenQuery: search keywords/phrases in the website language (${websiteLanguage}) for keyword matching. Otherwise rewrittenQuery can be null.
 
 Use conversation history for short follow-ups like "yes", "tell me", "what about pricing?".
 

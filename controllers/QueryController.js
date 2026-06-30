@@ -473,21 +473,31 @@ class QuestionAnsweringSystem {
       /\b(office\s+hours|business\s+hours|phone\s+number|mailing\s+address)\b/.test(
         q
       ) ||
-      (/\b(phone|email|e-mail|address|contact|hours|fax|call\s+us|reach\s+us|mailing)\b/.test(
+      (/\b(how\s+(?:do\s+i\s+)?contact|contact\s+(?:info|details|number)|reach\s+us|call\s+us)\b/.test(
         q
       ) &&
-        !/\b(support\s+ticket|submit\s+a\s+ticket|product)\b/.test(q)) ||
+        !/\b(refund|return|policy|billing|order|shipping|warranty|cancel|product)\b/.test(
+          q
+        )) ||
+      (/\b(phone|email|e-mail|address|hours|fax|mailing)\b/.test(q) &&
+        !/\b(support\s+ticket|submit\s+a\s+ticket|product|refund|policy|billing|order)\b/.test(
+          q
+        )) ||
       (/\b(give\s+me|show\s+me|what\s+are|list)\b/.test(q) &&
         /\bsocial\b/.test(q));
 
     const wantsPageLinks =
       !wantsContactInfo &&
       ((/\b(links?|urls?)\b/.test(q) &&
-        !/\b(social\s*media|social)\b/.test(q)) ||
+        !/\b(social\s*media|social)\b/.test(q) &&
+        /\b(list|show|give\s+me|all|every|how\s+many)\b/.test(q)) ||
         /\bshow\s+me\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
         /\blist\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
-        (/\b(pages?)\b/.test(q) && !wantsInPageList) ||
+        (/\b(pages?)\b/.test(q) &&
+          /\b(list|show|give|all|site|website)\b/.test(q) &&
+          !wantsInPageList) ||
         (/\b(collections?)\b/.test(q) &&
+          /\b(list|show|all|pages?|links?)\b/.test(q) &&
           !/\b(products?|items?|featured|price|prices)\b/.test(q)));
 
     const hasListHint = /\b(list|show|give\s+me|how\s+many|all\b|top\b)\b/.test(
@@ -499,7 +509,6 @@ class QuestionAnsweringSystem {
     if (wantsContactInfo) return "CONTACT_INFO";
     if (wantsPageLinks) return "PAGE_LINKS";
     if (hasListHint && hasProductWord) return "IN_PAGE_LIST";
-    if (hasListHint) return "PAGE_LINKS";
     return "SEMANTIC";
   }
 
@@ -557,6 +566,267 @@ class QuestionAnsweringSystem {
       }
     }
     return [...footer, ...rest];
+  }
+
+  getMaxSemanticScore(matches) {
+    if (!matches || matches.length === 0) return 0;
+    return Math.max(...matches.map((m) => m.score ?? 0));
+  }
+
+  isExplicitInPageListQuestion(question) {
+    const q = (question || "").toLowerCase();
+    return (
+      /\b(featured|homepage|home\s*page|main\s*page)\b/.test(q) ||
+      /\b(list|show|give\s+me|what\s+are)\b[\s\S]{0,50}\b(products?|items?)\b/.test(
+        q
+      ) ||
+      /\b(all|every|each)\b[\s\S]{0,40}\b(products?|items?)\b/.test(q) ||
+      /\b(products?|items?)\b[\s\S]{0,40}\b(price|prices|cost|pricing)\b/.test(
+        q
+      ) ||
+      /\bwhat(?:'s| is)\s+on\s+(?:the\s+|your\s+)?(?:homepage|home\s*page|main\s*page)\b/.test(
+        q
+      )
+    );
+  }
+
+  isExplicitPageLinksQuestion(question) {
+    const q = (question || "").toLowerCase();
+    if (this.isExplicitInPageListQuestion(question)) return false;
+    return (
+      (/\b(links?|urls?)\b/.test(q) &&
+        /\b(list|show|give|all|every|how\s+many)\b/.test(q)) ||
+      /\bshow\s+me\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
+      /\blist\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
+      (/\b(pages?)\b/.test(q) &&
+        /\b(list|show|give|all|site|website)\b/.test(q)) ||
+      (/\b(collections?)\b/.test(q) &&
+        /\b(list|show|all|pages?|links?)\b/.test(q))
+    );
+  }
+
+  isPrimarilyContactQuestion(question) {
+    const q = (question || "").toLowerCase();
+    const contactFocus =
+      /\b(social\s*media|phone\s*number|email\s*address|mailing\s*address|office\s*hours|business\s*hours|facebook|instagram|twitter|how\s+(?:do\s+i\s+)?contact|contact\s+(?:info|details|number)|follow\s+us|find\s+us\s+on)\b/.test(
+        q
+      );
+    const policyMix =
+      /\b(refund|return|policy|billing|order|shipping|warranty|cancel|payment|product|pricing|feature|plan)\b/.test(
+        q
+      );
+    if (policyMix && !contactFocus) return false;
+    return (
+      contactFocus ||
+      (/\b(phone|email|address|hours|fax)\b/.test(q) && !policyMix)
+    );
+  }
+
+  countStrongStructuralHits(keywords, points) {
+    const strong = (keywords || []).filter((k) => k.length >= 4);
+    if (strong.length === 0 || !points || points.length === 0) return 0;
+
+    let hits = 0;
+    for (const p of points) {
+      const payload = p.payload || p;
+      const url = (payload.url || "").toLowerCase();
+      const title = (payload.title || "").toLowerCase();
+      if (strong.some((k) => url.includes(k) || title.includes(k))) {
+        hits += 1;
+      }
+    }
+    return hits;
+  }
+
+  /**
+   * Attempt specialized hybrid retrieval. Returns null when quality is too low
+   * so the caller falls through to standard semantic RAG.
+   */
+  async trySpecializedRetrieval({
+    subIntent,
+    question,
+    keywordSource,
+    collectionName,
+    userIdString,
+    requestedTopK,
+    companyName,
+    semanticMatches,
+    getQuestionEmbedding,
+  }) {
+    const maxSemantic = this.getMaxSemanticScore(semanticMatches);
+    const hasGoodSemantic = maxSemantic >= 0.32;
+    const requestedCount = this.extractRequestedCount(question, requestedTopK);
+
+    if (subIntent === "IN_PAGE_LIST") {
+      if (!this.isExplicitInPageListQuestion(question)) {
+        console.log(
+          "[QueryController] IN_PAGE_LIST skipped: not an explicit catalog/homepage request"
+        );
+        return null;
+      }
+
+      const keywords = this.extractKeywords(keywordSource);
+      const keywordPoints = await this.structuralFetchByKeywords(
+        collectionName,
+        keywords.length > 0 ? keywords : ["featured", "product"],
+        userIdString,
+        Math.max(200, requestedCount * 15)
+      );
+
+      let mergedMatches = this.mergeRetrievalResults(
+        semanticMatches,
+        keywordPoints
+      );
+
+      if (/\b(homepage|home\s*page|main\s*page)\b/i.test(question)) {
+        const homepageMatches = mergedMatches.filter((m) =>
+          this.isHomepageUrl(m.payload?.url)
+        );
+        if (homepageMatches.length > 0) {
+          mergedMatches = homepageMatches;
+        }
+      }
+
+      const structuralHits = this.countStrongStructuralHits(
+        keywords,
+        keywordPoints
+      );
+      if (
+        !hasGoodSemantic &&
+        structuralHits < 2 &&
+        mergedMatches.length < 2
+      ) {
+        console.log(
+          "[QueryController] IN_PAGE_LIST skipped: weak semantic and keyword retrieval"
+        );
+        return null;
+      }
+
+      const contextBlocks = this.buildInPageListContext(mergedMatches);
+      return {
+        context: `The user wants a complete list of items from ${companyName}'s website. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below.\n\n${contextBlocks}`,
+        matches: mergedMatches,
+        responseMode: "list",
+        requestedCount,
+      };
+    }
+
+    if (subIntent === "CONTACT_INFO") {
+      if (!this.isPrimarilyContactQuestion(question)) {
+        console.log(
+          "[QueryController] CONTACT_INFO skipped: question is not primarily about contact details"
+        );
+        return null;
+      }
+
+      const keywords = this.extractContactKeywords(keywordSource);
+      const footerPoints = await this.structuralFetchByKeywords(
+        collectionName,
+        ["footer links", "footer"],
+        userIdString,
+        150
+      );
+      const keywordPoints = await this.structuralFetchByKeywords(
+        collectionName,
+        keywords,
+        userIdString,
+        250
+      );
+
+      let mergedMatches = this.mergeRetrievalResults(semanticMatches, [
+        ...footerPoints,
+        ...keywordPoints,
+      ]);
+      mergedMatches = this.prioritizeFooterChunks(mergedMatches);
+
+      const hasFooter = footerPoints.length > 0;
+      const structuralHits = this.countStrongStructuralHits(
+        keywords,
+        keywordPoints
+      );
+
+      if (!hasGoodSemantic && !hasFooter && structuralHits < 1) {
+        console.log(
+          "[QueryController] CONTACT_INFO skipped: no footer/contact keyword hits and weak semantic"
+        );
+        return null;
+      }
+
+      if (mergedMatches.length === 0) return null;
+
+      const contextBlocks = this.buildInPageListContext(mergedMatches);
+      return {
+        context: `The user is asking about contact information, social media profiles, phone, email, address, or business hours for ${companyName}. Use ONLY the content below. Include every social media URL and relevant contact detail found. Do not say information is missing if it appears below.\n\n${contextBlocks}`,
+        matches: mergedMatches,
+        responseMode: "contact",
+        requestedCount,
+      };
+    }
+
+    if (subIntent === "PAGE_LINKS") {
+      if (!this.isExplicitPageLinksQuestion(question)) {
+        console.log(
+          "[QueryController] PAGE_LINKS skipped: not an explicit page/URL listing request"
+        );
+        return null;
+      }
+
+      const keywords = this.extractKeywords(keywordSource);
+      const keywordPoints = await this.structuralFetchByKeywords(
+        collectionName,
+        keywords,
+        userIdString,
+        Math.max(500, requestedCount * 5)
+      );
+
+      const uniquePages = this.dedupeByUrl(keywordPoints);
+      const structuralHits = this.countStrongStructuralHits(
+        keywords,
+        keywordPoints
+      );
+
+      if (
+        uniquePages.length >= 2 &&
+        structuralHits >= 1 &&
+        (hasGoodSemantic || uniquePages.length >= 3)
+      ) {
+        const topItems = uniquePages.slice(0, requestedCount);
+        const pagesLines = topItems
+          .map((p, idx) => {
+            const url = p.url || "";
+            const title = p.title || p.url || `Page ${idx + 1}`;
+            return `${idx + 1}. ${title} — ${url}`;
+          })
+          .join("\n");
+
+        return {
+          context: `The user wants pages or items from ${companyName}'s site. These ${topItems.length} knowledge-base pages match (use every entry; keep exact URLs and titles):\n\n${pagesLines}\n\nReply in clean HTML: a short, natural lead if it helps, then a <ul> of <li> items with links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>. Do not use a fixed opener like "Here are N links:" unless it truly fits; sound human and direct.`,
+          matches: topItems.map((payload) => ({ payload })),
+          responseMode: "page_links",
+          requestedCount,
+        };
+      }
+
+      if (hasGoodSemantic) {
+        console.log(
+          "[QueryController] PAGE_LINKS skipped: using semantic path (better relevance)"
+        );
+        return null;
+      }
+
+      const mergedMatches = this.mergeRetrievalResults(
+        semanticMatches,
+        keywordPoints
+      );
+      if (mergedMatches.length === 0) return null;
+
+      console.log(
+        "[QueryController] PAGE_LINKS downgraded to semantic-style answer (weak URL matches)"
+      );
+      return null;
+    }
+
+    return null;
   }
 
   extractContactKeywords(query) {
@@ -1293,7 +1563,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         };
       }
 
-      const intent = routing.subIntent || "SEMANTIC";
+      const subIntent = routing.subIntent || null;
       const keywordSource = routing.rewrittenQuery || question;
 
       let questionEmbedding = null;
@@ -1307,216 +1577,8 @@ Keep responses short, direct, friendly, and professional. Only use information e
         return questionEmbedding;
       };
 
-      if (intent === "IN_PAGE_LIST") {
-        const keywords = this.extractKeywords(keywordSource);
-        const requestedCount = this.extractRequestedCount(question, requestedTopK);
-        const retrievalTopK = Math.max(10, Math.min(20, requestedCount * 3));
-
-        const semanticMatches = await this.queryQdrant(
-          collectionName,
-          await getQuestionEmbedding(),
-          retrievalTopK,
-          userIdString
-        );
-
-        const keywordPoints = await this.structuralFetchByKeywords(
-          collectionName,
-          keywords.length > 0 ? keywords : ["featured", "product"],
-          userIdString,
-          Math.max(200, requestedCount * 15)
-        );
-
-        let mergedMatches = this.mergeRetrievalResults(
-          semanticMatches,
-          keywordPoints
-        );
-
-        if (/\b(homepage|home\s*page|main\s*page)\b/i.test(question)) {
-          const homepageMatches = mergedMatches.filter((m) =>
-            this.isHomepageUrl(m.payload?.url)
-          );
-          if (homepageMatches.length > 0) {
-            mergedMatches = homepageMatches;
-          }
-        }
-
-        if (mergedMatches.length > 0) {
-          const contextBlocks = this.buildInPageListContext(mergedMatches);
-          const listContext = `The user wants a complete list of items from ${companyName}'s website. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below.\n\n${contextBlocks}`;
-
-          const { answer: listAnswer, usage: listUsage } =
-            await this.generateAnswer(
-              question,
-              listContext,
-              chatHistory,
-              companyName,
-              websiteData,
-              { responseMode: "list", requestedCount, ...langOpts }
-            );
-
-          if (listUsage) {
-            logOpenAIUsage({
-              userId,
-              agentId,
-              tokens: listUsage.total_tokens,
-              requests: 1,
-            });
-          }
-
-          return {
-            success: true,
-            answer: listAnswer,
-            sources: this.matchesToSources(mergedMatches),
-            conversationId,
-            isAgentRequest: false,
-          };
-        }
-
-        console.warn(
-          `[QueryController] IN_PAGE_LIST intent but no matching chunks for keywords [${keywords.join(
-            ", "
-          )}]. Falling back to semantic search.`
-        );
-      }
-
-      if (intent === "CONTACT_INFO") {
-        const keywords = this.extractContactKeywords(keywordSource);
-
-        const footerPoints = await this.structuralFetchByKeywords(
-          collectionName,
-          ["footer links", "footer"],
-          userIdString,
-          150
-        );
-
-        const keywordPoints = await this.structuralFetchByKeywords(
-          collectionName,
-          keywords,
-          userIdString,
-          250
-        );
-
-        const semanticMatches = await this.queryQdrant(
-          collectionName,
-          await getQuestionEmbedding(),
-          12,
-          userIdString
-        );
-
-        let mergedMatches = this.mergeRetrievalResults(semanticMatches, [
-          ...footerPoints,
-          ...keywordPoints,
-        ]);
-        mergedMatches = this.prioritizeFooterChunks(mergedMatches);
-
-        if (mergedMatches.length > 0) {
-          const contextBlocks = this.buildInPageListContext(mergedMatches);
-          const contactContext = `The user is asking about contact information, social media profiles, phone, email, address, or business hours for ${companyName}. Use ONLY the content below. Include every social media URL and relevant contact detail found. Do not say information is missing if it appears below.\n\n${contextBlocks}`;
-
-          const { answer: contactAnswer, usage: contactUsage } =
-            await this.generateAnswer(
-              question,
-              contactContext,
-              chatHistory,
-              companyName,
-              websiteData,
-              { responseMode: "contact", ...langOpts }
-            );
-
-          if (contactUsage) {
-            logOpenAIUsage({
-              userId,
-              agentId,
-              tokens: contactUsage.total_tokens,
-              requests: 1,
-            });
-          }
-
-          return {
-            success: true,
-            answer: contactAnswer,
-            sources: this.matchesToSources(mergedMatches),
-            conversationId,
-            isAgentRequest: false,
-          };
-        }
-
-        console.warn(
-          `[QueryController] CONTACT_INFO intent but no matching chunks for keywords [${keywords.join(
-            ", "
-          )}]. Falling back to semantic search.`
-        );
-      }
-
-      if (intent === "PAGE_LINKS") {
-        const keywords = this.extractKeywords(keywordSource);
-        const requestedCount = this.extractRequestedCount(question, requestedTopK);
-
-        const structuralPoints = await this.structuralFetchByKeywords(
-          collectionName,
-          keywords,
-          userIdString,
-          Math.max(500, requestedCount * 5)
-        );
-
-        const uniquePages = this.dedupeByUrl(structuralPoints);
-        const topItems = uniquePages.slice(0, requestedCount);
-
-        if (topItems.length > 0) {
-          const pagesLines = topItems
-            .map((p, idx) => {
-              const url = p.url || "";
-              const title = p.title || p.url || `Page ${idx + 1}`;
-              return `${idx + 1}. ${title} — ${url}`;
-            })
-            .join("\n");
-
-          const structuralContext = `The user wants pages or items from ${companyName}'s site. These ${topItems.length} knowledge-base pages match (use every entry; keep exact URLs and titles):\n\n${pagesLines}\n\nReply in clean HTML: a short, natural lead if it helps, then a <ul> of <li> items with links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>. Do not use a fixed opener like "Here are N links:" unless it truly fits; sound human and direct.`;
-
-          const { answer: structuralAnswer, usage: structuralUsage } =
-            await this.generateAnswer(
-              question,
-              structuralContext,
-              chatHistory,
-              companyName,
-              websiteData,
-              { responseMode: "page_links", requestedCount, ...langOpts }
-            );
-          if (structuralUsage) {
-            logOpenAIUsage({
-              userId,
-              agentId,
-              tokens: structuralUsage.total_tokens,
-              requests: 1,
-            });
-          }
-
-          const structuralSources = this.matchesToSources(
-            topItems.map((payload) => ({ payload }))
-          );
-
-          return {
-            success: true,
-            answer: structuralAnswer,
-            sources:
-              structuralSources.length > 0 ? structuralSources : undefined,
-            conversationId,
-            isAgentRequest: false,
-          };
-        }
-
-        // If no page-link hits, fall back to semantic path below
-        console.warn(
-          `[QueryController] PAGE_LINKS intent detected but no matching payload results for keywords [${keywords.join(
-            ", "
-          )}]. Falling back to semantic search.`
-        );
-      }
-
-      // Semantic path: embed on demand (skipped for GREETING / LIVE_AGENT / pure STRUCTURAL hits)
-
       const semanticTopK =
-        intent === "IN_PAGE_LIST"
+        subIntent === "IN_PAGE_LIST"
           ? Math.max(
               10,
               Math.min(
@@ -1524,18 +1586,70 @@ Keep responses short, direct, friendly, and professional. Only use information e
                 this.extractRequestedCount(question, requestedTopK) * 3
               )
             )
-          : intent === "CONTACT_INFO"
+          : subIntent === "CONTACT_INFO"
             ? 12
-            : requestedTopK;
+            : subIntent === "PAGE_LINKS"
+              ? Math.max(
+                  requestedTopK,
+                  this.extractRequestedCount(question, requestedTopK) * 2
+                )
+              : requestedTopK;
 
-      // Query Qdrant (semantic)
-      // Filter by user_id (owner) - Qdrant payload stores user_id, not agent_id, for filtering
       const queryResponse = await this.queryQdrant(
         collectionName,
         await getQuestionEmbedding(),
         semanticTopK,
         userIdString
       );
+
+      if (subIntent) {
+        const specialized = await this.trySpecializedRetrieval({
+          subIntent,
+          question,
+          keywordSource,
+          collectionName,
+          userIdString,
+          requestedTopK,
+          companyName,
+          semanticMatches: queryResponse,
+          getQuestionEmbedding,
+        });
+
+        if (specialized) {
+          const { answer: specializedAnswer, usage: specializedUsage } =
+            await this.generateAnswer(
+              question,
+              specialized.context,
+              chatHistory,
+              companyName,
+              websiteData,
+              {
+                responseMode: specialized.responseMode,
+                requestedCount: specialized.requestedCount,
+                ...langOpts,
+              }
+            );
+
+          if (specializedUsage) {
+            logOpenAIUsage({
+              userId,
+              agentId,
+              tokens: specializedUsage.total_tokens,
+              requests: 1,
+            });
+          }
+
+          return {
+            success: true,
+            answer: specializedAnswer,
+            sources: this.matchesToSources(specialized.matches),
+            conversationId,
+            isAgentRequest: false,
+          };
+        }
+      }
+
+      // Standard semantic RAG path (always runs; specialized path only when quality passes)
 
       // Log if no results found at all
       if (queryResponse.length === 0) {
@@ -1727,8 +1841,12 @@ Keep responses short, direct, friendly, and professional. Only use information e
       } else {
         // Get Context and Generate Answer via LLM
         const context = this.getRelevantContext(relevantMatches);
-        const listFallback = intent === "IN_PAGE_LIST";
-        const contactFallback = intent === "CONTACT_INFO";
+        const listFallback =
+          subIntent === "IN_PAGE_LIST" &&
+          this.isExplicitInPageListQuestion(question);
+        const contactFallback =
+          subIntent === "CONTACT_INFO" &&
+          this.isPrimarilyContactQuestion(question);
         const requestedCount = this.extractRequestedCount(
           question,
           requestedTopK
