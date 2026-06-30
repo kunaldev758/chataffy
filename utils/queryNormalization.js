@@ -201,6 +201,52 @@ function normalizeUserQuery(rawQuestion) {
   };
 }
 
+function hasSizedCatalogIntent(normalizedQuestion, sizes = []) {
+  const q = (normalizedQuestion || "").toLowerCase();
+  const hasSize =
+    (sizes && sizes.length > 0) || /\b\d{1,2}(?:-\d{1,2})?mm\b/.test(q);
+  const hasCatalog =
+    /\b(lash(?:es)?|product|style|collection|catalog)\b/i.test(q);
+  return hasSize && hasCatalog;
+}
+
+function sizeMatchNeedles(sizes) {
+  const needles = new Set();
+  for (const s of sizes || []) {
+    const compact = s.replace(/\s/g, "").toLowerCase();
+    const num = compact.replace(/mm$/i, "");
+    needles.add(compact);
+    if (num) {
+      needles.add(num);
+      needles.add(`${num} mm`);
+    }
+  }
+  return Array.from(needles);
+}
+
+function filterMatchesBySizes(matches, sizes) {
+  if (!sizes?.length) return matches || [];
+  const needles = sizeMatchNeedles(sizes);
+  const filtered = (matches || []).filter((m) => {
+    const payload = m.payload || {};
+    const hay = [
+      payload.title,
+      payload.url,
+      payload.text,
+      ...(payload.search_terms || []),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return needles.some((n) => hay.includes(n));
+  });
+  return filtered.length > 0 ? filtered : matches || [];
+}
+
+/** Regex fragment: product/catalog nouns including lash + lashes */
+const CATALOG_PRODUCT_WORDS =
+  "(?:products?|items?|options?|styles?|lash(?:es)?)";
+
 module.exports = {
   normalizeQueryText,
   extractSizeTokens,
@@ -209,5 +255,9 @@ module.exports = {
   buildRetrievalKeywords,
   enrichRetrievalQueryForEmbedding,
   normalizeUserQuery,
+  hasSizedCatalogIntent,
+  sizeMatchNeedles,
+  filterMatchesBySizes,
   MORPHOLOGY_ROOTS,
+  CATALOG_PRODUCT_WORDS,
 };

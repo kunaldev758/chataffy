@@ -8,6 +8,9 @@ const {
 } = require("../utils/queryContextExpansion");
 const { normalizeQueryText } = require("../utils/queryNormalization");
 
+const CATALOG_PRODUCT_WORDS =
+  "(?:products?|items?|options?|styles?|lash(?:es)?)";
+
 const ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano";
 
 const ROUTES = {
@@ -107,24 +110,28 @@ function classifyStructuralSubIntent(query) {
 
   const wantsInPageList =
     /\b(featured|homepage|home\s*page|main\s*page)\b/.test(q) ||
-    /\b(list|show|give\s+me|what\s+are|tell\s+me|share)\b[\s\S]{0,50}\b(products?|items?|options?|styles?|lashes?)\b/.test(
-      q
-    ) ||
+    new RegExp(
+      `\\b(list|show|give\\s+me|what\\s+are|tell\\s+me|share)\\b[\\s\\S]{0,50}\\b${CATALOG_PRODUCT_WORDS}\\b`
+    ).test(q) ||
     /\b(urls?|links?)\b/.test(q) &&
-      /\b\d{1,2}\s*mm\b/.test(q) &&
-      /\b(lash|lashes|product)\b/.test(q) ||
-    /\b(all|every|each)\b[\s\S]{0,40}\b(products?|items?|lashes?)\b/.test(q) ||
-    /\b(products?|items?|lashes?)\b[\s\S]{0,40}\b(price|prices|cost|pricing)\b/.test(
-      q
-    ) ||
-    /\b(price|prices|cost|pricing)\b[\s\S]{0,40}\b(products?|items?|lashes?)\b/.test(
-      q
-    ) ||
+      /\b\d{1,2}(?:-\d{1,2})?mm\b/.test(q) &&
+      /\b(lash(?:es)?|product)\b/.test(q) ||
+    new RegExp(
+      `\\b(all|every|each)\\b[\\s\\S]{0,40}\\b${CATALOG_PRODUCT_WORDS}\\b`
+    ).test(q) ||
+    new RegExp(
+      `\\b${CATALOG_PRODUCT_WORDS}\\b[\\s\\S]{0,40}\\b(price|prices|cost|pricing)\\b`
+    ).test(q) ||
+    new RegExp(
+      `\\b(price|prices|cost|pricing)\\b[\\s\\S]{0,40}\\b${CATALOG_PRODUCT_WORDS}\\b`
+    ).test(q) ||
     /\bwhat(?:'s| is)\s+on\s+(?:the\s+|your\s+)?(?:homepage|home\s*page|main\s*page)\b/.test(
       q
     ) ||
-    (/\b\d{1,2}\s*mm\b/.test(q) &&
-      /\b(options?|styles?|products?|lashes?|share|more)\b/.test(q));
+    (/\b\d{1,2}(?:-\d{1,2})?mm\b/.test(q) &&
+      new RegExp(
+        `\\b(options?|styles?|products?|lash(?:es)?|share|more)\\b`
+      ).test(q));
 
   const wantsContactInfo =
     /\bsocial\s*media\b/.test(q) ||
