@@ -16,6 +16,7 @@ const {
   isScrapableWebUrl,
   isHtmlContentType,
 } = require("../utils/webUrlUtils.js");
+const { detectWebsiteLanguage } = require("../utils/websiteLanguage");
 
 const NON_HTML_SKIP_ERROR =
   "Non-HTML URL skipped. Use document upload for PDFs and other files.";
@@ -264,6 +265,13 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
     // Extract "does not" list - this is harder to extract automatically
     // We'll leave it empty for now, can be manually filled or enhanced later
     metadata.does_not_list = [];
+
+    // Detect website language from HTML signals and body text
+    const langInfo = detectWebsiteLanguage($, bodyText.trim());
+    metadata.primary_language = langInfo.primary_language;
+    metadata.languages = langInfo.languages;
+    metadata.language_confidence = langInfo.language_confidence;
+    metadata.language_source = langInfo.language_source;
   } catch (error) {
     console.error("Error extracting website metadata:", error);
   }

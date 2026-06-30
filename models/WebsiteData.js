@@ -54,6 +54,23 @@ const websiteDataSchema = new Schema(
       type: String,
       default: "",
     },
+    // Website language (detected during training from homepage HTML)
+    primary_language: {
+      type: String,
+      default: "en",
+    },
+    languages: {
+      type: [String],
+      default: ["en"],
+    },
+    language_confidence: {
+      type: Number,
+      default: 0.3,
+    },
+    language_source: {
+      type: String,
+      default: "default",
+    },
     // Metadata extraction status
     extraction_status: {
       type: String,

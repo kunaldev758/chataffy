@@ -10,6 +10,7 @@ const Agent = require("../models/Agent");
 const WebsiteData = require("../models/WebsiteData");
 const HumanAgent = require("../models/HumanAgent");
 const { logOpenAIUsage } = require("../services/UsageTrackingService");
+const { routeQuery, ROUTES, isLiveAgentRequest } = require("../services/QueryRouter");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -739,7 +740,7 @@ class QuestionAnsweringSystem {
     websiteData = null,
     answerOptions = {}
   ) {
-    const { responseMode = "brief", requestedCount = 5 } = answerOptions;
+    const { responseMode = "brief", requestedCount = 5, userLanguage } = answerOptions;
 
     // Build dynamic system prompt if websiteData is available, otherwise use fallback
     let systemPrompt;
@@ -779,6 +780,10 @@ Keep responses short, direct, friendly, and professional. Only use information e
       systemPrompt += `\n\n---\n\n### Page Link Responses\n\nWhen listing site pages, use a <ul> of linked page titles. Keep the intro brief.`;
     } else if (responseMode === "contact") {
       systemPrompt += `\n\n---\n\n### Contact & Social Media Responses\n\nWhen the user asks for social media, phone, email, address, or hours:\n\n- List **every** matching profile URL, phone, email, and address from the context\n- Use clean HTML with a <ul> of <li> entries\n- Format links: <a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">platform name</a>\n- Never claim social links or contact details are missing if they appear in the context\n- Include platform names (Facebook, Instagram, etc.) with their URLs`;
+    }
+
+    if (userLanguage && userLanguage !== "en") {
+      systemPrompt += `\n\n---\n\n### Reply Language\n\nAlways reply in **${userLanguage}** (ISO 639-1). The knowledge base content may be in a different language — translate and summarize naturally for the visitor.`;
     }
 
     let answerInstructions;
@@ -1218,27 +1223,98 @@ Keep responses short, direct, friendly, and professional. Only use information e
               ? revisedFromKb.sources
               : undefined,
           conversationId,
-          isAgentRequest: this.isAgentConnectionRequest(question),
+          isAgentRequest: false,
         };
       }
 
-      const questionEmbedding = await this.embeddingModel.embedQuery(question);
-      if (!questionEmbedding) {
-        throw new Error("Failed to generate question embedding.");
+      const websiteLanguage = websiteData?.primary_language || "en";
+
+      const routing = await routeQuery(question, {
+        chatMessages: chatSession,
+        websiteLanguage,
+        openaiClient: openai,
+      });
+
+      console.log(
+        `[QueryController] Route: ${routing.route} | subIntent: ${routing.subIntent} | userLang: ${routing.userLanguage} | confidence: ${routing.confidence} | source: ${routing.source}`
+      );
+
+      const langOpts = { userLanguage: routing.userLanguage };
+
+      if (routing.route === ROUTES.GREETING) {
+        const { answer: greetingAnswer, usage: greetingUsage } =
+          await this.generateAnswer(
+            question,
+            `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
+            chatHistory,
+            companyName,
+            websiteData,
+            langOpts
+          );
+        if (greetingUsage) {
+          logOpenAIUsage({
+            userId,
+            agentId,
+            tokens: greetingUsage.total_tokens,
+            requests: 1,
+          });
+        }
+        return {
+          success: true,
+          answer: greetingAnswer,
+          conversationId,
+          isAgentRequest: false,
+        };
       }
 
-      // Intent detection to choose retrieval mode
-      const intent = this.classifyQueryIntent(question);
-      console.log(`[QueryController] Query intent: ${intent}`);
+      if (routing.route === ROUTES.LIVE_AGENT) {
+        const { answer: agentAnswer, usage: agentUsage } =
+          await this.generateAnswer(
+            question,
+            `The visitor wants to speak with a live human agent or representative. Acknowledge warmly, confirm they will be connected to a team member shortly, and be brief and natural.`,
+            chatHistory,
+            companyName,
+            websiteData,
+            langOpts
+          );
+        if (agentUsage) {
+          logOpenAIUsage({
+            userId,
+            agentId,
+            tokens: agentUsage.total_tokens,
+            requests: 1,
+          });
+        }
+        return {
+          success: true,
+          answer: agentAnswer,
+          conversationId,
+          isAgentRequest: true,
+        };
+      }
+
+      const intent = routing.subIntent || "SEMANTIC";
+      const keywordSource = routing.rewrittenQuery || question;
+
+      let questionEmbedding = null;
+      const getQuestionEmbedding = async () => {
+        if (!questionEmbedding) {
+          questionEmbedding = await this.embeddingModel.embedQuery(question);
+          if (!questionEmbedding) {
+            throw new Error("Failed to generate question embedding.");
+          }
+        }
+        return questionEmbedding;
+      };
 
       if (intent === "IN_PAGE_LIST") {
-        const keywords = this.extractKeywords(question);
+        const keywords = this.extractKeywords(keywordSource);
         const requestedCount = this.extractRequestedCount(question, requestedTopK);
         const retrievalTopK = Math.max(10, Math.min(20, requestedCount * 3));
 
         const semanticMatches = await this.queryQdrant(
           collectionName,
-          questionEmbedding,
+          await getQuestionEmbedding(),
           retrievalTopK,
           userIdString
         );
@@ -1275,7 +1351,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
               chatHistory,
               companyName,
               websiteData,
-              { responseMode: "list", requestedCount }
+              { responseMode: "list", requestedCount, ...langOpts }
             );
 
           if (listUsage) {
@@ -1292,7 +1368,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             answer: listAnswer,
             sources: this.matchesToSources(mergedMatches),
             conversationId,
-            isAgentRequest: this.isAgentConnectionRequest(question),
+            isAgentRequest: false,
           };
         }
 
@@ -1304,7 +1380,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       }
 
       if (intent === "CONTACT_INFO") {
-        const keywords = this.extractContactKeywords(question);
+        const keywords = this.extractContactKeywords(keywordSource);
 
         const footerPoints = await this.structuralFetchByKeywords(
           collectionName,
@@ -1322,7 +1398,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
         const semanticMatches = await this.queryQdrant(
           collectionName,
-          questionEmbedding,
+          await getQuestionEmbedding(),
           12,
           userIdString
         );
@@ -1344,7 +1420,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
               chatHistory,
               companyName,
               websiteData,
-              { responseMode: "contact" }
+              { responseMode: "contact", ...langOpts }
             );
 
           if (contactUsage) {
@@ -1361,7 +1437,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             answer: contactAnswer,
             sources: this.matchesToSources(mergedMatches),
             conversationId,
-            isAgentRequest: this.isAgentConnectionRequest(question),
+            isAgentRequest: false,
           };
         }
 
@@ -1373,7 +1449,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       }
 
       if (intent === "PAGE_LINKS") {
-        const keywords = this.extractKeywords(question);
+        const keywords = this.extractKeywords(keywordSource);
         const requestedCount = this.extractRequestedCount(question, requestedTopK);
 
         const structuralPoints = await this.structuralFetchByKeywords(
@@ -1404,7 +1480,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
               chatHistory,
               companyName,
               websiteData,
-              { responseMode: "page_links", requestedCount }
+              { responseMode: "page_links", requestedCount, ...langOpts }
             );
           if (structuralUsage) {
             logOpenAIUsage({
@@ -1425,7 +1501,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             sources:
               structuralSources.length > 0 ? structuralSources : undefined,
             conversationId,
-            isAgentRequest: this.isAgentConnectionRequest(question),
+            isAgentRequest: false,
           };
         }
 
@@ -1437,7 +1513,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         );
       }
 
-      // Semantic path: reuse embedding from above
+      // Semantic path: embed on demand (skipped for GREETING / LIVE_AGENT / pure STRUCTURAL hits)
 
       const semanticTopK =
         intent === "IN_PAGE_LIST"
@@ -1456,7 +1532,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       // Filter by user_id (owner) - Qdrant payload stores user_id, not agent_id, for filtering
       const queryResponse = await this.queryQdrant(
         collectionName,
-        questionEmbedding,
+        await getQuestionEmbedding(),
         semanticTopK,
         userIdString
       );
@@ -1594,7 +1670,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       const isAccidental = this.isAccidentalOrTestMessage(question);
       
       // Check if visitor is requesting to connect to an agent
-      const isAgentRequest = this.isAgentConnectionRequest(question);
+      const isAgentRequest = isLiveAgentRequest(question);
       
       // Handle simple greetings even without context
       if (relevantMatches.length === 0 && this.isSimpleGreeting(question)) {
@@ -1606,6 +1682,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             chatHistory,
             companyName,
             websiteData,
+            langOpts
           );
         finalAnswer = greetingAnswer;
         if (llmUsage) {
@@ -1625,6 +1702,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
             chatHistory,
             companyName,
             websiteData,
+            langOpts
           );
         finalAnswer = accidentalAnswer;
         logOpenAIUsage({ userId, agentId, tokens: llmUsage.total_tokens, requests: 1 });
@@ -1642,6 +1720,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           chatHistory,
           companyName,
           websiteData,
+          langOpts
         );
       finalAnswer = irrelaventAnswer;
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
@@ -1663,10 +1742,10 @@ Keep responses short, direct, friendly, and professional. Only use information e
             companyName,
             websiteData,
             listFallback
-              ? { responseMode: "list", requestedCount }
+              ? { responseMode: "list", requestedCount, ...langOpts }
               : contactFallback
-                ? { responseMode: "contact" }
-                : {}
+                ? { responseMode: "contact", ...langOpts }
+                : langOpts
           );
         finalAnswer = generatedAnswer;
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
