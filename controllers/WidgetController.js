@@ -73,6 +73,22 @@ function normalizeEmbedHost(input) {
 /** Treat localhost / 127.0.0.1 / ::1 as the same (Live Server vs bookmarked localhost). */
 const LOOPBACK_EMBED_CANONICAL = '__loopback__';
 
+/** Temporary: skip parent-page domain matching on short embed resolve. Set WIDGET_EMBED_SKIP_DOMAIN_CHECK=0 to re-enable. */
+function isEmbedDomainCheckSkipped() {
+  const v = process.env.WIDGET_EMBED_SKIP_DOMAIN_CHECK;
+  if (v === '0' || v === 'false') return false;
+  return true;
+}
+
+function resolveWidgetsWithoutDomainCheck(widgets, narrowWid) {
+  if (narrowWid) {
+    const w = widgets.find((x) => String(x._id) === narrowWid);
+    return w ? [w] : [];
+  }
+  if (widgets.length === 1) return [widgets[0]];
+  return widgets;
+}
+
 function canonicalEmbedHost(input) {
   const h = normalizeEmbedHost(input);
   if (!h) return '';
@@ -593,6 +609,33 @@ WidgetController.resolveEmbedByOrigin = async (req, res) => {
     const widgets = await Widget.find({ agentId: { $exists: true, $ne: null } })
       .select('_id widgetToken agentId website userId')
       .lean();
+
+    if (isEmbedDomainCheckSkipped()) {
+      const skipMatches = resolveWidgetsWithoutDomainCheck(widgets, narrowWid);
+      if (skipMatches.length === 0) {
+        return res.status(404).json({
+          status_code: 404,
+          message:
+            'No widget found. Add your widget id: script src=".../widget-loader.js?wid=YOUR_ID" (copy from Chataffy → Widget setup).',
+        });
+      }
+      if (skipMatches.length > 1) {
+        return res.status(409).json({
+          status_code: 409,
+          message:
+            'Multiple widgets exist; use script src=".../widget-loader.js?wid=YOUR_ID" or the full embed URL with wid, token, and agent.',
+        });
+      }
+      const w = skipMatches[0];
+      return res.status(200).json({
+        status_code: 200,
+        data: {
+          wid: String(w._id),
+          token: w.widgetToken,
+          agent: String(w.agentId),
+        },
+      });
+    }
 
     const agentObjectIds = widgets.map((w) => w.agentId).filter(Boolean);
     const userObjectIds = widgets.map((w) => w.userId).filter(Boolean);
