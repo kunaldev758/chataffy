@@ -19,9 +19,6 @@ const {
 const {
   normalizeUserQuery,
   buildRetrievalKeywords,
-  filterMatchesBySizes,
-  hasSizedCatalogIntent,
-  CATALOG_PRODUCT_WORDS,
 } = require("../utils/queryNormalization");
 
 // --- Configuration ---
@@ -143,8 +140,7 @@ class QuestionAnsweringSystem {
   }
 
   // Build dynamic system prompt from WebsiteData
-  buildDynamicSystemPrompt(websiteData, organisation, options = {}) {
-    const { catalogList = false } = options;
+  buildDynamicSystemPrompt(websiteData, organisation) {
     // User-configured organisation (widget/agent name) takes priority over scraped metadata
     const companyName = organisation || websiteData?.company_name || "the company";
     const companyType = websiteData?.company_type || "company";
@@ -217,13 +213,8 @@ class QuestionAnsweringSystem {
     prompt += `- **Natural language**: Use contractions (I'm, we're, you're), casual phrases, and natural flow\n\n`;
     prompt += `- **Empathetic**: Acknowledge the user's message, even if it seems accidental or off-topic\n\n`;
     prompt += `- **Helpful and warm**: Always offer assistance with relevant topics, don't just say "no"\n\n`;
-    if (catalogList) {
-      prompt += `- **Catalog list mode**: The user asked for a product list — use a short intro (1 sentence) then a complete HTML <ul> of every matching item with name, price (if in context), and link\n\n`;
-      prompt += `- **Do not summarize to one item**: Never say "best match" or pick a single product when multiple are in the context\n\n`;
-    } else {
-      prompt += `- **Short and direct**: Keep responses brief (1-2 sentences max) - get straight to the point\n\n`;
-      prompt += `- **No fluff**: Skip unnecessary pleasantries and filler words - be helpful but concise\n\n`;
-    }
+    prompt += `- **Short and direct**: Keep responses brief (1-2 sentences max) - get straight to the point\n\n`;
+    prompt += `- **No fluff**: Skip unnecessary pleasantries and filler words - be helpful but concise\n\n`;
     prompt += `- **Professional but approachable**: Be knowledgeable but not overly formal\n\n`;
     prompt += `**Response Format:**\n\n`;
     prompt += `- Use clean HTML (p, ul, li, strong tags)\n\n`;
@@ -593,126 +584,24 @@ class QuestionAnsweringSystem {
 
   isExplicitInPageListQuestion(question) {
     const q = (question || "").toLowerCase();
-    const catalogWord = new RegExp(`\\b${CATALOG_PRODUCT_WORDS}\\b`);
     return (
       /\b(featured|homepage|home\s*page|main\s*page)\b/.test(q) ||
-      new RegExp(
-        `\\b(list|show|give\\s+me|what\\s+are|share)\\b[\\s\\S]{0,50}\\b${CATALOG_PRODUCT_WORDS}\\b`
-      ).test(q) ||
+      /\b(list|show|give\s+me|what\s+are|share)\b[\s\S]{0,50}\b(products?|items?|options?|styles?|lashes?)\b/.test(
+        q
+      ) ||
       (/\b(urls?|links?)\b/.test(q) &&
-        /\b\d{1,2}(?:-\d{1,2})?mm\b/.test(q) &&
-        /\b(lash(?:es)?|product)\b/.test(q)) ||
-      new RegExp(
-        `\\b(all|every|each)\\b[\\s\\S]{0,40}\\b${CATALOG_PRODUCT_WORDS}\\b`
-      ).test(q) ||
-      new RegExp(
-        `\\b${CATALOG_PRODUCT_WORDS}\\b[\\s\\S]{0,40}\\b(price|prices|cost|pricing)\\b`
-      ).test(q) ||
+        /\b\d{1,2}\s*mm\b/.test(q) &&
+        /\b(lash|lashes|product)\b/.test(q)) ||
+      /\b(all|every|each)\b[\s\S]{0,40}\b(products?|items?|lashes?)\b/.test(q) ||
+      /\b(products?|items?|lashes?)\b[\s\S]{0,40}\b(price|prices|cost|pricing)\b/.test(
+        q
+      ) ||
       /\bwhat(?:'s| is)\s+on\s+(?:the\s+|your\s+)?(?:homepage|home\s*page|main\s*page)\b/.test(
         q
       ) ||
-      (/\b\d{1,2}(?:-\d{1,2})?mm\b/.test(q) &&
-        new RegExp(
-          `\\b(options?|styles?|products?|lash(?:es)?|share|more)\\b`
-        ).test(q)) ||
-      hasSizedCatalogIntent(q)
+      (/\b\d{1,2}\s*mm\b/.test(q) &&
+        /\b(options?|styles?|products?|lashes?|share|more)\b/.test(q))
     );
-  }
-
-  escapeHtml(text) {
-    return String(text || "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
-
-  titleFromUrl(url) {
-    if (!url) return "";
-    try {
-      const segment = new URL(url).pathname.split("/").filter(Boolean).pop();
-      return (segment || "")
-        .replace(/[-_]+/g, " ")
-        .replace(/\b\w/g, (c) => c.toUpperCase());
-    } catch {
-      return "";
-    }
-  }
-
-  extractCatalogProductsFromMatches(matches, sizes = []) {
-    const products = new Map();
-    const sizeFiltered = filterMatchesBySizes(matches, sizes);
-
-    for (const match of sizeFiltered) {
-      const payload = match.payload || {};
-      const url = (payload.url || "").trim();
-      const title = (payload.title || "").trim();
-      const text = payload.text || payload.pageContent || "";
-
-      if (!url && !title) continue;
-
-      const hay = `${title} ${text} ${url}`.toLowerCase();
-      const hasSizeMarker =
-        sizes.length === 0 ||
-        sizes.some((s) => {
-          const compact = s.replace(/\s/g, "").toLowerCase();
-          const num = compact.replace(/mm$/i, "");
-          return (
-            hay.includes(compact) ||
-            hay.includes(`(${compact})`) ||
-            hay.includes(`${num} mm`)
-          );
-        });
-
-      const isLikelyProduct =
-        /\/products?\//i.test(url) ||
-        /\b(lash(?:es)?)\b/i.test(title) ||
-        /\b(lash(?:es)?)\b/i.test(text.slice(0, 800)) ||
-        /\(\d{1,2}mm\)/i.test(title);
-
-      if (!isLikelyProduct && !hasSizeMarker) continue;
-      if (sizes.length > 0 && !hasSizeMarker) continue;
-
-      const name = title || this.titleFromUrl(url);
-      if (!name || name.length < 4) continue;
-
-      const priceMatches = text.match(/\$\s*[\d,]+(?:\.\d{2})?/g);
-      const price = priceMatches
-        ? priceMatches[0].replace(/\s/g, "")
-        : null;
-
-      const key = url || name.toLowerCase();
-      const existing = products.get(key);
-      if (!existing || (price && !existing.price)) {
-        products.set(key, { name, price, url });
-      }
-    }
-
-    return Array.from(products.values()).sort((a, b) =>
-      a.name.localeCompare(b.name)
-    );
-  }
-
-  formatSizedCatalogAnswer(products, companyName, sizes = []) {
-    const sizeLabel =
-      sizes && sizes.length > 0 ? sizes[0].replace(/\s/g, "") : "";
-    const intro = sizeLabel
-      ? `Here are all the ${sizeLabel} lash options from ${companyName}:`
-      : `Here are all the matching lash options from ${companyName}:`;
-
-    const items = products
-      .map((p) => {
-        const label = this.escapeHtml(p.name);
-        const pricePart = p.price ? ` – ${this.escapeHtml(p.price)}` : "";
-        if (p.url) {
-          const href = this.escapeHtml(p.url);
-          return `<li><a href="${href}" target="_blank" style="color:#007bff; text-decoration:underline;">${label}</a>${pricePart}</li>`;
-        }
-        return `<li>${label}${pricePart}</li>`;
-      })
-      .join("\n");
-
-    return `<p>${this.escapeHtml(intro)}</p>\n<ul>\n${items}\n</ul>`;
   }
 
   isExplicitPageLinksQuestion(question) {
@@ -775,7 +664,6 @@ class QuestionAnsweringSystem {
   async trySpecializedRetrieval({
     subIntent,
     question,
-    normalizedQuestion,
     keywordSource,
     collectionName,
     userIdString,
@@ -785,21 +673,14 @@ class QuestionAnsweringSystem {
     getQuestionEmbedding,
     wantsProductLinks = false,
     catalogKeywords = null,
-    hasSizeFilter = false,
-    sizeTokens = [],
   }) {
     const maxSemantic = this.getMaxSemanticScore(semanticMatches);
     const hasGoodSemantic = maxSemantic >= 0.32;
-    const requestedCount = this.extractRequestedCount(
-      normalizedQuestion || question,
-      requestedTopK
-    );
-    const listCheckQuery = normalizedQuestion || question;
+    const requestedCount = this.extractRequestedCount(question, requestedTopK);
 
     if (subIntent === "IN_PAGE_LIST") {
       if (
-        !hasSizeFilter &&
-        !this.isExplicitInPageListQuestion(listCheckQuery) &&
+        !this.isExplicitInPageListQuestion(question) &&
         !wantsProductLinks
       ) {
         console.log(
@@ -824,11 +705,7 @@ class QuestionAnsweringSystem {
         keywordPoints
       );
 
-      if (hasSizeFilter && sizeTokens.length > 0) {
-        mergedMatches = filterMatchesBySizes(mergedMatches, sizeTokens);
-      }
-
-      if (/\b(homepage|home\s*page|main\s*page)\b/i.test(listCheckQuery)) {
+      if (/\b(homepage|home\s*page|main\s*page)\b/i.test(question)) {
         const homepageMatches = mergedMatches.filter((m) =>
           this.isHomepageUrl(m.payload?.url)
         );
@@ -842,7 +719,6 @@ class QuestionAnsweringSystem {
         keywordPoints
       );
       if (
-        !hasSizeFilter &&
         !hasGoodSemantic &&
         structuralHits < 2 &&
         mergedMatches.length < 2
@@ -853,25 +729,12 @@ class QuestionAnsweringSystem {
         return null;
       }
 
-      if (hasSizeFilter && mergedMatches.length === 0) {
-        console.log(
-          "[QueryController] IN_PAGE_LIST skipped: no size-filtered catalog matches"
-        );
-        return null;
-      }
-
-      const sizeLabel =
-        sizeTokens?.length > 0 ? sizeTokens[0].replace(/\s/g, "") : "";
-      const listLead = sizeLabel
-        ? `The user wants a complete list of **${sizeLabel}** lash/product options from ${companyName}.`
-        : `The user wants a complete list of items from ${companyName}'s website.`;
-
       const contextBlocks = this.buildInPageListContext(mergedMatches);
       return {
-        context: `${listLead} Use ONLY the content below. List **EVERY** matching item with name, price (if shown), and link. Do not pick one "best" option. Do not skip items. Do not say information is unavailable if it appears below.\n\n${contextBlocks}`,
+        context: `The user wants a complete list of items from ${companyName}'s website. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below.\n\n${contextBlocks}`,
         matches: mergedMatches,
         responseMode: "list",
-        requestedCount: Math.max(requestedCount, 20),
+        requestedCount,
       };
     }
 
@@ -1239,20 +1102,15 @@ class QuestionAnsweringSystem {
       requestedCount = 5,
       userLanguage,
       wantsProductUrls = false,
-      catalogList = false,
     } = answerOptions;
 
     const effectiveMode =
       wantsProductUrls && responseMode === "brief" ? "list" : responseMode;
-    const useCatalogListPrompt =
-      catalogList || effectiveMode === "list";
 
     // Build dynamic system prompt if websiteData is available, otherwise use fallback
     let systemPrompt;
     if (websiteData && (organisation || websiteData.company_name)) {
-      systemPrompt = this.buildDynamicSystemPrompt(websiteData, organisation, {
-        catalogList: useCatalogListPrompt,
-      });
+      systemPrompt = this.buildDynamicSystemPrompt(websiteData, organisation);
     } else {
       // Fallback to a simpler prompt if websiteData is not available
       systemPrompt = `You are a customer support representative for ${organisation || "the company"}.
@@ -1846,16 +1704,11 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       const subIntent = routing.subIntent || null;
       let effectiveSubIntent = subIntent;
-      const catalogSizes =
-        queryNorm.sizes?.length > 0 ? queryNorm.sizes : currentSizes || [];
-      const hasSizeFilter = hasSizedCatalogIntent(
-        normalizedQuestion,
-        catalogSizes
-      );
+      const hasSizeFilter =
+        (queryNorm.sizes?.length > 0 || currentSizes?.length > 0) &&
+        /\b(lash|lashes|product|style|collection)\b/i.test(normalizedQuestion);
 
-      if (hasSizeFilter) {
-        effectiveSubIntent = "IN_PAGE_LIST";
-      } else if (wantsProductLinks && !effectiveSubIntent) {
+      if (wantsProductLinks && !effectiveSubIntent) {
         effectiveSubIntent = /\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(retrievalQuery)
           ? "IN_PAGE_LIST"
           : "PAGE_LINKS";
@@ -1865,12 +1718,16 @@ Keep responses short, direct, friendly, and professional. Only use information e
         !effectiveSubIntent
       ) {
         effectiveSubIntent = "IN_PAGE_LIST";
+      } else if (hasSizeFilter && !effectiveSubIntent) {
+        effectiveSubIntent = "IN_PAGE_LIST";
       }
 
       const keywordSource = routing.rewrittenQuery || retrievalQuery;
       const catalogKeywords = this.buildCatalogKeywords(keywordSource, {
         ...queryNorm,
-        sizes: catalogSizes,
+        sizes: queryNorm.sizes?.length
+          ? queryNorm.sizes
+          : currentSizes || [],
       });
 
       let questionEmbedding = null;
@@ -1927,40 +1784,10 @@ Keep responses short, direct, friendly, and professional. Only use information e
         );
       }
 
-      if (hasSizeFilter && catalogSizes.length > 0) {
-        queryResponse = filterMatchesBySizes(queryResponse, catalogSizes);
-      }
-
-      if (hasSizeFilter) {
-        const catalogProducts = this.extractCatalogProductsFromMatches(
-          queryResponse,
-          catalogSizes
-        );
-        if (catalogProducts.length >= 2) {
-          console.log(
-            `[QueryController] Sized catalog: returning ${catalogProducts.length} products (deterministic list)`
-          );
-          return {
-            success: true,
-            answer: this.formatSizedCatalogAnswer(
-              catalogProducts,
-              companyName,
-              catalogSizes
-            ),
-            sources: catalogProducts
-              .filter((p) => p.url)
-              .map((p) => ({ type: null, title: p.name, url: p.url })),
-            conversationId,
-            isAgentRequest: false,
-          };
-        }
-      }
-
       if (effectiveSubIntent) {
         const specialized = await this.trySpecializedRetrieval({
           subIntent: effectiveSubIntent,
           question,
-          normalizedQuestion,
           keywordSource,
           collectionName,
           userIdString,
@@ -1970,8 +1797,6 @@ Keep responses short, direct, friendly, and professional. Only use information e
           getQuestionEmbedding,
           wantsProductLinks,
           catalogKeywords,
-          hasSizeFilter,
-          sizeTokens: catalogSizes,
         });
 
         if (specialized) {
@@ -1986,7 +1811,6 @@ Keep responses short, direct, friendly, and professional. Only use information e
                 responseMode: specialized.responseMode,
                 requestedCount: specialized.requestedCount,
                 wantsProductUrls: wantsProductLinks,
-                catalogList: true,
                 ...langOpts,
               }
             );
@@ -2201,6 +2025,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       } else {
         // Get Context and Generate Answer via LLM
+        const context = this.getRelevantContext(relevantMatches);
         const wantsUrls = wantsProductLinks || isProductLinkRequest(question);
         const listFallback =
           wantsUrls ||
@@ -2211,31 +2036,22 @@ Keep responses short, direct, friendly, and professional. Only use information e
           effectiveSubIntent === "CONTACT_INFO" &&
           this.isPrimarilyContactQuestion(question);
         const requestedCount = this.extractRequestedCount(
-          normalizedQuestion,
+          question,
           requestedTopK
         );
-
-        const semanticContext = hasSizeFilter
-          ? this.buildInPageListContext(
-              filterMatchesBySizes(relevantMatches, catalogSizes)
-            )
-          : this.getRelevantContext(relevantMatches);
 
         const { answer: generatedAnswer, usage: llmUsage } =
           await this.generateAnswer(
             question,
-            semanticContext,
+            context,
             chatHistory,
             companyName,
             websiteData,
             listFallback
               ? {
                   responseMode: "list",
-                  requestedCount: hasSizeFilter
-                    ? Math.max(requestedCount, 20)
-                    : requestedCount,
+                  requestedCount,
                   wantsProductUrls: wantsUrls,
-                  catalogList: true,
                   ...langOpts,
                 }
               : contactFallback

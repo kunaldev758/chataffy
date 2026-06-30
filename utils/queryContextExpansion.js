@@ -44,7 +44,7 @@ function isEcommerceCatalogQuery(question) {
   return (
     isProductLinkRequest(question) ||
     /\b\d{1,2}(?:-\d{1,2})?mm\b/.test(q) ||
-    /\b(lash(?:es)?|collection|catalog|products?|styles?|variants?)\b/.test(q)
+    /\b(lashes?|lash|collection|catalog|products?|styles?|variants?)\b/.test(q)
   );
 }
 
