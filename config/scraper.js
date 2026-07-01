@@ -32,11 +32,22 @@ function extractProxyHost(proxyUrl) {
   return match ? match[1] : null;
 }
 
+const proxyEnabled = proxies.length > 0;
+const proxyTrainingOnly =
+  process.env.SCRAPE_PROXY_TRAINING_ONLY !== "false";
+const requestDelayMs = Number(process.env.SCRAPE_REQUEST_DELAY_MS || 100);
+const discoveryDelayMs = Number(process.env.SCRAPE_DISCOVERY_DELAY_MS ?? 0);
+
 if (proxies.length > 0) {
   const hosts = proxies.map(extractProxyHost).filter(Boolean);
   console.log(
     `[scraper] Proxy rotation enabled: ${proxies.length} proxy/proxies — IPs: ${hosts.join(", ")}`,
   );
+  if (proxyTrainingOnly) {
+    console.log(
+      "[scraper] Proxy used for page training only; discovery/CSS/logo use direct connection (faster)",
+    );
+  }
 } else {
   console.log(
     "[scraper] Proxy rotation disabled (set SCRAPE_PROXIES in .env to enable)",
@@ -46,11 +57,14 @@ if (proxies.length > 0) {
 module.exports = {
   extractProxyHost,
   proxies,
-  proxyEnabled: proxies.length > 0,
+  proxyEnabled,
+  /** When true, only scrapeWebpage (training) uses proxies; fetchUrl goes direct */
+  proxyTrainingOnly,
   requestsPerProxy: Number(process.env.SCRAPE_REQUESTS_PER_PROXY || 100),
-  maxRetries: Number(process.env.SCRAPE_MAX_RETRIES || 2),
-  requestDelayMs: Number(process.env.SCRAPE_REQUEST_DELAY_MS || 300),
-  /** When true, retry without proxy after all proxy attempts fail */
+  maxRetries: Number(process.env.SCRAPE_MAX_RETRIES || 1),
+  requestDelayMs,
+  discoveryDelayMs,
+  /** When true, retry without proxy after all proxy attempts fail (training only) */
   proxyFallbackDirect: process.env.SCRAPE_PROXY_FALLBACK_DIRECT !== "false",
   defaultTimeout: Number(process.env.SCRAPE_TIMEOUT_MS || 30000),
   maxContentLength: 50 * 1024 * 1024,

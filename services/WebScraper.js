@@ -117,19 +117,21 @@ class WebScraper {
     this.rotationHandler = config.proxyEnabled
       ? new SequentialRotation(config.proxies, config.requestsPerProxy)
       : null;
-    this.lastRequestAt = 0;
-    this._requestLock = Promise.resolve();
+    this._agentCache = new Map();
+    this._lastTrainingRequestAt = 0;
+    this._lastDiscoveryRequestAt = 0;
+    /** Lock only proxy rotation + proxied training requests (not direct discovery) */
+    this._proxyLock = Promise.resolve();
   }
 
   sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  /** Serialize outbound requests so proxy rotation state is not corrupted by parallel calls */
-  async withRequestLock(fn) {
-    const prev = this._requestLock;
+  async withProxyLock(fn) {
+    const prev = this._proxyLock;
     let release;
-    this._requestLock = new Promise((resolve) => {
+    this._proxyLock = new Promise((resolve) => {
       release = resolve;
     });
     await prev;
@@ -140,20 +142,38 @@ class WebScraper {
     }
   }
 
-  async throttle() {
-    if (!config.requestDelayMs) return;
-    const elapsed = Date.now() - this.lastRequestAt;
-    if (elapsed < config.requestDelayMs) {
-      await this.sleep(config.requestDelayMs - elapsed);
+  async throttle(kind = "training") {
+    const delayMs =
+      kind === "discovery" ? config.discoveryDelayMs : config.requestDelayMs;
+    if (!delayMs) return;
+
+    const lastAt =
+      kind === "discovery"
+        ? this._lastDiscoveryRequestAt
+        : this._lastTrainingRequestAt;
+    const elapsed = Date.now() - lastAt;
+    if (elapsed < delayMs) {
+      await this.sleep(delayMs - elapsed);
     }
-    this.lastRequestAt = Date.now();
+    if (kind === "discovery") {
+      this._lastDiscoveryRequestAt = Date.now();
+    } else {
+      this._lastTrainingRequestAt = Date.now();
+    }
   }
 
-  buildAgents(proxyUrl) {
+  getCachedAgents(proxyUrl) {
     if (!proxyUrl) return {};
+    if (!this._agentCache.has(proxyUrl)) {
+      this._agentCache.set(proxyUrl, {
+        httpsAgent: new HttpsProxyAgent(proxyUrl),
+        httpAgent: new HttpProxyAgent(proxyUrl),
+      });
+    }
+    const cached = this._agentCache.get(proxyUrl);
     return {
-      httpsAgent: new HttpsProxyAgent(proxyUrl),
-      httpAgent: new HttpProxyAgent(proxyUrl),
+      httpsAgent: cached.httpsAgent,
+      httpAgent: cached.httpAgent,
       proxy: false,
     };
   }
@@ -173,7 +193,7 @@ class WebScraper {
       validateStatus:
         options.validateStatus || ((status) => status >= 200 && status < 300),
       headers,
-      ...this.buildAgents(proxyUrl),
+      ...this.getCachedAgents(proxyUrl),
     };
   }
 
@@ -189,7 +209,6 @@ class WebScraper {
     );
   }
 
-  /** Status codes that should trigger proxy retry (not returned as success) */
   isRetryableHttpStatus(status) {
     return status === 407 || status === 403 || status === 429 || status >= 400;
   }
@@ -210,8 +229,8 @@ class WebScraper {
     }
   }
 
-  async performRequest(url, options = {}, proxyUrl = null) {
-    await this.throttle();
+  async performRequest(url, options = {}, proxyUrl = null, throttleKind = "training") {
+    await this.throttle(throttleKind);
     const requestConfig = this.buildRequestConfig(url, options, proxyUrl);
     let response = await axios.get(url, requestConfig);
 
@@ -245,26 +264,34 @@ class WebScraper {
     return response;
   }
 
-  async performRequestDirect(url, options = {}) {
-    return this.performRequest(url, options, null);
+  shouldUseProxyForFetch(options = {}) {
+    if (options.useProxy === true) return true;
+    if (options.useProxy === false) return false;
+    if (config.proxyTrainingOnly) return false;
+    return config.proxyEnabled;
   }
 
   /**
-   * Generic proxied GET — returns axios-shaped { status, data, headers }.
-   * Used for sitemap discovery, robots.txt, CSS, logos, etc.
+   * Discovery, sitemap, CSS, logo — direct by default (fast, parallel-safe).
+   * Set options.useProxy=true or SCRAPE_PROXY_TRAINING_ONLY=false to proxy these too.
    */
   async fetchUrl(url, options = {}) {
-    const maxRetries =
-      options.maxRetries ??
-      (config.proxyEnabled ? config.maxRetries : 0);
+    const useProxy = this.shouldUseProxyForFetch(options);
 
-    if (!config.proxyEnabled) {
-      const response = await this.withRequestLock(() =>
-        this.performRequestDirect(url, options),
+    if (!useProxy) {
+      const response = await this.performRequest(
+        url,
+        options,
+        null,
+        "discovery",
       );
+      if (this.isRetryableHttpStatus(response.status)) {
+        throw new Error(`HTTP ${response.status} for ${url}`);
+      }
       return response;
     }
 
+    const maxRetries = options.maxRetries ?? config.maxRetries;
     let lastError = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -273,8 +300,8 @@ class WebScraper {
       const proxyLabel = formatProxyLabel(proxySelection, proxyUrl);
 
       try {
-        const response = await this.withRequestLock(() =>
-          this.performRequest(url, options, proxyUrl),
+        const response = await this.withProxyLock(() =>
+          this.performRequest(url, options, proxyUrl, "discovery"),
         );
 
         if (this.isRetryableHttpStatus(response.status)) {
@@ -301,31 +328,27 @@ class WebScraper {
     }
 
     if (config.proxyFallbackDirect) {
-      try {
-        console.log(`[WebScraper] fetch fallback direct (no proxy) | ${url}`);
-        const response = await this.withRequestLock(() =>
-          this.performRequestDirect(url, options),
+      console.log(`[WebScraper] fetch fallback direct (no proxy) | ${url}`);
+      const response = await this.performRequest(
+        url,
+        options,
+        null,
+        "discovery",
+      );
+      if (!this.isRetryableHttpStatus(response.status)) {
+        console.log(
+          `[WebScraper] fetch OK | direct (no proxy) | HTTP ${response.status} | ${url}`,
         );
-        if (!this.isRetryableHttpStatus(response.status)) {
-          console.log(
-            `[WebScraper] fetch OK | direct (no proxy) | HTTP ${response.status} | ${url}`,
-          );
-          return response;
-        }
-        throw new Error(`HTTP ${response.status} for ${url}`);
-      } catch (directErr) {
-        console.warn(
-          `[WebScraper] fetch FAIL | direct fallback | ${url} | ${directErr.message}`,
-        );
-        throw directErr;
+        return response;
       }
+      throw new Error(`HTTP ${response.status} for ${url}`);
     }
 
     throw lastError || new Error(`Failed to fetch ${url}`);
   }
 
   /**
-   * Fetch HTML for training — retries with proxy rotation, returns rawHtml.
+   * Page training — uses proxy rotation when SCRAPE_PROXIES is set.
    */
   async scrapeWebpage(url, options = {}) {
     const maxRetries = options.maxRetries ?? config.maxRetries;
@@ -336,7 +359,7 @@ class WebScraper {
       const startTime = Date.now();
       const proxyLabel = formatProxyLabel(proxySelection, proxyUrl);
 
-      const response = await this.withRequestLock(() =>
+      const doRequest = () =>
         this.performRequest(
           url,
           {
@@ -346,8 +369,12 @@ class WebScraper {
             useBrowserHeaders: true,
           },
           proxyUrl,
-        ),
-      );
+          "training",
+        );
+
+      const response = proxyUrl
+        ? await this.withProxyLock(doRequest)
+        : await doRequest();
 
       this.assertAcceptableResponse(response, url);
 
