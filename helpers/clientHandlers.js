@@ -14,8 +14,18 @@ const HumanAgent = require("../models/HumanAgent");
 const PlanService = require("../services/PlanService");
 const { agentConnectionTimeouts } = require("./visitorHandlers");
 const { transcriptEmailQueue } = require("../services/jobService");
+const mongoose = require("mongoose");
 
 const stripHtml = (html) => (html || "").replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
+
+function isValidAgentId(agentId) {
+  return (
+    agentId &&
+    agentId !== "undefined" &&
+    agentId !== "null" &&
+    mongoose.Types.ObjectId.isValid(agentId)
+  );
+}
 
 /** Pending agent connection: map stores { timeoutId, requestStartedAt } (legacy: raw timeout id number). */
 function getAgentConnectionEntry(conversationId) {
@@ -135,6 +145,15 @@ const initializeClientEvents = (io, socket) => {
   });
 
   socket.on("get-agent-data", async () => {
+    if (!isValidAgentId(agentId)) {
+      socket.emit("get-agent-data-response", {
+        response: "Invalid or missing agent id",
+        agentData: null,
+        webPagesTrainingStats: null,
+        trainingProgress: null,
+      });
+      return;
+    }
     const agentData = await Agent.findOne({ _id: agentId });
     let webPagesTrainingStats = null;
     let trainingProgress = null;
@@ -173,6 +192,13 @@ const initializeClientEvents = (io, socket) => {
   });
 
   socket.on("get-training-list", async (data) => {
+    if (!isValidAgentId(agentId)) {
+      socket.emit("get-training-list-response", {
+        response: "Invalid or missing agent id",
+        data: [],
+      });
+      return;
+    }
     const { skip, limit, sourcetype, actionType, search } = data;
     let status = actionType;
     let type = sourcetype;
@@ -192,6 +218,7 @@ const initializeClientEvents = (io, socket) => {
   });
 
   socket.on("continue-scrapping-button", async () => {
+    if (!isValidAgentId(agentId)) return;
     const clientData = await Client.findOne({ userId });
     const agentData = await Agent.findOne({ _id: agentId });
     if (
@@ -208,6 +235,13 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("get-open-conversations-list", async (data) => {
     try {
+      if (!isValidAgentId(agentId)) {
+        socket.emit("get-open-conversations-list-response", {
+          status: "success",
+          conversations: [],
+        });
+        return;
+      }
       const conv = await Conversation.find({
         userId: userId,
         agentId: agentId,
@@ -241,6 +275,13 @@ const initializeClientEvents = (io, socket) => {
 
   socket.on("get-close-conversations-list", async (data) => {
     try {
+      if (!isValidAgentId(agentId)) {
+        socket.emit("get-close-conversations-list-response", {
+          status: "success",
+          conversations: [],
+        });
+        return;
+      }
       const conv = await Conversation.find({
         userId: userId,
         agentId: agentId,

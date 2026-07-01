@@ -181,10 +181,17 @@ const getQueryValue = (value) => {
   return value;
 };
 
+/** Query params often arrive as the literal strings "undefined" / "null". */
+const normalizeOptionalId = (value) => {
+  const v = getQueryValue(value);
+  if (!v || v === "undefined" || v === "null") return undefined;
+  return v;
+};
+
 async function resolveHumanAgentForSocket(decoded, humanAgentIdFromQuery) {
   const queryId = getQueryValue(humanAgentIdFromQuery);
 
-  if (queryId && queryId !== "undefined") {
+  if (queryId && queryId !== "undefined" && queryId !== "null") {
     const fromQuery = await HumanAgent.findOne({
       _id: queryId,
       isDeleted: { $ne: true },
@@ -214,8 +221,8 @@ async function resolveHumanAgentForSocket(decoded, humanAgentIdFromQuery) {
 }
 
 async function findAgentIdForUser(userId, explicitAgentId) {
-  const agentId = getQueryValue(explicitAgentId);
-  if (agentId && agentId !== "undefined") return agentId;
+  const agentId = normalizeOptionalId(explicitAgentId);
+  if (agentId) return agentId;
 
   const firstAgent = await Agent.findOne({
     userId,
@@ -265,8 +272,8 @@ const myMiddleware = async (socket, next) => {
     const visitorId = getQueryValue(query.visitorId);
     const widgetId = getQueryValue(query.widgetId);
     const widgetAuthToken = getQueryValue(query.widgetAuthToken);
-    const agentId = getQueryValue(query.agentId);
-    const humanAgentId = getQueryValue(query.humanAgentId);
+    const agentId = normalizeOptionalId(query.agentId);
+    const humanAgentId = normalizeOptionalId(query.humanAgentId);
 
     const authToken = typeof token === "string" ? token.trim() : "";
 
@@ -297,9 +304,12 @@ const myMiddleware = async (socket, next) => {
         socket.userId = humanAgent.userId;
         socket.type = "human-agent";
         socket.humanAgentId = humanAgent._id.toString();
-        socket.agentId = agentId || undefined;
+        socket.agentId = agentId;
         if (!socket.agentId && humanAgent.assignedAgents?.length > 0) {
           socket.agentId = humanAgent.assignedAgents[0].toString();
+        }
+        if (!socket.agentId) {
+          socket.agentId = await findAgentIdForUser(socket.userId, agentId);
         }
         socket.authSession = { portal: "agent", token: authToken };
       } else {
@@ -319,9 +329,12 @@ const myMiddleware = async (socket, next) => {
 
         if (humanAgent && humanAgent.isClient) {
           socket.humanAgentId = humanAgent._id.toString();
-          socket.agentId = agentId || undefined;
+          socket.agentId = agentId;
           if (!socket.agentId && humanAgent.assignedAgents?.length > 0) {
             socket.agentId = humanAgent.assignedAgents[0].toString();
+          }
+          if (!socket.agentId) {
+            socket.agentId = await findAgentIdForUser(socket.userId, agentId);
           }
         } else {
           socket.humanAgentId = undefined;
@@ -337,7 +350,10 @@ const myMiddleware = async (socket, next) => {
 
       socket.userId = widget.userId;
       socket.type = "visitor";
-      socket.agentId = agentId || widget.agentId;
+      socket.agentId =
+        agentId ||
+        widget.agentId?.toString?.() ||
+        widget.agentId;
       socket.humanAgentId = humanAgentId;
 
       if (visitorId !== undefined && visitorId !== "undefined") {

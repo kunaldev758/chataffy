@@ -6,15 +6,14 @@ const Url = require("../models/Url.js");
 const WebsiteData = require("../models/WebsiteData.js");
 const batchTrainingService = require("./BatchTrainingService.js");
 const appEvents = require("../events.js");
-const axios = require("axios");
 const cheerio = require("cheerio");
+const webScraper = require("./WebScraper.js");
 const urlModule = require("url");
 const TurndownService = require("turndown");
 const QdrantVectorStoreManager = require("./QdrantService");
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
 const {
   isScrapableWebUrl,
-  isHtmlContentType,
 } = require("../utils/webUrlUtils.js");
 const { detectWebsiteLanguage } = require("../utils/websiteLanguage");
 
@@ -577,8 +576,6 @@ new Worker(
       for (let i = 0; i < urls.length; i++) {
         const url = urls[i];
         try {
-          console.log("Processing URL :", url);
-
           if (!isScrapableWebUrl(url)) {
             console.log(`Skipping non-HTML URL: ${url}`);
             await markWebUrlScrapeFailed({
@@ -602,41 +599,9 @@ new Worker(
             lastProgressEmitTime = now;
           }
 
-          const response = await axios.get(url, {
-            timeout: 30000, // 30 second timeout
-            maxContentLength: 50 * 1024 * 1024, // 50MB max
-            headers: {
-              "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
-            },
+          const { rawHtml: sourceCode } = await webScraper.scrapeWebpage(url, {
+            maxRetries: 2,
           });
-
-          const contentType = response.headers?.["content-type"] || "";
-          if (!isHtmlContentType(contentType)) {
-            console.log(
-              `Skipping non-HTML response for ${url}: ${contentType || "unknown"}`,
-            );
-            await markWebUrlScrapeFailed({
-              url,
-              userId,
-              agentId,
-              TrainingModel,
-              error: NON_HTML_SKIP_ERROR,
-            });
-            continue;
-          }
-
-          const sourceCode = response?.data;
-
-          if (typeof sourceCode !== "string") {
-            await markWebUrlScrapeFailed({
-              url,
-              userId,
-              agentId,
-              TrainingModel,
-              error: "Response is not HTML text content",
-            });
-            continue;
-          }
 
           const processResult = await processWebPage(
             url,
@@ -1362,39 +1327,13 @@ new Worker(
             );
           }
 
-          const response = await axios.get(url, {
-            timeout: 30000,
-            maxContentLength: 50 * 1024 * 1024,
-            headers: {
-              "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
-            },
+          const { rawHtml } = await webScraper.scrapeWebpage(url, {
+            maxRetries: 2,
           });
-
-          const contentType = response.headers?.["content-type"] || "";
-          if (!isHtmlContentType(contentType)) {
-            console.log(
-              `[retrainTrainingData] Skipping non-HTML response for ${url}: ${contentType || "unknown"}`,
-            );
-            await markEntryFailedAndContinue({
-              entry,
-              prevStatus,
-              error: NON_HTML_SKIP_ERROR,
-            });
-            continue;
-          }
-
-          if (typeof response?.data !== "string") {
-            await markEntryFailedAndContinue({
-              entry,
-              prevStatus,
-              error: "Response is not HTML text content",
-            });
-            continue;
-          }
 
           const processResult = await processWebPage(
             url,
-            response.data,
+            rawHtml,
             footerCache,
           );
 
