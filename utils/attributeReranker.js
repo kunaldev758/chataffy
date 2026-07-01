@@ -90,7 +90,9 @@ function urlBonus(url, attributes, subIntent) {
   }
 
   if (
-    (flags?.isCatalogQuery || flags?.wantsProductLinks || subIntent === "IN_PAGE_LIST") &&
+    (flags?.isCatalogQuery ||
+      flags?.wantsProductLinks ||
+      subIntent === "IN_PAGE_LIST") &&
     /\/product|\/collections?\/|\/shop|\/catalog/i.test(u)
   ) {
     bonus += 0.08;
@@ -124,6 +126,41 @@ function typePenalty(text, url, attributes, subIntent) {
   }
 
   return 0;
+}
+
+/**
+ * True when chunk text/title/url mentions a requested size (incl. ranges like 16-18mm).
+ */
+function matchContainsQuerySize(match, querySizes) {
+  if (!querySizes?.length) return true;
+
+  const docSizes = payloadSizes(match);
+  if (sizeOverlap(querySizes, docSizes) > 0) return true;
+
+  const text = payloadText(match);
+  for (const qs of querySizes) {
+    const norm = normalizeSize(qs);
+    if (!norm) continue;
+    if (text.includes(norm)) return true;
+
+    const num = norm.replace(/mm$/i, "");
+    if (num && new RegExp(`\\b${num}\\s*[-–]?\\s*\\d{0,2}\\s*mm\\b`, "i").test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Keep only chunks matching requested sizes. Falls back to input if filter is empty.
+ */
+function filterMatchesBySizes(matches, querySizes, { strict = false } = {}) {
+  if (!querySizes?.length) return matches || [];
+  const filtered = (matches || []).filter((m) =>
+    matchContainsQuerySize(m, querySizes)
+  );
+  if (filtered.length > 0) return filtered;
+  return strict ? [] : matches || [];
 }
 
 /**
@@ -181,12 +218,11 @@ function logRerankStats(label, before, after, limit = 5) {
   const topBefore = (before || [])
     .slice(0, limit)
     .map((m) => (m.score ?? 0).toFixed(3));
-  const topAfter = after
-    .slice(0, limit)
-    .map((m) => {
-      const bonus = m._rerankBonus != null ? `+${m._rerankBonus.toFixed(3)}` : "";
-      return `${(m.score ?? 0).toFixed(3)}${bonus}`;
-    });
+  const topAfter = after.slice(0, limit).map((m) => {
+    const bonus =
+      m._rerankBonus != null ? `+${m._rerankBonus.toFixed(3)}` : "";
+    return `${(m.score ?? 0).toFixed(3)}${bonus}`;
+  });
 
   console.log(
     `[Rerank] ${label} | top ${limit} before: [${topBefore.join(", ")}] → after: [${topAfter.join(", ")}]`
@@ -196,4 +232,8 @@ function logRerankStats(label, before, after, limit = 5) {
 module.exports = {
   rerankByAttributes,
   logRerankStats,
+  filterMatchesBySizes,
+  matchContainsQuerySize,
+  payloadSizes,
+  sizeOverlap,
 };

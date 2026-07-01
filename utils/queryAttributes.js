@@ -134,8 +134,27 @@ function needsKeywordRetrieval(attributes) {
   );
 }
 
+/**
+ * Explicit sized catalog request, e.g. "give me all 16mm lashes".
+ */
+function isExplicitSizedCatalogQuery(question, queryAttributes) {
+  const sizes = queryAttributes?.sizes || [];
+  if (sizes.length === 0) return false;
+
+  const q = (question || "").toLowerCase();
+  const hasProductWord =
+    /\b(lash|lashes|product|style|collection|catalog)\b/i.test(q);
+  const hasListIntent =
+    /\b(all|every|each|list|show|give\s+me|what\s+are)\b/i.test(q) ||
+    queryAttributes?.subIntent === "IN_PAGE_LIST" ||
+    queryAttributes?.flags?.isCatalogQuery;
+
+  return hasProductWord && hasListIntent;
+}
+
 module.exports = {
   extractQueryAttributes,
   isRagRoute,
   needsKeywordRetrieval,
+  isExplicitSizedCatalogQuery,
 };
