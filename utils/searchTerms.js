@@ -89,6 +89,40 @@ function extractSearchTerms({ text = "", title = "", url = "" } = {}) {
   return Array.from(terms).slice(0, 80);
 }
 
+/**
+ * Structured attributes for Qdrant payload (re-ranking + filtering).
+ * @param {{ text?: string, title?: string, url?: string, source_type?: string }} fields
+ */
+function extractPayloadAttributes({ text = "", title = "", url = "", source_type } = {}) {
+  const combined = `${title} ${url} ${text}`;
+  const sizes = extractSizeTokens(combined).map((s) =>
+    s.replace(/\s/g, "").toLowerCase()
+  );
+
+  const collections = [];
+  if (/\bsuper\s*natural\b/i.test(combined)) {
+    collections.push("Super Natural");
+  }
+
+  const urlLower = (url || "").toLowerCase();
+  let inferredType = source_type || "page";
+  if (/\/products?\/|\/collections?\/|\/shop\b|\/catalog\b/i.test(urlLower)) {
+    inferredType = "product";
+  } else if (
+    /contact|about-us|about\b|footer/i.test(urlLower) ||
+    /footer\s+links/i.test(combined)
+  ) {
+    inferredType = "contact";
+  }
+
+  return {
+    sizes: [...new Set(sizes)],
+    collections: [...new Set(collections)],
+    source_type: inferredType,
+  };
+}
+
 module.exports = {
   extractSearchTerms,
+  extractPayloadAttributes,
 };

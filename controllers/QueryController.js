@@ -10,7 +10,7 @@ const Agent = require("../models/Agent");
 const WebsiteData = require("../models/WebsiteData");
 const HumanAgent = require("../models/HumanAgent");
 const { logOpenAIUsage } = require("../services/UsageTrackingService");
-const { routeQuery, ROUTES, isLiveAgentRequest } = require("../services/QueryRouter");
+const { routeQuery, ROUTES, isLiveAgentRequest, isRagRoute } = require("../services/QueryRouter");
 const {
   expandQueryForRetrieval,
   isProductLinkRequest,
@@ -20,6 +20,14 @@ const {
   normalizeUserQuery,
   buildRetrievalKeywords,
 } = require("../utils/queryNormalization");
+const {
+  extractQueryAttributes,
+  needsKeywordRetrieval,
+} = require("../utils/queryAttributes");
+const {
+  rerankByAttributes,
+  logRerankStats,
+} = require("../utils/attributeReranker");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -563,6 +571,54 @@ class QuestionAnsweringSystem {
     return merged.sort((a, b) => (b.score || 0) - (a.score || 0));
   }
 
+  applyAttributeRerank(matches, queryAttributes, label = "hybrid") {
+    if (!matches?.length || !queryAttributes) return matches || [];
+    const before = matches.slice(0, 8);
+    const reranked = rerankByAttributes(matches, queryAttributes, {
+      subIntent: queryAttributes.subIntent,
+    });
+    logRerankStats(label, before, reranked);
+    return reranked;
+  }
+
+  async runHybridRetrieval({
+    collectionName,
+    userIdString,
+    semanticTopK,
+    catalogKeywords,
+    getQuestionEmbedding,
+    queryAttributes,
+  }) {
+    const runKeyword =
+      needsKeywordRetrieval(queryAttributes) && catalogKeywords?.length > 0;
+
+    const [vectorResults, keywordPoints] = await Promise.all([
+      this.queryQdrant(
+        collectionName,
+        await getQuestionEmbedding(),
+        semanticTopK,
+        userIdString
+      ),
+      runKeyword
+        ? this.structuralFetchByKeywords(
+            collectionName,
+            catalogKeywords,
+            userIdString,
+            250
+          )
+        : Promise.resolve([]),
+    ]);
+
+    if (runKeyword) {
+      console.log(
+        `[QueryController] Hybrid retrieval: ${vectorResults.length} vector + ${keywordPoints.length} keyword hits`
+      );
+    }
+
+    const merged = this.mergeRetrievalResults(vectorResults, keywordPoints);
+    return this.applyAttributeRerank(merged, queryAttributes, "hybrid");
+  }
+
   prioritizeFooterChunks(matches) {
     const footer = [];
     const rest = [];
@@ -673,6 +729,7 @@ class QuestionAnsweringSystem {
     getQuestionEmbedding,
     wantsProductLinks = false,
     catalogKeywords = null,
+    queryAttributes = null,
   }) {
     const maxSemantic = this.getMaxSemanticScore(semanticMatches);
     const hasGoodSemantic = maxSemantic >= 0.32;
@@ -703,6 +760,11 @@ class QuestionAnsweringSystem {
       let mergedMatches = this.mergeRetrievalResults(
         semanticMatches,
         keywordPoints
+      );
+      mergedMatches = this.applyAttributeRerank(
+        mergedMatches,
+        queryAttributes,
+        "IN_PAGE_LIST"
       );
 
       if (/\b(homepage|home\s*page|main\s*page)\b/i.test(question)) {
@@ -764,6 +826,11 @@ class QuestionAnsweringSystem {
         ...footerPoints,
         ...keywordPoints,
       ]);
+      mergedMatches = this.applyAttributeRerank(
+        mergedMatches,
+        queryAttributes,
+        "CONTACT_INFO"
+      );
       mergedMatches = this.prioritizeFooterChunks(mergedMatches);
 
       const hasFooter = footerPoints.length > 0;
@@ -845,9 +912,10 @@ class QuestionAnsweringSystem {
         return null;
       }
 
-      const mergedMatches = this.mergeRetrievalResults(
-        semanticMatches,
-        keywordPoints
+      const mergedMatches = this.applyAttributeRerank(
+        this.mergeRetrievalResults(semanticMatches, keywordPoints),
+        queryAttributes,
+        "PAGE_LINKS"
       );
       if (mergedMatches.length > 0 && wantsProductLinks) {
         const contextBlocks = this.buildInPageListContext(mergedMatches);
@@ -1068,10 +1136,22 @@ class QuestionAnsweringSystem {
         const searchTerms = (p.payload?.search_terms || []).map((t) =>
           String(t).toLowerCase()
         );
+        const payloadSizes = (p.payload?.sizes || []).map((s) =>
+          String(s).toLowerCase()
+        );
+        const payloadCollections = (p.payload?.collections || []).map((c) =>
+          String(c).toLowerCase()
+        );
 
         return keywords.some((k) => {
           const key = k.toLowerCase();
           if (url.includes(key) || title.includes(key) || text.includes(key)) {
+            return true;
+          }
+          if (
+            payloadSizes.some((s) => s.includes(key) || key.includes(s)) ||
+            payloadCollections.some((c) => c.includes(key) || key.includes(c))
+          ) {
             return true;
           }
           return searchTerms.some(
@@ -1603,6 +1683,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       const websiteLanguage = websiteData?.primary_language || "en";
 
+      // --- Light normalization ---
       const queryNorm = normalizeUserQuery(question);
       const normalizedQuestion = queryNorm.normalized;
 
@@ -1612,32 +1693,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         );
       }
 
-      const queryExpansion = expandQueryForRetrieval(
-        normalizedQuestion,
-        chatSession,
-        { sizes: queryNorm.sizes }
-      );
-      const {
-        retrievalQuery,
-        wasExpanded,
-        wantsProductLinks,
-        isCatalogQuery,
-        currentSizes,
-      } = queryExpansion;
-
-      const embeddingQuery = queryNorm.enrichForEmbedding(retrievalQuery);
-
-      if (wasExpanded) {
-        console.log(
-          `[QueryController] Expanded retrieval query: "${retrievalQuery}"`
-        );
-      }
-      if (embeddingQuery !== retrievalQuery) {
-        console.log(
-          `[QueryController] Enriched embedding query: "${embeddingQuery}"`
-        );
-      }
-
+      // --- Route decision (rules → nano router) ---
       const routing = await routeQuery(normalizedQuestion, {
         chatMessages: chatSession,
         websiteLanguage,
@@ -1650,6 +1706,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       const langOpts = { userLanguage: routing.userLanguage };
 
+      // --- Non-RAG short-circuit ---
       if (routing.route === ROUTES.GREETING) {
         const { answer: greetingAnswer, usage: greetingUsage } =
           await this.generateAnswer(
@@ -1702,6 +1759,32 @@ Keep responses short, direct, friendly, and professional. Only use information e
         };
       }
 
+      if (!isRagRoute(routing.route)) {
+        console.warn(
+          `[QueryController] Unknown route "${routing.route}" — falling back to SEMANTIC_RAG`
+        );
+      }
+
+      // --- RAG pipeline: context expansion → entity extraction ---
+      const queryExpansion = expandQueryForRetrieval(
+        normalizedQuestion,
+        chatSession,
+        { sizes: queryNorm.sizes }
+      );
+      const {
+        retrievalQuery,
+        wasExpanded,
+        wantsProductLinks,
+        isCatalogQuery,
+        currentSizes,
+      } = queryExpansion;
+
+      if (wasExpanded) {
+        console.log(
+          `[QueryController] Expanded retrieval query: "${retrievalQuery}"`
+        );
+      }
+
       const subIntent = routing.subIntent || null;
       let effectiveSubIntent = subIntent;
       const hasSizeFilter =
@@ -1722,13 +1805,34 @@ Keep responses short, direct, friendly, and professional. Only use information e
         effectiveSubIntent = "IN_PAGE_LIST";
       }
 
-      const keywordSource = routing.rewrittenQuery || retrievalQuery;
-      const catalogKeywords = this.buildCatalogKeywords(keywordSource, {
-        ...queryNorm,
-        sizes: queryNorm.sizes?.length
-          ? queryNorm.sizes
-          : currentSizes || [],
+      const queryAttributes = extractQueryAttributes({
+        normalizedQuestion,
+        queryNorm,
+        queryExpansion,
+        routing,
+        subIntent: effectiveSubIntent,
       });
+
+      console.log(
+        `[QueryController] Attributes: sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length} flags=${JSON.stringify(queryAttributes.flags)}`
+      );
+
+      const embeddingQuery = queryAttributes.embeddingQuery;
+      if (embeddingQuery !== retrievalQuery) {
+        console.log(
+          `[QueryController] Enriched embedding query: "${embeddingQuery}"`
+        );
+      }
+
+      const catalogKeywords =
+        queryAttributes.keywords.length > 0
+          ? queryAttributes.keywords
+          : this.buildCatalogKeywords(queryAttributes.keywordSource, {
+              ...queryNorm,
+              sizes: queryNorm.sizes?.length
+                ? queryNorm.sizes
+                : currentSizes || [],
+            });
 
       let questionEmbedding = null;
       const getQuestionEmbedding = async () => {
@@ -1764,31 +1868,20 @@ Keep responses short, direct, friendly, and professional. Only use information e
         semanticTopK = Math.max(semanticTopK, 15);
       }
 
-      let queryResponse = await this.queryQdrant(
+      let queryResponse = await this.runHybridRetrieval({
         collectionName,
-        await getQuestionEmbedding(),
+        userIdString,
         semanticTopK,
-        userIdString
-      );
-
-      if (isCatalogQuery || wasExpanded || queryNorm.sizes?.length > 0) {
-        const keywordPoints = await this.structuralFetchByKeywords(
-          collectionName,
-          catalogKeywords,
-          userIdString,
-          250
-        );
-        queryResponse = this.mergeRetrievalResults(
-          queryResponse,
-          keywordPoints
-        );
-      }
+        catalogKeywords,
+        getQuestionEmbedding,
+        queryAttributes,
+      });
 
       if (effectiveSubIntent) {
         const specialized = await this.trySpecializedRetrieval({
           subIntent: effectiveSubIntent,
           question,
-          keywordSource,
+          keywordSource: queryAttributes.keywordSource,
           collectionName,
           userIdString,
           requestedTopK,
@@ -1797,6 +1890,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           getQuestionEmbedding,
           wantsProductLinks,
           catalogKeywords,
+          queryAttributes,
         });
 
         if (specialized) {
