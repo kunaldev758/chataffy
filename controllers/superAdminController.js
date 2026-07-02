@@ -19,6 +19,7 @@ const {
 } = require("../constants/superAdminCookie");
 const User = require("../models/User");
 const ImpersonationSession = require("../models/ImpersonationSession");
+const AiModel = require("../models/AiModel");
 
 // SuperAdmin login
 module.exports.superAdminLogin = async (req, res) => {
@@ -762,3 +763,123 @@ module.exports.directClientLogin = async (req, res) => {
   }
 };
 
+// ================================ AI Models ================================
+module.exports.getAllAiModels = async (req, res) => {
+  try {
+    const aiModels = await AiModel.find({}).lean();
+    res.status(200).json({
+      success: true,
+      data: aiModels,
+    });
+  } catch (error) {
+    console.error("Error fetching ai models:", error);
+    res.status(500).json({ message: "Error fetching ai models" });
+  }
+};
+
+
+module.exports.createAiModel = async (req, res) => {
+  try {
+    const {
+      model,
+      status,
+      inputCost,
+      outputCost,
+      cacheCost,
+      categories,
+    } = req.body;
+
+    const validation = validateAiModel(model, status, inputCost, outputCost, cacheCost, categories);
+    if (!validation.success) {
+      return res.status(400).json({ message: validation.message });
+    }
+
+    const aiModel = await AiModel.create({
+      model,
+      status,
+      inputCost,
+      outputCost,
+      cacheCost,
+      categories,
+    });
+    res.status(200).json({ success: true, data: aiModel });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: "Ai model already exists" });
+    }
+    console.error("Error creating ai model:", error);
+    res.status(500).json({ message: "Error creating ai model" });
+  }
+};
+
+module.exports.updateAiModel = async (req, res) => {
+  try {
+    const { modelId, model, status, inputCost, outputCost, cacheCost, categories } = req.body;
+
+    const validation = validateAiModel(model, status, inputCost, outputCost, cacheCost, categories);
+    if (!validation.success) {
+      return res.status(400).json({ message: validation.message });
+    }
+
+    const updated = await AiModel.findByIdAndUpdate(
+      modelId,
+      { model, status, inputCost, outputCost, cacheCost, categories },
+      { new: true }
+    );
+
+    if (categories?.length && updated) {
+      // For each category this model just claimed as default,
+      // pull it out of defaultFor on every other model
+      await AiModel.updateMany(
+        { _id: { $ne: updated._id } },
+        { $pull: { categories: { $in: categories } } }
+      );
+    }
+
+    res.status(200).json({ success: true, data: updated });
+  } catch (error) {
+    console.error("Error updating ai model:", error);
+    if (error.code === 11000) return res.status(400).json({ message: "Ai model already exists" });
+    res.status(500).json({ message: "Error updating ai model" });
+  }
+};
+
+module.exports.deleteAiModel = async (req, res) => {
+  try {
+    const { modelId } = req.params;
+    await AiModel.findByIdAndUpdate(modelId, { status: "inactive" });
+    res.status(200).json({ success: true, message: "Ai model deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting ai model:", error);
+    res.status(500).json({ message: error.message || "Error deleting ai model" });
+  }
+};
+
+
+function validateAiModel(model, status, inputCost, outputCost, cacheCost, categories) {
+  if(!model || !status || !inputCost || !outputCost || !cacheCost || !categories) {
+    return { success: false, message: "All fields are required" };
+  }
+
+  if(status !== "active" && status !== "inactive") {
+    return { success: false, message: "Status must be active or inactive" };
+  }
+
+  if(inputCost < 0 || outputCost < 0 || cacheCost < 0) {
+    return { success: false, message: "Costs must be greater than 0" };
+  }
+
+  if(categories.length === 0) {
+    return { success: false, message: "Categories must be an array" };
+  }
+
+  if(categories.some((c) => typeof c !== "string")) {
+    return { success: false, message: "Categories must be an array of strings" };
+  }
+
+  if(categories.some((c) => c.length === 0)) {
+    return { success: false, message: "Categories must be an array of non-empty strings" };
+  }
+
+  return { success: true, message: "Validation successful" };
+}
