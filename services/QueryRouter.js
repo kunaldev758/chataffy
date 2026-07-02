@@ -7,13 +7,18 @@ const {
   expandQueryForRetrieval,
 } = require("../utils/queryContextExpansion");
 const { normalizeQueryText } = require("../utils/queryNormalization");
-const { normalizeGreetingInput } = require("./LightweightResponseService");
+const {
+  normalizeGreetingInput,
+  isGibberishOrAccidentalMessage,
+  detectScriptLanguage,
+} = require("./LightweightResponseService");
 
 const ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano";
 
 const ROUTES = {
   GREETING: "GREETING",
   LIVE_AGENT: "LIVE_AGENT",
+  ACCIDENTAL: "ACCIDENTAL",
   STRUCTURAL: "STRUCTURAL",
   SEMANTIC_RAG: "SEMANTIC_RAG",
   HYBRID: "HYBRID",
@@ -248,6 +253,9 @@ function detectFollowUpAcceptance(question, chatMessages) {
 }
 
 function detectUserLanguageFromQuestion(question) {
+  const fromScript = detectScriptLanguage(question);
+  if (fromScript) return fromScript;
+
   const fromText = detectLanguageFromText(question);
   return fromText?.language || "en";
 }
@@ -294,6 +302,18 @@ function applyRuleEngine(question, { chatMessages } = {}) {
         userLanguage,
         confidence: 0.95,
         source: "rules_live_agent",
+      }),
+    };
+  }
+
+  if (isGibberishOrAccidentalMessage(normalizedQuestion)) {
+    return {
+      confident: true,
+      result: buildRouteResult({
+        route: ROUTES.ACCIDENTAL,
+        userLanguage,
+        confidence: 0.95,
+        source: "rules_accidental",
       }),
     };
   }
@@ -439,10 +459,11 @@ async function llmRoute(question, options = {}) {
 Classify the visitor message into exactly one route:
 - GREETING: simple hello/hi with no real question
 - LIVE_AGENT: wants a human agent, representative, or live support
+- ACCIDENTAL: random characters, keyboard mash, or test input with no real meaning
 - HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), homepage product catalog with prices, or contact/social profiles
 - SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
 
-IMPORTANT: Prefer SEMANTIC_RAG for pricing, features, policies, how-to, and general questions even if they contain words like "show" or "list". Only use HYBRID for explicit listing/navigation/contact requests.
+IMPORTANT: Prefer SEMANTIC_RAG for pricing, features, policies, how-to, and general questions even if they contain words like "show" or "list". Only use HYBRID for explicit listing/navigation/contact requests. Real questions in any language (Japanese, Russian, Spanish, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
 
 For HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
 

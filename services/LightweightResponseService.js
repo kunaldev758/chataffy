@@ -200,6 +200,13 @@ function isRepeatedPattern(text) {
   return text.slice(0, mid) === text.slice(mid);
 }
 
+/** True when the message contains real letters from common non-Latin scripts. */
+function hasMeaningfulUnicodeScript(text) {
+  return /[\u3040-\u30FF\u4E00-\u9FFF\u0400-\u04FF\u0900-\u097F\u0600-\u06FF]/u.test(
+    String(text || "")
+  );
+}
+
 /**
  * Detect random typing, keyboard mash, or test input that should not hit RAG/LLM.
  */
@@ -207,7 +214,11 @@ function isGibberishOrAccidentalMessage(question) {
   const raw = String(question || "").trim();
   if (raw.length < 3) return false;
 
-  if (/^[\d\s\W_]+$/.test(raw)) return true;
+  // Japanese, Russian, Hindi, Arabic, etc. are never gibberish by punctuation rules.
+  if (hasMeaningfulUnicodeScript(raw)) return false;
+
+  // Symbols / digits only (Latin punctuation), not real words.
+  if (/^[\d\s!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]+$/u.test(raw)) return true;
   if (/^test(ing)?[!?.]*$/i.test(raw)) return true;
 
   const normalized = raw.toLowerCase();
@@ -321,7 +332,9 @@ module.exports = {
   buildLiveAgentResponse,
   buildAccidentalResponse,
   isGibberishOrAccidentalMessage,
+  hasMeaningfulUnicodeScript,
   isKnownGreetingPhrase,
+  detectScriptLanguage,
   resolveReplyLanguage,
   normalizeGreetingInput,
   languageFromGreetingPhrase,
