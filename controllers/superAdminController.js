@@ -803,6 +803,14 @@ module.exports.createAiModel = async (req, res) => {
       cacheCost,
       categories,
     });
+
+    if (categories?.length) {
+      await AiModel.updateMany(
+        { _id: { $ne: aiModel._id } },
+        { $pull: { categories: { $in: categories } } }
+      );
+    }
+
     res.status(200).json({ success: true, data: aiModel });
   } catch (error) {
     if (error.code === 11000) {
