@@ -19,7 +19,8 @@ const {
 } = require("../constants/superAdminCookie");
 const User = require("../models/User");
 const ImpersonationSession = require("../models/ImpersonationSession");
-const AiModel = require("../models/AiModel");
+const {AiModelsCategory,AiModel} = require("../models/AiModel");
+const { default: mongoose } = require("mongoose");
 
 // SuperAdmin login
 module.exports.superAdminLogin = async (req, res) => {
@@ -873,8 +874,8 @@ function validateAiModel(model, status, inputCost, outputCost, cacheCost, catego
     return { success: false, message: "Categories must be an array" };
   }
 
-  if(categories.some((c) => typeof c !== "string")) {
-    return { success: false, message: "Categories must be an array of strings" };
+  if(categories.some((c) => !mongoose.Types.ObjectId.isValid(c))) {
+    return { success: false, message: "Categories must be an array of valid ObjectIds" };
   }
 
   if(categories.some((c) => c.length === 0)) {
@@ -883,3 +884,87 @@ function validateAiModel(model, status, inputCost, outputCost, cacheCost, catego
 
   return { success: true, message: "Validation successful" };
 }
+
+
+// ===================== AI Model Categories =====================
+module.exports.getAllAiModelCategories = async (req, res) => {
+  try {
+    const categories = await AiModelsCategory.find({}).lean();
+    res.status(200).json({ success: true, data: categories });
+  } catch (error) {
+    console.error("Error fetching ai model categories:", error);
+    res.status(500).json({ message: "Error fetching ai model categories" });
+  }
+};
+
+module.exports.createAiModelCategory = async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || typeof name !== "string" || name.trim().length === 0) {
+      return res.status(400).json({ message: "Category name is required and must be a non-empty string" });
+    }
+
+    const category = await AiModelsCategory.create({ name: name.trim() });
+    res.status(200).json({ success: true, data: category });
+  } catch (error) {
+    console.error("Error creating ai model category:", error);
+    if(error.code === 11000) {
+      return res.status(400).json({ message: "Category with this name already exists" });
+    }
+    res.status(500).json({ message: "Error creating ai model category" });
+  }
+};
+
+module.exports.updateAiModelCategory = async (req, res) => {
+  try {
+    const { categoryId, name } = req.body;
+    if (!name || typeof name !== "string" || name.trim().length === 0) {
+      return res.status(400).json({ message: "Category name is required and must be a non-empty string" });
+    }
+
+    const existingCategory = await AiModelsCategory.findOne({ name: name.trim(), _id: { $ne: categoryId } }).lean();
+    if (existingCategory) {
+      return res.status(400).json({ message: "Another category with this name already exists" });
+    }
+
+    const updatedCategory = await AiModelsCategory.findByIdAndUpdate(
+      categoryId,
+      { name: name.trim() },
+      { new: true }
+    );
+
+    if (!updatedCategory) {
+      return res.status(404).json({ message: "Category not found" });
+    }
+
+    res.status(200).json({ success: true, data: updatedCategory });
+  } catch (error) {
+    console.error("Error updating ai model category:", error);
+    res.status(500).json({ message: "Error updating ai model category" });
+  }
+};
+
+module.exports.deleteAiModelCategory = async (req, res) => {
+  try {
+    const { categoryId } = req.params;
+
+    const category = await AiModelsCategory.findById(categoryId).lean();
+    if (!category) {
+      return res.status(404).json({ message: "Category not found" });
+    }
+
+    // Remove this category from all AiModels that reference it
+    await AiModel.updateMany(
+      { categories: categoryId },
+      { $pull: { categories: categoryId } }
+    );
+
+    // Delete the category
+    await AiModelsCategory.findByIdAndDelete(categoryId);
+
+    res.status(200).json({ success: true, message: "Category deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting ai model category:", error);
+    res.status(500).json({ message: "Error deleting ai model category" });
+  }
+};
