@@ -318,6 +318,47 @@ const initializeVisitorEvents = (io, socket) => {
     }
   });
 
+  socket.on("visitor-reconnect", async ({ conversationId }, callback) => {
+    try {
+      if (!conversationId) {
+        callback?.({ success: false, error: "Missing conversationId" });
+        return;
+      }
+
+      const conversation = await Conversation.findById(conversationId).lean();
+      if (!conversation) {
+        callback?.({ success: false, error: "Conversation not found" });
+        socket.emit("visitor-reconnect-ack", { success: false });
+        return;
+      }
+
+      if (conversation.visitorClosed) {
+        callback?.({ success: false, error: "Conversation closed" });
+        socket.emit("visitor-reconnect-ack", { success: false });
+        socket.emit("visitor-close-chat", { conversationStatus: "close" });
+        return;
+      }
+
+      if (String(conversation.visitor) !== String(visitorId)) {
+        callback?.({ success: false, error: "Unauthorized" });
+        socket.emit("visitor-reconnect-ack", { success: false });
+        return;
+      }
+
+      conversationRoom = `conversation-${conversationId}`;
+      socket.join(conversationRoom);
+
+      socket.emit("visitor-reconnect-ack", {
+        success: true,
+        conversationId,
+      });
+      callback?.({ success: true, conversationId });
+    } catch (error) {
+      console.error("visitor-reconnect error:", error.message);
+      callback?.({ success: false, error: error.message });
+    }
+  });
+
   socket.on("visitor-connect", async ({ widgetToken }) => {
     try {
       const themeSettings = await Widget.findOne({ widgetToken });

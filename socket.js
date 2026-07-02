@@ -13,6 +13,9 @@ const initializeSocketController = (server) => {
       origin: "*",
       methods: ["GET", "POST"],
     },
+    // Keep visitor sockets alive while tabs are backgrounded (< 5 min away timeout is client-side).
+    pingInterval: 25000,
+    pingTimeout: 120000,
   });
 
   // Listen for events from your controllers
