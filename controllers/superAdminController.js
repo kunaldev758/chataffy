@@ -847,7 +847,10 @@ module.exports.updateAiModel = async (req, res) => {
 module.exports.deleteAiModel = async (req, res) => {
   try {
     const { modelId } = req.params;
-    await AiModel.findByIdAndUpdate(modelId, { status: "inactive" });
+    const deletedModel = await AiModel.findByIdAndDelete(modelId);
+    if (!deletedModel) {
+      return res.status(404).json({ message: "Ai model not found" });
+    }
     res.status(200).json({ success: true, message: "Ai model deleted successfully" });
   } catch (error) {
     console.error("Error deleting ai model:", error);
