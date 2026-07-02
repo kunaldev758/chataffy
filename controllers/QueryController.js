@@ -1975,7 +1975,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       const maxScore = queryResponse.length > 0 
         ? Math.max(...queryResponse.map((m) => m.score))
         : 0;
-      const IRRELEVANT_THRESHOLD = 0.3; // If best match is below this, treat as irrelevant
+      const IRRELEVANT_THRESHOLD = 0.2; // If best match is below this, treat as irrelevant
       const isIrrelevant = queryResponse.length > 0 && maxScore < IRRELEVANT_THRESHOLD;
       
       if (isIrrelevant) {
