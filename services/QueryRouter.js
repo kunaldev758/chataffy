@@ -7,6 +7,7 @@ const {
   expandQueryForRetrieval,
 } = require("../utils/queryContextExpansion");
 const { normalizeQueryText } = require("../utils/queryNormalization");
+const { normalizeGreetingInput } = require("./LightweightResponseService");
 
 const ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano";
 
@@ -38,12 +39,24 @@ const GREETINGS = [
   "what's up",
   "hey there",
   "hola",
+  "buenos días",
+  "buenas tardes",
+  "buenas noches",
   "bonjour",
   "ciao",
   "hallo",
+  "guten tag",
+  "guten morgen",
   "namaste",
   "salut",
   "ola",
+  "привет",
+  "здравствуйте",
+  "こんにちは",
+  "こんばんは",
+  "おはよう",
+  "おはようございます",
+  "やあ",
 ];
 
 const LIVE_AGENT_PHRASES = [
@@ -87,14 +100,32 @@ const LIVE_AGENT_PHRASES = [
 const FOLLOW_UP_ACCEPTANCE =
   /^(okay\s+)?(tell\s+me|yes|yeah|yep|sure|go\s+ahead|please\s+do|do\s+it|ok|okay|continue|proceed)[\s!.?]*$/i;
 
+/**
+ * True only when the message is a short greeting with no real question attached.
+ * Avoids classifying "hello, what are your prices?" as a greeting.
+ */
+function isPureGreeting(question) {
+  const raw = (question || "").trim();
+  if (!raw || raw.length > 50) return false;
+  if (/\?/.test(raw)) return false;
+
+  const normalized = normalizeGreetingInput(raw);
+  if (!normalized) return false;
+
+  if (GREETINGS.includes(normalized)) return true;
+
+  const withoutBang = normalized.replace(/!+$/g, "").trim();
+  if (GREETINGS.includes(withoutBang)) return true;
+
+  if (/^h+i+$/i.test(normalized)) return true;
+  if (/^he+y+$/i.test(normalized)) return true;
+  if (/^hell+o+$/i.test(normalized)) return true;
+
+  return false;
+}
+
 function isSimpleGreeting(question) {
-  const normalized = (question || "").toLowerCase().trim();
-  return GREETINGS.some(
-    (greeting) =>
-      normalized === greeting ||
-      normalized.startsWith(`${greeting} `) ||
-      normalized === `${greeting}!`
-  );
+  return isPureGreeting(question);
 }
 
 function isLiveAgentRequest(question) {
@@ -243,7 +274,7 @@ function applyRuleEngine(question, { chatMessages } = {}) {
   const normalizedQuestion = normalizeQueryText(question);
   const userLanguage = detectUserLanguageFromQuestion(normalizedQuestion);
 
-  if (isSimpleGreeting(normalizedQuestion)) {
+  if (isPureGreeting(normalizedQuestion)) {
     return {
       confident: true,
       result: buildRouteResult({
@@ -493,6 +524,7 @@ module.exports = {
   routeQuery,
   classifyStructuralSubIntent,
   isSimpleGreeting,
+  isPureGreeting,
   isLiveAgentRequest,
   formatRecentChatForRouter,
 };

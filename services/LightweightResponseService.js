@@ -1,0 +1,328 @@
+const { normalizeLanguageCode } = require("../utils/websiteLanguage");
+
+const GREETING_LANGUAGE_BY_PHRASE = {
+  hi: "en",
+  hello: "en",
+  hey: "en",
+  greetings: "en",
+  "good morning": "en",
+  "good afternoon": "en",
+  "good evening": "en",
+  "good night": "en",
+  howdy: "en",
+  sup: "en",
+  "what's up": "en",
+  "hey there": "en",
+  hola: "es",
+  "buenos días": "es",
+  "buenas tardes": "es",
+  "buenas noches": "es",
+  bonjour: "fr",
+  salut: "fr",
+  ciao: "it",
+  hallo: "de",
+  "guten tag": "de",
+  "guten morgen": "de",
+  namaste: "hi",
+  ola: "pt",
+  привет: "ru",
+  здравствуйте: "ru",
+  "こんにちは": "ja",
+  "こんばんは": "ja",
+  おはよう: "ja",
+  "おはようございます": "ja",
+  やあ: "ja",
+};
+
+const GREETING_TEMPLATES = {
+  en: (company) =>
+    `<p>Hi! How can I help you with <strong>${company}</strong> today?</p>`,
+  es: (company) =>
+    `<p>¡Hola! ¿En qué puedo ayudarte con <strong>${company}</strong> hoy?</p>`,
+  fr: (company) =>
+    `<p>Bonjour ! Comment puis-je vous aider avec <strong>${company}</strong> aujourd'hui ?</p>`,
+  de: (company) =>
+    `<p>Hallo! Wie kann ich Ihnen heute bei <strong>${company}</strong> helfen?</p>`,
+  it: (company) =>
+    `<p>Ciao! Come posso aiutarti con <strong>${company}</strong> oggi?</p>`,
+  pt: (company) =>
+    `<p>Olá! Como posso ajudá-lo com <strong>${company}</strong> hoje?</p>`,
+  ru: (company) =>
+    `<p>Здравствуйте! Чем могу помочь вам с <strong>${company}</strong> сегодня?</p>`,
+  ja: (company) =>
+    `<p>こんにちは！今日は<strong>${company}</strong>についてどのようにお手伝いできますか？</p>`,
+  hi: (company) =>
+    `<p>नमस्ते! आज मैं <strong>${company}</strong> के बारे में आपकी कैसे मदद कर सकता हूँ?</p>`,
+};
+
+const LIVE_AGENT_TEMPLATES = {
+  en: (company) =>
+    `<p>Of course! I'll connect you with a team member from <strong>${company}</strong> shortly.</p>`,
+  es: (company) =>
+    `<p>¡Por supuesto! En breve le conectaré con un miembro del equipo de <strong>${company}</strong>.</p>`,
+  fr: (company) =>
+    `<p>Bien sûr ! Je vous mets en relation avec un membre de l'équipe <strong>${company}</strong> dans un instant.</p>`,
+  de: (company) =>
+    `<p>Natürlich! Ich verbinde Sie gleich mit einem Teammitglied von <strong>${company}</strong>.</p>`,
+  it: (company) =>
+    `<p>Certo! Ti metterò in contatto con un membro del team di <strong>${company}</strong> a breve.</p>`,
+  pt: (company) =>
+    `<p>Claro! Vou conectá-lo com um membro da equipe <strong>${company}</strong> em breve.</p>`,
+  ru: (company) =>
+    `<p>Конечно! Скоро я соединю вас с сотрудником <strong>${company}</strong>.</p>`,
+  ja: (company) =>
+    `<p>かしこまりました。まもなく<strong>${company}</strong>の担当者におつなぎします。</p>`,
+  hi: (company) =>
+    `<p>बिल्कुल! मैं आपको जल्द ही <strong>${company}</strong> की टीम के सदस्य से जोड़ दूँगा।</p>`,
+};
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function detectScriptLanguage(text) {
+  const sample = String(text || "");
+  if (/[\u0400-\u04FF]/.test(sample)) return "ru";
+  if (/[\u3040-\u30FF\u4E00-\u9FFF]/.test(sample)) return "ja";
+  if (/[\u0900-\u097F]/.test(sample)) return "hi";
+  return null;
+}
+
+function normalizeGreetingInput(question) {
+  let normalized = String(question || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+  normalized = normalized.replace(/^[!?.…,]+|[!?.…,]+$/g, "").trim();
+  return normalized;
+}
+
+function languageFromGreetingPhrase(question) {
+  const normalized = normalizeGreetingInput(question);
+  if (!normalized) return null;
+
+  if (GREETING_LANGUAGE_BY_PHRASE[normalized]) {
+    return GREETING_LANGUAGE_BY_PHRASE[normalized];
+  }
+
+  const withoutBang = normalized.replace(/!+$/g, "").trim();
+  if (GREETING_LANGUAGE_BY_PHRASE[withoutBang]) {
+    return GREETING_LANGUAGE_BY_PHRASE[withoutBang];
+  }
+
+  if (/^h+i+$/i.test(normalized)) return "en";
+  if (/^he+y+$/i.test(normalized)) return "en";
+  if (/^hell+o+$/i.test(normalized)) return "en";
+
+  return null;
+}
+
+/**
+ * True when we can confidently map the greeting itself to a language (e.g. "привет", "hola").
+ * Returns false for ambiguous Latin-typo greetings like "hii"/"heyy" which should prefer
+ * visitorLocale/router language.
+ */
+function isKnownGreetingPhrase(question) {
+  const normalized = normalizeGreetingInput(question);
+  if (!normalized) return false;
+  if (GREETING_LANGUAGE_BY_PHRASE[normalized]) return true;
+  const withoutBang = normalized.replace(/!+$/g, "").trim();
+  if (GREETING_LANGUAGE_BY_PHRASE[withoutBang]) return true;
+  // If greeting is in a non-Latin script, we can infer language from script reliably.
+  if (detectScriptLanguage(question)) return true;
+  return false;
+}
+
+function resolveReplyLanguage({
+  userMessage,
+  routingUserLanguage,
+  visitorLocale,
+  websiteLanguage,
+}) {
+  const fromPhrase = languageFromGreetingPhrase(userMessage);
+  if (fromPhrase) return fromPhrase;
+
+  const fromScript = detectScriptLanguage(userMessage);
+  if (fromScript) return fromScript;
+
+  const fromRouting = normalizeLanguageCode(routingUserLanguage);
+  if (fromRouting && fromRouting !== "en") return fromRouting;
+
+  const fromVisitor = normalizeLanguageCode(visitorLocale);
+  if (fromVisitor) return fromVisitor;
+
+  const fromWebsite = normalizeLanguageCode(websiteLanguage);
+  if (fromWebsite) return fromWebsite;
+
+  return "en";
+}
+
+const ACCIDENTAL_TEMPLATES = {
+  en: (company) =>
+    `<p>It looks like that message might have been sent by accident. How can I help you with <strong>${company}</strong> today?</p>`,
+  es: (company) =>
+    `<p>Parece que ese mensaje se envió por accidente. ¿En qué puedo ayudarte con <strong>${company}</strong> hoy?</p>`,
+  fr: (company) =>
+    `<p>Il semble que ce message ait été envoyé par accident. Comment puis-je vous aider avec <strong>${company}</strong> aujourd'hui ?</p>`,
+  de: (company) =>
+    `<p>Sieht so aus, als wäre diese Nachricht versehentlich gesendet worden. Wie kann ich Ihnen heute bei <strong>${company}</strong> helfen?</p>`,
+  it: (company) =>
+    `<p>Sembra che quel messaggio sia stato inviato per errore. Come posso aiutarti con <strong>${company}</strong> oggi?</p>`,
+  pt: (company) =>
+    `<p>Parece que essa mensagem foi enviada por engano. Como posso ajudá-lo com <strong>${company}</strong> hoje?</p>`,
+  ru: (company) =>
+    `<p>Похоже, это сообщение было отправлено случайно. Чем могу помочь вам с <strong>${company}</strong> сегодня?</p>`,
+  ja: (company) =>
+    `<p>メッセージが誤って送信されたようです。今日は<strong>${company}</strong>についてどのようにお手伝いできますか？</p>`,
+  hi: (company) =>
+    `<p>लगता है यह संदेश गलती से भेजा गया था। आज मैं <strong>${company}</strong> के बारे में आपकी कैसे मदद कर सकता हूँ?</p>`,
+};
+
+const KEYBOARD_MASH_PATTERN =
+  /^(asdf|qwer|zxcv|hjkl|dfgh|jklj|fafafa|blah|lorem)+/i;
+
+function vowelRatio(text) {
+  const letters = String(text || "").toLowerCase();
+  if (!letters.length) return 0;
+  const vowels = (
+    letters.match(/[aeiouyáéíóúàèìòùäëïöüаеёиоуыэюя]/g) || []
+  ).length;
+  return vowels / letters.length;
+}
+
+function isRepeatedPattern(text) {
+  if (text.length < 6) return false;
+  const mid = Math.floor(text.length / 2);
+  return text.slice(0, mid) === text.slice(mid);
+}
+
+/**
+ * Detect random typing, keyboard mash, or test input that should not hit RAG/LLM.
+ */
+function isGibberishOrAccidentalMessage(question) {
+  const raw = String(question || "").trim();
+  if (raw.length < 3) return false;
+
+  if (/^[\d\s\W_]+$/.test(raw)) return true;
+  if (/^test(ing)?[!?.]*$/i.test(raw)) return true;
+
+  const normalized = raw.toLowerCase();
+  const hasSpaces = /\s/.test(raw);
+  const words = raw.split(/\s+/).filter(Boolean);
+
+  if (!hasSpaces) {
+    if (isRepeatedPattern(normalized)) return true;
+    if (KEYBOARD_MASH_PATTERN.test(normalized)) return true;
+
+    if (/^[a-z]+$/i.test(raw) && raw.length >= 8) {
+      const uniqueRatio = new Set(normalized).size / raw.length;
+      const vowels = vowelRatio(raw);
+
+      if (uniqueRatio < 0.4 && raw.length >= 10) return true;
+      if (vowels < 0.15 && raw.length >= 8) return true;
+      if (vowels < 0.22 && uniqueRatio < 0.5 && raw.length >= 12) return true;
+    }
+
+    if (raw.length >= 12 && /^[a-z]+$/i.test(raw)) {
+      const uniqueRatio = new Set(normalized).size / raw.length;
+      if (uniqueRatio < 0.45) return true;
+    }
+  } else if (words.length > 0) {
+    const allLongGibberish = words.every(
+      (word) =>
+        word.length >= 5 &&
+        /^[a-z]+$/i.test(word) &&
+        vowelRatio(word) < 0.2
+    );
+    if (allLongGibberish && words.length >= 1) return true;
+  }
+
+  return false;
+}
+
+function buildAccidentalResponse({
+  companyName,
+  userMessage,
+  routingUserLanguage,
+  visitorLocale,
+  websiteLanguage,
+}) {
+  const safeCompany = escapeHtml(companyName || "our team");
+  const language = resolveReplyLanguage({
+    userMessage,
+    routingUserLanguage,
+    visitorLocale,
+    websiteLanguage,
+  });
+  const template = pickTemplate(ACCIDENTAL_TEMPLATES, language);
+  return {
+    answer: template(safeCompany),
+    language,
+    source: "lightweight_accidental",
+  };
+}
+
+function pickTemplate(templates, language) {
+  const lang = normalizeLanguageCode(language) || "en";
+  const template = templates[lang] || templates.en;
+  return template;
+}
+
+function buildGreetingResponse({
+  companyName,
+  userMessage,
+  routingUserLanguage,
+  visitorLocale,
+  websiteLanguage,
+}) {
+  const safeCompany = escapeHtml(companyName || "our team");
+  const language = resolveReplyLanguage({
+    userMessage,
+    routingUserLanguage,
+    visitorLocale,
+    websiteLanguage,
+  });
+  const template = pickTemplate(GREETING_TEMPLATES, language);
+  return {
+    answer: template(safeCompany),
+    language,
+    source: "lightweight_greeting",
+  };
+}
+
+function buildLiveAgentResponse({
+  companyName,
+  userMessage,
+  routingUserLanguage,
+  visitorLocale,
+  websiteLanguage,
+}) {
+  const safeCompany = escapeHtml(companyName || "our team");
+  const language = resolveReplyLanguage({
+    userMessage,
+    routingUserLanguage,
+    visitorLocale,
+    websiteLanguage,
+  });
+  const template = pickTemplate(LIVE_AGENT_TEMPLATES, language);
+  return {
+    answer: template(safeCompany),
+    language,
+    source: "lightweight_live_agent",
+  };
+}
+
+module.exports = {
+  buildGreetingResponse,
+  buildLiveAgentResponse,
+  buildAccidentalResponse,
+  isGibberishOrAccidentalMessage,
+  isKnownGreetingPhrase,
+  resolveReplyLanguage,
+  normalizeGreetingInput,
+  languageFromGreetingPhrase,
+};

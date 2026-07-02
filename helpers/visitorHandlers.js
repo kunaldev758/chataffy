@@ -476,7 +476,7 @@ const initializeVisitorEvents = (io, socket) => {
 
   socket.on(
     "visitor-send-message",
-    async ({ message, id, replyTo }, callback) => {
+    async ({ message, id, replyTo, visitorLocale }, callback) => {
       try {
         const conversation = await ConversationController.getOpenConversation(
           visitorId,
@@ -549,6 +549,12 @@ const initializeVisitorEvents = (io, socket) => {
             agentId,
             message,
             conversationId,
+            {
+              visitorLocale:
+                visitorLocale ||
+                socket.handshake?.auth?.visitorLocale ||
+                socket.handshake?.query?.visitorLocale,
+            },
           );
           io.to(conversationRoom).emit("intermediate-response", {
             message: "...replying",

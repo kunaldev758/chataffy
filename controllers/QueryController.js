@@ -10,7 +10,20 @@ const Agent = require("../models/Agent");
 const WebsiteData = require("../models/WebsiteData");
 const HumanAgent = require("../models/HumanAgent");
 const { logOpenAIUsage } = require("../services/UsageTrackingService");
-const { routeQuery, ROUTES, isLiveAgentRequest } = require("../services/QueryRouter");
+const {
+  routeQuery,
+  ROUTES,
+  isLiveAgentRequest,
+  isPureGreeting,
+} = require("../services/QueryRouter");
+const {
+  buildGreetingResponse,
+  buildLiveAgentResponse,
+  buildAccidentalResponse,
+  isGibberishOrAccidentalMessage,
+  isKnownGreetingPhrase,
+} = require("../services/LightweightResponseService");
+const { classifyShortText } = require("../services/LlamaMicroClassifierService");
 const {
   expandQueryForRetrieval,
   isProductLinkRequest,
@@ -27,6 +40,19 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const EMBEDDING_MODEL =
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
 const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-5";
+const CHAT_HISTORY_LIMIT = Number(process.env.CHAT_HISTORY_LIMIT) || 8;
+const RAG_MAX_CHUNK_CHARS = Number(process.env.RAG_MAX_CHUNK_CHARS) || 1200;
+const RAG_MAX_CONTEXT_CHARS = Number(process.env.RAG_MAX_CONTEXT_CHARS) || 6000;
+const USE_LIGHTWEIGHT_RESPONSES =
+  process.env.USE_LIGHTWEIGHT_RESPONSES !== "false";
+
+function stripHtmlForContext(text) {
+  return String(text || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 /** GPT-5 / o-series chat models reject `max_tokens`; they require `max_completion_tokens`. */
 function chatCompletionLimitPayload(maxTokens) {
@@ -69,7 +95,7 @@ class QuestionAnsweringSystem {
       // This gives enough context to understand conversation flow and reference previous topics
       const messages = await ChatMessage.find({ conversation_id: conversationId })
         .sort({ createdAt: 1 }) // Oldest first to maintain conversation flow
-        .limit(12)
+        .limit(CHAT_HISTORY_LIMIT)
         .lean();
       
       return messages || [];
@@ -98,7 +124,7 @@ class QuestionAnsweringSystem {
     // Canonical sender types: visitor, client, ai, system, humanAgent
     const formattedMessages = filteredMessages.map((msg, index) => {
       const senderType = msg.sender_type || "unknown";
-      const message = msg.message || "";
+      const message = stripHtmlForContext(msg.message || "");
 
       let role = "User";
       if (senderType === "ai" || senderType === "bot" || senderType === "assistant") {
@@ -238,63 +264,126 @@ class QuestionAnsweringSystem {
     return prompt;
   }
 
-  // Detect if the question is a simple greeting or requires no context
-  isSimpleGreeting(question) {
-    const normalizedQuestion = question.toLowerCase().trim();
-    const greetings = [
-      "hi",
-      "hello",
-      "hey",
-      "greetings",
-      "good morning",
-      "good afternoon",
-      "good evening",
-      "good night",
-      "howdy",
-      "sup",
-      "what's up",
-      "hey there",
-    ];
-    return greetings.some(
-      (greeting) =>
-        normalizedQuestion === greeting ||
-        normalizedQuestion.startsWith(greeting + " ") ||
-        normalizedQuestion === greeting + "!"
-    );
+  buildLightweightResponseContext({
+    companyName,
+    userMessage,
+    routing,
+    websiteLanguage,
+    options = {},
+  }) {
+    return {
+      companyName,
+      userMessage,
+      routingUserLanguage: routing?.userLanguage,
+      visitorLocale: options.visitorLocale,
+      websiteLanguage,
+    };
   }
 
-  // Detect if the message looks like accidental input or gibberish
+  async tryLightweightEarlyResponse({
+    question,
+    companyName,
+    websiteLanguage,
+    options,
+    conversationId,
+  }) {
+    if (!USE_LIGHTWEIGHT_RESPONSES) return null;
+
+    const lightweightContext = {
+      companyName,
+      userMessage: question,
+      visitorLocale: options.visitorLocale,
+      websiteLanguage,
+    };
+
+    // Known-script/known-phrase greetings: return templates immediately (no LLM).
+    if (isPureGreeting(question) && isKnownGreetingPhrase(question)) {
+      const { answer } = buildGreetingResponse(lightweightContext);
+      console.log("[QueryController] Early lightweight greeting response");
+      return {
+        success: true,
+        answer,
+        conversationId,
+        isAgentRequest: false,
+      };
+    }
+
+    if (isGibberishOrAccidentalMessage(question)) {
+      const { answer } = buildAccidentalResponse(lightweightContext);
+      console.log(
+        "[QueryController] Early lightweight accidental/gibberish response"
+      );
+      return {
+        success: true,
+        answer,
+        conversationId,
+        isAgentRequest: false,
+      };
+    }
+
+    // Borderline short messages: optional open-weight micro-classifier (Llama) to avoid
+    // routing + RAG costs on nonsense and to pick language for ambiguous greetings like "hii".
+    const raw = String(question || "").trim();
+    const shortEnough = raw.length > 0 && raw.length <= 40;
+    const looksLikeQuestion =
+      /\?/.test(raw) ||
+      /\b(what|how|why|when|where|price|cost|refund|return|shipping|warranty)\b/i.test(
+        raw
+      );
+    const hasSpaces = /\s/.test(raw);
+    const isSingleToken = !hasSpaces && raw.length <= 20;
+    const isAmbiguousGreeting = isPureGreeting(raw) && !isKnownGreetingPhrase(raw);
+    const isWeirdShort = isSingleToken && !looksLikeQuestion;
+
+    if ((isAmbiguousGreeting || isWeirdShort) && shortEnough) {
+      const inferred = await classifyShortText({
+        message: raw,
+        websiteLanguage,
+        visitorLocale: options.visitorLocale,
+      });
+
+      if (inferred?.isGibberish) {
+        const { answer } = buildAccidentalResponse({
+          ...lightweightContext,
+          routingUserLanguage: inferred.userLanguage,
+        });
+        console.log(
+          `[QueryController] Early llama-micro accidental (${inferred.userLanguage || "unknown"})`
+        );
+        return {
+          success: true,
+          answer,
+          conversationId,
+          isAgentRequest: false,
+        };
+      }
+
+      if (inferred?.isGreeting) {
+        const { answer } = buildGreetingResponse({
+          ...lightweightContext,
+          routingUserLanguage: inferred.userLanguage,
+        });
+        console.log(
+          `[QueryController] Early llama-micro greeting (${inferred.userLanguage || "unknown"})`
+        );
+        return {
+          success: true,
+          answer,
+          conversationId,
+          isAgentRequest: false,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  isSimpleGreeting(question) {
+    return isPureGreeting(question);
+  }
+
   isAccidentalOrTestMessage(question) {
-    const normalizedQuestion = question.trim();
-    
-    // Check for very short random character strings (like "acjhascjhasacasca")
-    if (normalizedQuestion.length < 3) return false;
-    
-    // Check if it's mostly random characters (no spaces, mostly consonants, no real words)
-    const hasSpaces = normalizedQuestion.includes(" ");
-    const wordCount = normalizedQuestion.split(/\s+/).filter(w => w.length > 0).length;
-    
-    // If it's a single "word" longer than 8 chars with no spaces, likely accidental
-    if (!hasSpaces && normalizedQuestion.length > 8) {
-      // Check if it looks like random typing (many repeated characters or patterns)
-      const uniqueChars = new Set(normalizedQuestion.toLowerCase()).size;
-      const ratio = uniqueChars / normalizedQuestion.length;
-      // If very few unique characters relative to length, likely accidental
-      if (ratio < 0.4 && normalizedQuestion.length > 10) {
-        return true;
-      }
-    }
-    
-    // Check for repeated patterns (like "testtesttest" or "asdfasdf")
-    if (normalizedQuestion.length > 6) {
-      const firstHalf = normalizedQuestion.substring(0, Math.floor(normalizedQuestion.length / 2));
-      const secondHalf = normalizedQuestion.substring(Math.floor(normalizedQuestion.length / 2));
-      if (firstHalf === secondHalf) {
-        return true;
-      }
-    }
-    
-    return false;
+    return isGibberishOrAccidentalMessage(question);
   }
 
   // Detect if the visitor is asking to connect to a live agent
@@ -1258,21 +1347,36 @@ Keep responses short, direct, friendly, and professional. Only use information e
   }
 
   // Context extraction for Qdrant results — always include source URL/title when available
-  getRelevantContext(matches) {
-    return matches
-      .map((match) => {
-        const payload = match.payload || {};
-        const text = payload.text || payload.pageContent || "";
-        const url = payload.url || "";
-        const title = payload.title || url || "";
-        if (!text) return "";
-        if (url) {
-          return `Source: ${title} (${url})\n---\n${text}\n---`;
-        }
-        return text;
-      })
-      .filter((text) => text.length > 0)
-      .join("\n\n");
+  getRelevantContext(matches, options = {}) {
+    const maxChunkChars = options.maxChunkChars ?? RAG_MAX_CHUNK_CHARS;
+    const maxTotalChars = options.maxTotalChars ?? RAG_MAX_CONTEXT_CHARS;
+    let totalChars = 0;
+    const blocks = [];
+
+    for (const match of matches || []) {
+      const payload = match.payload || {};
+      let text = stripHtmlForContext(payload.text || payload.pageContent || "");
+      const url = payload.url || "";
+      const title = payload.title || url || "";
+      if (!text) continue;
+
+      if (text.length > maxChunkChars) {
+        text = `${text.slice(0, maxChunkChars)}…`;
+      }
+
+      const block = url
+        ? `Source: ${title} (${url})\n---\n${text}\n---`
+        : text;
+
+      if (totalChars + block.length > maxTotalChars) {
+        break;
+      }
+
+      blocks.push(block);
+      totalChars += block.length;
+    }
+
+    return blocks.join("\n\n");
   }
 
   async queryQdrant(collectionName, queryEmbedding, topK, userId) {
@@ -1603,6 +1707,17 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       const websiteLanguage = websiteData?.primary_language || "en";
 
+      const earlyLightweightResponse = await this.tryLightweightEarlyResponse({
+        question,
+        companyName,
+        websiteLanguage,
+        options,
+        conversationId,
+      });
+      if (earlyLightweightResponse) {
+        return earlyLightweightResponse;
+      }
+
       const queryNorm = normalizeUserQuery(question);
       const normalizedQuestion = queryNorm.normalized;
 
@@ -1650,7 +1765,42 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       const langOpts = { userLanguage: routing.userLanguage };
 
-      if (routing.route === ROUTES.GREETING) {
+      if (routing.route === ROUTES.GREETING && isPureGreeting(question)) {
+        const lightweightContext = this.buildLightweightResponseContext({
+          companyName,
+          userMessage: question,
+          routing,
+          websiteLanguage,
+          options,
+        });
+
+        if (USE_LIGHTWEIGHT_RESPONSES) {
+          // If greeting is ambiguous (e.g. "hii"), optionally use open-weight micro classifier
+          // to choose language. Otherwise use router language / visitor locale / website language.
+          let inferred = null;
+          if (!isKnownGreetingPhrase(question)) {
+            inferred = await classifyShortText({
+              message: question,
+              websiteLanguage,
+              visitorLocale: options.visitorLocale,
+            });
+          }
+
+          const { answer: greetingAnswer } = buildGreetingResponse({
+            ...lightweightContext,
+            routingUserLanguage: inferred?.userLanguage || routing.userLanguage,
+          });
+          console.log(
+            `[QueryController] Lightweight greeting response (${routing.userLanguage})`
+          );
+          return {
+            success: true,
+            answer: greetingAnswer,
+            conversationId,
+            isAgentRequest: false,
+          };
+        }
+
         const { answer: greetingAnswer, usage: greetingUsage } =
           await this.generateAnswer(
             question,
@@ -1676,7 +1826,41 @@ Keep responses short, direct, friendly, and professional. Only use information e
         };
       }
 
+      if (
+        routing.route === ROUTES.GREETING &&
+        !isPureGreeting(question)
+      ) {
+        console.log(
+          `[QueryController] GREETING route overridden for compound message: "${question.substring(0, 60)}..."`
+        );
+        routing.route = ROUTES.SEMANTIC_RAG;
+        routing.subIntent = null;
+      }
+
       if (routing.route === ROUTES.LIVE_AGENT) {
+        const lightweightContext = this.buildLightweightResponseContext({
+          companyName,
+          userMessage: question,
+          routing,
+          websiteLanguage,
+          options,
+        });
+
+        if (USE_LIGHTWEIGHT_RESPONSES) {
+          const { answer: agentAnswer } = buildLiveAgentResponse(
+            lightweightContext
+          );
+          console.log(
+            `[QueryController] Lightweight live-agent response (${routing.userLanguage})`
+          );
+          return {
+            success: true,
+            answer: agentAnswer,
+            conversationId,
+            isAgentRequest: true,
+          };
+        }
+
         const { answer: agentAnswer, usage: agentUsage } =
           await this.generateAnswer(
             question,
@@ -1973,38 +2157,69 @@ Keep responses short, direct, friendly, and professional. Only use information e
       
       // Handle simple greetings even without context
       if (relevantMatches.length === 0 && this.isSimpleGreeting(question)) {
-        // For greetings, generate a friendly response even without context
-        const { answer: greetingAnswer, usage: llmUsage } =
-          await this.generateAnswer(
-            question,
-            `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
-            chatHistory,
-            companyName,
-            websiteData,
-            langOpts
+        if (USE_LIGHTWEIGHT_RESPONSES) {
+          const { answer: greetingAnswer } = buildGreetingResponse(
+            this.buildLightweightResponseContext({
+              companyName,
+              userMessage: question,
+              routing,
+              websiteLanguage,
+              options,
+            })
           );
-        finalAnswer = greetingAnswer;
-        if (llmUsage) {
-          logOpenAIUsage({
-            userId,
-            agentId,
-            tokens: llmUsage.total_tokens,
-            requests: 1,
-          });
+          finalAnswer = greetingAnswer;
+        } else {
+          const { answer: greetingAnswer, usage: llmUsage } =
+            await this.generateAnswer(
+              question,
+              `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
+              chatHistory,
+              companyName,
+              websiteData,
+              langOpts
+            );
+          finalAnswer = greetingAnswer;
+          if (llmUsage) {
+            logOpenAIUsage({
+              userId,
+              agentId,
+              tokens: llmUsage.total_tokens,
+              requests: 1,
+            });
+          }
         }
       } else if (isAccidental && !this.isSimpleGreeting(question)) {
-        // Handle accidental/test messages like Fin does
-        const { answer: accidentalAnswer, usage: llmUsage } =
-          await this.generateAnswer(
-            question,
-            `The user sent a message that looks accidental or like test input: "${question}". This appears to be random characters or accidental typing. Acknowledge it might have been sent by accident, be friendly and understanding, and offer help with ${companyName}'s services. Respond naturally as a human would, not robotically.`,
-            chatHistory,
-            companyName,
-            websiteData,
-            langOpts
+        if (USE_LIGHTWEIGHT_RESPONSES) {
+          const { answer: accidentalAnswer } = buildAccidentalResponse(
+            this.buildLightweightResponseContext({
+              companyName,
+              userMessage: question,
+              routing,
+              websiteLanguage,
+              options,
+            })
           );
-        finalAnswer = accidentalAnswer;
-        logOpenAIUsage({ userId, agentId, tokens: llmUsage.total_tokens, requests: 1 });
+          finalAnswer = accidentalAnswer;
+        } else {
+          const { answer: accidentalAnswer, usage: llmUsage } =
+            await this.generateAnswer(
+              question,
+              `The user sent a message that looks accidental or like test input: "${question}". This appears to be random characters or accidental typing. Acknowledge it might have been sent by accident, be friendly and understanding, and offer help with ${companyName}'s services. Respond naturally as a human would, not robotically.`,
+              chatHistory,
+              companyName,
+              websiteData,
+              langOpts
+            );
+          finalAnswer = accidentalAnswer;
+          if (llmUsage) {
+            logOpenAIUsage({
+              userId,
+              agentId,
+              tokens: llmUsage.total_tokens,
+              requests: 1,
+            });
+          }
+        }
       } else if ((relevantMatches.length === 0 || isIrrelevant) && !this.isSimpleGreeting(question) && !isAccidental) {
         // Default answer when no relevant context found (and not a greeting or accidental)
         // If query is completely irrelevant (low similarity scores), redirect politely like Fin
