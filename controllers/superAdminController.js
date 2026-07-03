@@ -913,12 +913,12 @@ module.exports.getAllAiModelCategories = async (req, res) => {
 
 module.exports.createAiModelCategory = async (req, res) => {
   try {
-    const { name } = req.body;
-    if (!name || typeof name !== "string" || name.trim().length === 0) {
+    const rawName = req.body.category || req.body.name;
+    if (!rawName || typeof rawName !== "string" || rawName.trim().length === 0) {
       return res.status(400).json({ message: "Category name is required and must be a non-empty string" });
     }
 
-    const category = await AiModelsCategory.create({ category: name.trim() });
+    const category = await AiModelsCategory.create({ category: rawName.trim() });
     res.status(200).json({ success: true, data: category });
   } catch (error) {
     console.error("Error creating ai model category:", error);
@@ -931,19 +931,20 @@ module.exports.createAiModelCategory = async (req, res) => {
 
 module.exports.updateAiModelCategory = async (req, res) => {
   try {
-    const { categoryId, name } = req.body;
-    if (!name || typeof name !== "string" || name.trim().length === 0) {
+    const { categoryId } = req.body;
+    const rawName = req.body.category || req.body.name;
+    if (!rawName || typeof rawName !== "string" || rawName.trim().length === 0) {
       return res.status(400).json({ message: "Category name is required and must be a non-empty string" });
     }
 
-    const existingCategory = await AiModelsCategory.findOne({ category: name.trim(), _id: { $ne: categoryId } }).lean();
+    const existingCategory = await AiModelsCategory.findOne({ category: rawName.trim(), _id: { $ne: categoryId } }).lean();
     if (existingCategory) {
       return res.status(400).json({ message: "Another category with this name already exists" });
     }
 
     const updatedCategory = await AiModelsCategory.findByIdAndUpdate(
       categoryId,
-      { category: name.trim() },
+      { category: rawName.trim() },
       { new: true }
     );
 
