@@ -148,7 +148,9 @@ router.post('/superadmin/ai-models/create',verifySuperAdminToken, superAdminCont
 router.put('/superadmin/ai-models/update',verifySuperAdminToken, superAdminController.updateAiModel);
 router.delete('/superadmin/ai-models/delete/:modelId',verifySuperAdminToken, superAdminController.deleteAiModel);
 router.get('/superadmin/ai-model-categories',verifySuperAdminToken, superAdminController.getAllAiModelCategories);
-
+router.post('/superadmin/ai-model-categories/create',verifySuperAdminToken, superAdminController.createAiModelCategory);
+router.put('/superadmin/ai-model-categories/update',verifySuperAdminToken, superAdminController.updateAiModelCategory);
+router.delete('/superadmin/ai-model-categories/delete/:categoryId',verifySuperAdminToken, superAdminController.deleteAiModelCategory);
 
 router.get('/available', PlanController.getAvailablePlans);
 
