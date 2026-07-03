@@ -242,13 +242,17 @@ module.exports.getDashboardData = async (req, res) => {
       });
     }
 
-    // 10. OpenAI Usage (all users)
-    const openAIUsageAgg = await UsageTrackingService.getOpenAIUsage(undefined);
-    const openAIUsage = openAIUsageAgg ? openAIUsageAgg : {
-      totalTokens: 0,
-      totalCost: 0,
-      totalRequests:0
+    // 10. OpenAI Usage (all users) — overall totals + per-type breakdown
+    const [openAIUsageAgg, openAIUsageByTypeAgg] = await Promise.all([
+      UsageTrackingService.getOpenAIUsage(undefined),
+      UsageTrackingService.getOpenAIUsageByType(undefined),
+    ]);
+    const openAIUsage = openAIUsageAgg || {
+      totalTokens: 0, totalCost: 0, totalRequests: 0,
+      totalInputTokens: 0, totalOutputTokens: 0, totalCacheTokens: 0,
+      totalInputCost: 0, totalOutputCost: 0, totalCacheCost: 0,
     };
+    const openAIUsageByType = openAIUsageByTypeAgg || { byType: {}, totals: {} };
 
     // 11. Qdrant Usage (all collections)
     const qdrantUsageAgg = await UsageTrackingService.getQdrantUsage(undefined);
@@ -314,6 +318,7 @@ module.exports.getDashboardData = async (req, res) => {
         last7Days
       },
       openAIUsage: {
+        // Grand totals across all types
         totalInputTokens: openAIUsage.totalInputTokens || 0,
         totalOutputTokens: openAIUsage.totalOutputTokens || 0,
         totalCacheTokens: openAIUsage.totalCacheTokens || 0,
@@ -323,6 +328,9 @@ module.exports.getDashboardData = async (req, res) => {
         totalCacheCost: openAIUsage.totalCacheCost || 0,
         totalCost: openAIUsage.totalCost || 0,
         totalRequests: openAIUsage.totalRequests || 0,
+        
+        // Full dynamic breakdown for any custom categories added by the super admin
+        byType: openAIUsageByType.byType || {},
       },
       qdrantUsage: {
         totalVectorsAdded: qdrantUsage.totalVectorsAdded || 0,

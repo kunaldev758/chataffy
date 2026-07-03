@@ -1,6 +1,7 @@
 const OpenAIUsage = require('../models/OpenAIUsageSchema');
 const QdrantUsage = require('../models/qdrantUsageSchema');
 const { getModelForCategory } = require('./aiModelService');
+const { AiModelsCategory } = require('../models/AiModel');
 
 /**
  * Log an OpenAI API usage record to the database.
@@ -142,9 +143,74 @@ const result = await QdrantUsage.aggregate([
   };
 }
 
+async function getOpenAIUsageByType(userId, { startDate, endDate } = {}) {
+  const match = {};
+  if (userId) match.userId = userId;
+  if (startDate || endDate) {
+    match.createdAt = {};
+    if (startDate) match.createdAt.$gte = new Date(startDate);
+    if (endDate)   match.createdAt.$lte = new Date(endDate);
+  }
+
+  const rows = await OpenAIUsage.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: '$type',
+        inputTokens:  { $sum: '$inputTokens' },
+        outputTokens: { $sum: '$outputTokens' },
+        cacheTokens:  { $sum: '$cacheTokens' },
+        totalTokens:  { $sum: '$totalTokens' },
+        inputCost:    { $sum: '$inputCost' },
+        outputCost:   { $sum: '$outputCost' },
+        cacheCost:    { $sum: '$cacheCost' },
+        totalCost:    { $sum: '$totalCost' },
+      },
+    },
+    { $sort: { _id: 1 } },
+  ]);
+
+  const emptyType = () => ({
+    inputTokens: 0, outputTokens: 0, cacheTokens: 0, totalTokens: 0,
+    inputCost: 0,   outputCost: 0,   cacheCost: 0,   totalCost: 0,
+  });
+
+  // Pull known types straight from the schema's own enum — this is the
+  // actual field we're grouping on, so it's the correct source of truth.
+  const knownTypes = OpenAIUsage.schema.path('type').enumValues;
+  const byType = Object.fromEntries(knownTypes.map((t) => [t, emptyType()]));
+
+  const totals = emptyType();
+
+  for (const row of rows) {
+    const type = row._id || 'unknown';
+    byType[type] = {
+      inputTokens:  row.inputTokens,
+      outputTokens: row.outputTokens,
+      cacheTokens:  row.cacheTokens,
+      totalTokens:  row.totalTokens,
+      inputCost:    row.inputCost,
+      outputCost:   row.outputCost,
+      cacheCost:    row.cacheCost,
+      totalCost:    row.totalCost,
+    };
+    totals.inputTokens  += row.inputTokens;
+    totals.outputTokens += row.outputTokens;
+    totals.cacheTokens  += row.cacheTokens;
+    totals.totalTokens  += row.totalTokens;
+    totals.inputCost    += row.inputCost;
+    totals.outputCost   += row.outputCost;
+    totals.cacheCost    += row.cacheCost;
+    totals.totalCost    += row.totalCost;
+  }
+
+  return { byType, totals };
+}
+
 module.exports = {
   logOpenAIUsage,
   getOpenAIUsage,
+  getOpenAIUsageByType,
   logQdrantUsage,
   getQdrantUsage
 };
