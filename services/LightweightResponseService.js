@@ -161,6 +161,48 @@ function resolveReplyLanguage({
   return "en";
 }
 
+const OFF_TOPIC_TEMPLATES = {
+  en: (company) =>
+    `<p>I'm here to help with questions about <strong>${company}</strong>. Is there something specific about our products or services I can help you with?</p>`,
+  es: (company) =>
+    `<p>Estoy aquí para ayudarte con preguntas sobre <strong>${company}</strong>. ¿Hay algo específico sobre nuestros productos o servicios en lo que pueda ayudarte?</p>`,
+  fr: (company) =>
+    `<p>Je suis là pour répondre aux questions sur <strong>${company}</strong>. Y a-t-il quelque chose de précis concernant nos produits ou services dont je peux vous parler ?</p>`,
+  de: (company) =>
+    `<p>Ich helfe Ihnen gerne bei Fragen zu <strong>${company}</strong>. Gibt es etwas Bestimmtes zu unseren Produkten oder Dienstleistungen, wobei ich helfen kann?</p>`,
+  it: (company) =>
+    `<p>Sono qui per aiutarti con domande su <strong>${company}</strong>. C'è qualcosa di specifico sui nostri prodotti o servizi in cui posso aiutarti?</p>`,
+  pt: (company) =>
+    `<p>Estou aqui para ajudar com perguntas sobre <strong>${company}</strong>. Há algo específico sobre nossos produtos ou serviços em que eu possa ajudar?</p>`,
+  ru: (company) =>
+    `<p>Я здесь, чтобы помочь с вопросами о <strong>${company}</strong>. Могу ли я помочь вам с чем-то конкретным о наших продуктах или услугах?</p>`,
+  ja: (company) =>
+    `<p><strong>${company}</strong>に関するご質問にお答えします。製品やサービスについて具体的にお手伝いできることはありますか？</p>`,
+  hi: (company) =>
+    `<p>मैं <strong>${company}</strong> से जुड़े सवालों में मदद के लिए यहाँ हूँ। क्या हमारे उत्पादों या सेवाओं के बारे में कुछ विशेष है जिसमें मैं मदद कर सकूँ?</p>`,
+};
+
+const IRRELEVANT_TEMPLATES = {
+  en: (company) =>
+    `<p>That question seems outside what I can help with for <strong>${company}</strong>. I'd be happy to answer questions about our products, services, pricing, or policies — what would you like to know?</p>`,
+  es: (company) =>
+    `<p>Esa pregunta parece estar fuera de lo que puedo ayudarle con <strong>${company}</strong>. Con gusto responderé preguntas sobre nuestros productos, servicios, precios o políticas. ¿Qué le gustaría saber?</p>`,
+  fr: (company) =>
+    `<p>Cette question semble hors de ce que je peux traiter pour <strong>${company}</strong>. Je serais ravi de répondre à vos questions sur nos produits, services, tarifs ou politiques — que souhaitez-vous savoir ?</p>`,
+  de: (company) =>
+    `<p>Diese Frage liegt außerhalb dessen, wobei ich bei <strong>${company}</strong> helfen kann. Gerne beantworte ich Fragen zu unseren Produkten, Dienstleistungen, Preisen oder Richtlinien — was möchten Sie wissen?</p>`,
+  it: (company) =>
+    `<p>Questa domanda sembra al di fuori di ciò che posso aiutare con <strong>${company}</strong>. Sarò felice di rispondere a domande su prodotti, servizi, prezzi o policy — cosa vorresti sapere?</p>`,
+  pt: (company) =>
+    `<p>Essa pergunta parece estar fora do que posso ajudar com <strong>${company}</strong>. Ficarei feliz em responder perguntas sobre nossos produtos, serviços, preços ou políticas — o que você gostaria de saber?</p>`,
+  ru: (company) =>
+    `<p>Этот вопрос, похоже, выходит за рамки того, чем я могу помочь по <strong>${company}</strong>. С радостью отвечу на вопросы о наших продуктах, услугах, ценах или политике — что вас интересует?</p>`,
+  ja: (company) =>
+    `<p>そのご質問は<strong>${company}</strong>のサポート範囲外のようです。製品、サービス、料金、ポリシーについてお答えできます。何について知りたいですか？</p>`,
+  hi: (company) =>
+    `<p>यह सवाल <strong>${company}</strong> से जुड़ी मदद से बाहर लगता है। मैं हमारे उत्पादों, सेवाओं, कीमतों या नीतियों के बारे में सवालों का जवाब दे सकता हूँ — आप क्या जानना चाहेंगे?</p>`,
+};
+
 const ACCIDENTAL_TEMPLATES = {
   en: (company) =>
     `<p>It looks like that message might have been sent by accident. How can I help you with <strong>${company}</strong> today?</p>`,
@@ -327,10 +369,35 @@ function buildLiveAgentResponse({
   };
 }
 
+function buildOffTopicResponse({
+  companyName,
+  userMessage,
+  routingUserLanguage,
+  visitorLocale,
+  websiteLanguage,
+  isIrrelevant = false,
+}) {
+  const safeCompany = escapeHtml(companyName || "our team");
+  const language = resolveReplyLanguage({
+    userMessage,
+    routingUserLanguage,
+    visitorLocale,
+    websiteLanguage,
+  });
+  const templates = isIrrelevant ? IRRELEVANT_TEMPLATES : OFF_TOPIC_TEMPLATES;
+  const template = pickTemplate(templates, language);
+  return {
+    answer: template(safeCompany),
+    language,
+    source: isIrrelevant ? "lightweight_irrelevant" : "lightweight_off_topic",
+  };
+}
+
 module.exports = {
   buildGreetingResponse,
   buildLiveAgentResponse,
   buildAccidentalResponse,
+  buildOffTopicResponse,
   isGibberishOrAccidentalMessage,
   hasMeaningfulUnicodeScript,
   isKnownGreetingPhrase,

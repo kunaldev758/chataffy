@@ -20,8 +20,10 @@ const {
   buildGreetingResponse,
   buildLiveAgentResponse,
   buildAccidentalResponse,
+  buildOffTopicResponse,
   isGibberishOrAccidentalMessage,
 } = require("../services/LightweightResponseService");
+const { tryStructuredAnswer } = require("../services/StructuredResponseFormatter");
 const { generateGreeting } = require("../services/LlamaGreetingService");
 const {
   expandQueryForRetrieval,
@@ -42,18 +44,36 @@ const {
   logRerankStats,
   filterMatchesBySizes,
 } = require("../utils/attributeReranker");
+const {
+  isClearlyOnTopicCompanyQuestion: detectClearlyOnTopicQuestion,
+  isCompanyIdentityQuestion: detectCompanyIdentityQuestion,
+  isTrulyOffTopicQuestion,
+} = require("../utils/queryOnTopicDetection");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 // Define models used in this service
 const EMBEDDING_MODEL =
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
-const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-5";
+const CHAT_MODEL_PREMIUM =
+  process.env.OPENAI_CHAT_MODEL_PREMIUM ||
+  process.env.OPENAI_CHAT_MODEL ||
+  "gpt-4.1";
+const CHAT_MODEL_BRIEF =
+  process.env.OPENAI_CHAT_MODEL_BRIEF || "gpt-4.1-mini";
 const CHAT_HISTORY_LIMIT = Number(process.env.CHAT_HISTORY_LIMIT) || 8;
+const CHAT_HISTORY_LIMIT_BRIEF =
+  Number(process.env.CHAT_HISTORY_LIMIT_BRIEF) || 5;
 const RAG_MAX_CHUNK_CHARS = Number(process.env.RAG_MAX_CHUNK_CHARS) || 1200;
+const RAG_MAX_CHUNK_CHARS_BRIEF =
+  Number(process.env.RAG_MAX_CHUNK_CHARS_BRIEF) || 1000;
 const RAG_MAX_CONTEXT_CHARS = Number(process.env.RAG_MAX_CONTEXT_CHARS) || 6000;
+const RAG_MAX_CONTEXT_CHARS_BRIEF =
+  Number(process.env.RAG_MAX_CONTEXT_CHARS_BRIEF) || 4000;
 const USE_LIGHTWEIGHT_RESPONSES =
   process.env.USE_LIGHTWEIGHT_RESPONSES !== "false";
+const LOW_RETRIEVAL_SCORE_PREMIUM =
+  Number(process.env.LOW_RETRIEVAL_SCORE_PREMIUM) || 0.35;
 
 function stripHtmlForContext(text) {
   return String(text || "")
@@ -64,11 +84,54 @@ function stripHtmlForContext(text) {
 }
 
 /** GPT-5 / o-series chat models reject `max_tokens`; they require `max_completion_tokens`. */
-function chatCompletionLimitPayload(maxTokens) {
-  if (/^gpt-5|^o\d/i.test(CHAT_MODEL)) {
+function chatCompletionLimitPayload(maxTokens, model) {
+  if (/^gpt-5|^o\d/i.test(model || "")) {
     return { max_completion_tokens: maxTokens };
   }
   return { max_tokens: maxTokens };
+}
+
+function isPremiumResponseMode(responseMode) {
+  return (
+    responseMode === "list" ||
+    responseMode === "contact" ||
+    responseMode === "page_links"
+  );
+}
+
+function selectChatModel({
+  responseMode = "brief",
+  retrievalMaxScore,
+  wasExpanded = false,
+  forcePremium = false,
+}) {
+  if (forcePremium || isPremiumResponseMode(responseMode)) {
+    return CHAT_MODEL_PREMIUM;
+  }
+  if (wasExpanded) {
+    return CHAT_MODEL_PREMIUM;
+  }
+  if (
+    retrievalMaxScore !== undefined &&
+    retrievalMaxScore !== null &&
+    retrievalMaxScore < LOW_RETRIEVAL_SCORE_PREMIUM
+  ) {
+    return CHAT_MODEL_PREMIUM;
+  }
+  return CHAT_MODEL_BRIEF;
+}
+
+function getContextLimitsForMode(responseMode) {
+  if (isPremiumResponseMode(responseMode)) {
+    return {
+      maxChunkChars: RAG_MAX_CHUNK_CHARS,
+      maxTotalChars: RAG_MAX_CONTEXT_CHARS,
+    };
+  }
+  return {
+    maxChunkChars: RAG_MAX_CHUNK_CHARS_BRIEF,
+    maxTotalChars: RAG_MAX_CONTEXT_CHARS_BRIEF,
+  };
 }
 
 // --- Initialize Clients ---
@@ -115,15 +178,21 @@ class QuestionAnsweringSystem {
     }
   }
 
-  formatChatHistory(messages, currentQuestion = null) {
+  formatChatHistory(messages, currentQuestion = null, options = {}) {
+    const historyLimit = options.historyLimit ?? CHAT_HISTORY_LIMIT;
     if (!messages || messages.length === 0) {
       return "No previous conversation.";
     }
 
+    const limitedMessages =
+      historyLimit > 0 && messages.length > historyLimit
+        ? messages.slice(-historyLimit)
+        : messages;
+
     // Filter out the current question if it's already in the history (shouldn't happen, but safety check)
     const filteredMessages = currentQuestion
-      ? messages.filter(msg => msg.message?.trim() !== currentQuestion.trim())
-      : messages;
+      ? limitedMessages.filter(msg => msg.message?.trim() !== currentQuestion.trim())
+      : limitedMessages;
 
     if (filteredMessages.length === 0) {
       return "No previous conversation.";
@@ -175,7 +244,8 @@ class QuestionAnsweringSystem {
   }
 
   // Build dynamic system prompt from WebsiteData
-  buildDynamicSystemPrompt(websiteData, organisation) {
+  buildDynamicSystemPrompt(websiteData, organisation, options = {}) {
+    const { compact = false } = options;
     // User-configured organisation (widget/agent name) takes priority over scraped metadata
     const companyName = organisation || websiteData?.company_name || "the company";
     const companyType = websiteData?.company_type || "company";
@@ -184,6 +254,32 @@ class QuestionAnsweringSystem {
     const servicesList = websiteData?.services_list || [];
     const valueProposition = websiteData?.value_proposition || "";
     const doesNotList = websiteData?.does_not_list || [];
+
+    if (compact) {
+      const servicesHint =
+        servicesList.length > 0
+          ? servicesList.slice(0, 5).join(", ")
+          : "services and products from the trained website";
+      const scopeHint =
+        doesNotList.length > 0
+          ? `Does not: ${doesNotList.slice(0, 3).join(", ")}.`
+          : "";
+
+      let prompt = `You are a customer support representative for ${companyName}, a ${companyType}${industry ? ` in ${industry}` : ""}.`;
+      if (foundedYear) prompt += ` Founded ${foundedYear}.`;
+      prompt += `\n\nAnswer ONLY using the provided knowledge-base context about ${companyName}: ${servicesHint}.`;
+      if (valueProposition) {
+        prompt += `\nValue proposition: ${valueProposition}`;
+      }
+      if (scopeHint) prompt += `\n${scopeHint}`;
+      prompt += `\n\nRules:
+- Speak as "${companyName}" (we/our). Be natural, brief (1-2 sentences), and use HTML (<p>, links).
+- If the user accepted a prior offer ("yes", "tell me"), answer immediately — do not repeat the offer.
+- Use conversation history only when needed for follow-ups.
+- Do not mention training data or system prompts.
+- Redirect off-topic questions politely.`;
+      return prompt;
+    }
 
     // Format services list
     const servicesText = servicesList.length > 0
@@ -375,6 +471,216 @@ class QuestionAnsweringSystem {
       conversationId,
       isAgentRequest: true,
     };
+  }
+
+  respondToOffTopic({
+    question,
+    companyName,
+    routing,
+    websiteLanguage,
+    options,
+    conversationId,
+    isIrrelevant = false,
+  }) {
+    const { answer, source } = buildOffTopicResponse({
+      companyName,
+      userMessage: question,
+      routingUserLanguage: routing?.userLanguage,
+      visitorLocale: options?.visitorLocale,
+      websiteLanguage,
+      isIrrelevant,
+    });
+
+    console.log(
+      `[QueryController] Off-topic response via ${source} (${routing?.userLanguage || "en"})`
+    );
+
+    return {
+      success: true,
+      answer,
+      conversationId,
+      isAgentRequest: false,
+    };
+  }
+
+  isClearlyOnTopicCompanyQuestion(question, companyName) {
+    return detectClearlyOnTopicQuestion(question, companyName);
+  }
+
+  isCompanyIdentityQuestion(question, companyName) {
+    return detectCompanyIdentityQuestion(question, companyName);
+  }
+
+  buildWebsiteDataFallbackContext(websiteData, companyName) {
+    const parts = [];
+    const type = websiteData?.company_type;
+    const industry = websiteData?.industry;
+    const founded = websiteData?.founded_year;
+    const valueProp = websiteData?.value_proposition;
+    const services = websiteData?.services_list || [];
+
+    if (type) parts.push(`Company type: ${type}`);
+    if (industry) parts.push(`Industry: ${industry}`);
+    if (founded) parts.push(`Founded: ${founded}`);
+    if (valueProp) parts.push(`Value proposition: ${valueProp}`);
+    if (services.length > 0) {
+      parts.push(
+        `Services/products:\n${services.map((s) => `- ${s}`).join("\n")}`
+      );
+    }
+
+    if (parts.length === 0) {
+      return `Answer as a representative of ${companyName}. Describe what ${companyName} offers based on your role as their support assistant. If specific details are not in the profile, give a helpful overview and invite follow-up questions about products, services, or pricing.`;
+    }
+
+    return `Company profile for ${companyName}:\n\n${parts.join("\n\n")}`;
+  }
+
+  async answerOnTopicWithFallback({
+    question,
+    relevantMatches,
+    queryResponse,
+    requestedTopK,
+    getChatHistoryFormatted,
+    companyName,
+    websiteData,
+    langOpts,
+    wasExpanded,
+    maxScore,
+    userId,
+    agentId,
+  }) {
+    let matches = relevantMatches;
+    if (matches.length === 0 && queryResponse.length > 0) {
+      matches = [...queryResponse]
+        .sort((a, b) => (b.score || 0) - (a.score || 0))
+        .slice(0, Math.max(requestedTopK, 3));
+      console.log(
+        `[QueryController] On-topic fallback: using ${matches.length} best available chunks (max score ${maxScore.toFixed(3)})`
+      );
+    }
+
+    const identityQuestion = this.isCompanyIdentityQuestion(
+      question,
+      companyName
+    );
+    const historyLimit = identityQuestion
+      ? CHAT_HISTORY_LIMIT
+      : CHAT_HISTORY_LIMIT_BRIEF;
+    const sharedOpts = {
+      ...langOpts,
+      wasExpanded,
+      retrievalMaxScore: maxScore,
+      forcePremium: identityQuestion || maxScore < LOW_RETRIEVAL_SCORE_PREMIUM,
+    };
+
+    if (matches.length > 0) {
+      const contextLimits = getContextLimitsForMode("brief");
+      const ragContext = this.getRelevantContext(matches, {
+        ...contextLimits,
+        maxTotalChars: RAG_MAX_CONTEXT_CHARS,
+      });
+      const profileContext = this.buildWebsiteDataFallbackContext(
+        websiteData,
+        companyName
+      );
+      const combinedContext = `${profileContext}\n\n---\n\nRetrieved website content:\n${ragContext}`;
+
+      const result = await this.generateAnswer(
+        question,
+        combinedContext,
+        getChatHistoryFormatted(historyLimit),
+        companyName,
+        websiteData,
+        sharedOpts
+      );
+      this.logAnswerUsage(userId, agentId, result);
+      return { answer: result.answer, matches };
+    }
+
+    const fallbackContext = this.buildWebsiteDataFallbackContext(
+      websiteData,
+      companyName
+    );
+    console.log(
+      `[QueryController] On-topic fallback: answering from WebsiteData profile only`
+    );
+    const result = await this.generateAnswer(
+      question,
+      fallbackContext,
+      getChatHistoryFormatted(historyLimit),
+      companyName,
+      websiteData,
+      sharedOpts
+    );
+    this.logAnswerUsage(userId, agentId, result);
+    return { answer: result.answer, matches: [] };
+  }
+
+  logAnswerUsage(userId, agentId, { usage, model } = {}) {
+    if (!usage) return;
+    logOpenAIUsage({
+      userId,
+      agentId,
+      tokens: usage.total_tokens,
+      requests: 1,
+      model: model || CHAT_MODEL_BRIEF,
+    });
+  }
+
+  async generateAnswerFromMatches({
+    question,
+    matches,
+    chatHistory,
+    organisation,
+    websiteData,
+    answerOptions = {},
+  }) {
+    const {
+      responseMode = "brief",
+      requestedCount = 5,
+      wantsProductUrls = false,
+    } = answerOptions;
+
+    const effectiveMode =
+      wantsProductUrls && responseMode === "brief" ? "list" : responseMode;
+
+    if (
+      effectiveMode === "contact" &&
+      USE_LIGHTWEIGHT_RESPONSES &&
+      (!answerOptions.userLanguage || answerOptions.userLanguage === "en")
+    ) {
+      const structured = tryStructuredAnswer({
+        responseMode: effectiveMode,
+        matches,
+      });
+      if (structured?.answer) {
+        console.log(
+          `[QueryController] Structured ${structured.source} response (skipped LLM)`
+        );
+        return {
+          answer: structured.answer,
+          usage: null,
+          model: null,
+          source: structured.source,
+        };
+      }
+    }
+
+    const contextLimits = getContextLimitsForMode(effectiveMode);
+    const context =
+      effectiveMode === "list" || effectiveMode === "page_links"
+        ? this.buildInPageListContext(matches)
+        : this.getRelevantContext(matches, contextLimits);
+
+    return this.generateAnswer(
+      question,
+      context,
+      chatHistory,
+      organisation,
+      websiteData,
+      answerOptions
+    );
   }
 
   isSimpleGreeting(question) {
@@ -1372,15 +1678,34 @@ class QuestionAnsweringSystem {
       requestedCount = 5,
       userLanguage,
       wantsProductUrls = false,
+      retrievalMaxScore,
+      wasExpanded = false,
+      forcePremium = false,
     } = answerOptions;
 
     const effectiveMode =
       wantsProductUrls && responseMode === "brief" ? "list" : responseMode;
+    const useCompactPrompt = effectiveMode === "brief";
+    const chatModel = selectChatModel({
+      responseMode: effectiveMode,
+      retrievalMaxScore,
+      wasExpanded,
+      forcePremium,
+    });
 
     // Build dynamic system prompt if websiteData is available, otherwise use fallback
     let systemPrompt;
     if (websiteData && (organisation || websiteData.company_name)) {
-      systemPrompt = this.buildDynamicSystemPrompt(websiteData, organisation);
+      systemPrompt = this.buildDynamicSystemPrompt(websiteData, organisation, {
+        compact: useCompactPrompt,
+      });
+    } else if (useCompactPrompt) {
+      systemPrompt = `You are a customer support representative for ${organisation || "the company"}.
+
+Answer ONLY using the provided context about ${organisation || "the company"} (services, products, pricing, policies).
+
+Speak naturally as ${organisation || "the company"}. Keep replies to 1-2 sentences. Use HTML when linking.
+If the user accepted a prior offer ("yes", "tell me"), answer immediately. Use history only for follow-ups.`;
     } else {
       // Fallback to a simpler prompt if websiteData is not available
       systemPrompt = `You are a customer support representative for ${organisation || "the company"}.
@@ -1424,7 +1749,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       systemPrompt += `\n\n---\n\n### Reply Language\n\nAlways reply in **${userLanguage}** (ISO 639-1). The knowledge base content may be in a different language — translate and summarize naturally for the visitor.`;
     }
 
-    let answerInstructions;
+    let answerInstructions = "";
     if (effectiveMode === "list") {
       answerInstructions = `Instructions:
     - Write as a helpful customer support agent for ${organisation}
@@ -1436,45 +1761,32 @@ Keep responses short, direct, friendly, and professional. Only use information e
     - Only use information from the context and conversation; do not invent products, sizes, or URLs`;
     } else if (effectiveMode === "page_links") {
       answerInstructions = `Instructions:
-    - Write as a real human customer support agent would - natural, friendly, and conversational
     - Format as an HTML list of page links from the context
     - Keep the intro to 1-2 sentences`;
     } else if (effectiveMode === "contact") {
       answerInstructions = `Instructions:
-    - Write as a helpful customer support agent for ${organisation}
-    - The user wants contact info and/or social media profiles from the context below
-    - List **every** social media URL (Facebook, Instagram, Twitter/X, YouTube, TikTok, etc.) found in the context
-    - Also include phone, email, address, and office hours if present and relevant to the question
-    - Use clean HTML with <ul> and <li> tags; link each profile: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">Platform</a>
-    - **CRITICAL**: If social URLs appear in the context (including footer), include them — never say we don't have social media links
+    - List **every** social media URL, phone, email, and address from the context
+    - Use clean HTML with <ul> and <li> tags
     - Only use information from the context; do not invent URLs`;
     } else {
-      answerInstructions = `Instructions:
-    - Write as a real human customer support agent would - natural, friendly, and conversational
-    - Use natural language with contractions (I'm, we're, you're) and casual phrases
-    - **BE BRIEF**: Answer in 1-2 sentences maximum - get straight to the point, no fluff
-    - Be direct and helpful - skip unnecessary pleasantries unless it's a greeting
-    
-    **Using Conversation History:**
-    - **CRITICAL**: If the user says "okay tell me", "yes", "sure", "tell me", "go ahead", or similar responses, they are accepting an offer you made in the previous message - PROVIDE THE INFORMATION IMMEDIATELY, don't ask again
-    - If you previously offered to explain something (e.g., "Want to know how...?" or "just ask!"), and the user accepts, actually explain it - don't repeat the offer
-    - If the current question references something from the previous conversation, use the history to understand context, then answer directly and briefly
-    - If the user asks a follow-up, keep references minimal (2-3 words max, e.g., "As mentioned..." or "That's...")
-    - Never repeat full answers - if you already provided information, give a very brief reminder (1 sentence max) or just answer the new question
-    - Only reference previous conversation if it's essential to answer the current question
-    - Keep all references extremely brief - focus on answering the current question
-    
-    **Handling Questions:**
-    - If the question seems accidental or like test input, acknowledge it briefly (1 sentence) and offer help
-    - If the question is unrelated to ${organisation}, redirect briefly (1 sentence) and offer help with relevant topics
-    - **IMPORTANT**: If the user has accepted an offer you made (e.g., said "yes", "tell me", "okay"), PROVIDE THE INFORMATION - don't end with another offer/question, just answer
-    - Only end with an offer/question if the user hasn't already accepted one - don't repeat the same offer
-    - Be empathetic and understanding, not robotic or dismissive
-    - Keep it chat-like and human, not formal or scripted
-    - **REMEMBER: Maximum 1-2 sentences total - be direct and concise**`;
+      answerInstructions = `Answer in 1-2 sentences using only the context. If the user accepted a prior offer ("yes", "tell me"), provide the information now.`;
     }
 
-    const userPrompt = `Context from knowledge base:
+    const userPrompt = useCompactPrompt
+      ? `Context:
+---
+${context}
+---
+
+History:
+---
+${chatHistory || "No previous conversation"}
+---
+
+Question: ${question}
+
+${answerInstructions}`
+      : `Context from knowledge base:
     ---
     ${context}
     ---
@@ -1498,9 +1810,15 @@ Keep responses short, direct, friendly, and professional. Only use information e
           `[QueryController] Dynamic token limit applied: ${dynamicMaxTokens} tokens for query: "${question.substring(0, 60)}..."`
         );
       }
+
+      if (chatModel !== CHAT_MODEL_BRIEF) {
+        console.log(
+          `[QueryController] Using premium model ${chatModel} (mode=${effectiveMode})`
+        );
+      }
       
       const response = await openai.chat.completions.create({
-        model: CHAT_MODEL,
+        model: chatModel,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
@@ -1511,23 +1829,23 @@ Keep responses short, direct, friendly, and professional. Only use information e
           effectiveMode === "page_links"
             ? 0
             : 0.4,
-        ...chatCompletionLimitPayload(dynamicMaxTokens),
+        ...chatCompletionLimitPayload(dynamicMaxTokens, chatModel),
       });
 
       const answer =
         response.choices[0]?.message?.content?.trim() ||
-        // fallbackMessage ||
         "I apologize, I encountered an issue generating a response.";
-      const usage = response.usage; // { prompt_tokens, completion_tokens, total_tokens }
+      const usage = response.usage;
 
-      return { answer, usage };
+      return { answer, usage, model: chatModel, source: "llm" };
     } catch (error) {
       console.error("Error generating answer with OpenAI:", error);
       return {
         answer:
-          // fallbackMessage ||
           "I apologize, I encountered an issue generating a response.",
         usage: null,
+        model: chatModel,
+        source: "llm_error",
       };
     }
   }
@@ -1887,7 +2205,8 @@ Keep responses short, direct, friendly, and professional. Only use information e
     try {
       // 1. Get Chat History
       const chatSession = await this.getChatHistory(conversationId);
-      const chatHistory = this.formatChatHistory(chatSession, question);
+      const getChatHistoryFormatted = (historyLimit = CHAT_HISTORY_LIMIT) =>
+        this.formatChatHistory(chatSession, question, { historyLimit });
 
       // 3. Get Client, Widget, and WebsiteData
       const clientData = await Client.findOne({ userId }).lean();
@@ -1977,26 +2296,19 @@ Keep responses short, direct, friendly, and professional. Only use information e
             conversationId,
           });
         } else {
-          const { answer: greetingAnswer, usage: greetingUsage } =
-            await this.generateAnswer(
+          const greetingHistory = getChatHistoryFormatted(CHAT_HISTORY_LIMIT_BRIEF);
+          const greetingResult = await this.generateAnswer(
               question,
               `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
-              chatHistory,
+              greetingHistory,
               companyName,
               websiteData,
               langOpts
             );
-          if (greetingUsage) {
-            logOpenAIUsage({
-              userId,
-              agentId,
-              tokens: greetingUsage.total_tokens,
-              requests: 1,
-            });
-          }
+          this.logAnswerUsage(userId, agentId, greetingResult);
           return {
             success: true,
-            answer: greetingAnswer,
+            answer: greetingResult.answer,
             conversationId,
             isAgentRequest: false,
           };
@@ -2160,33 +2472,27 @@ Keep responses short, direct, friendly, and professional. Only use information e
         });
 
         if (specialized) {
-          const { answer: specializedAnswer, usage: specializedUsage } =
-            await this.generateAnswer(
+          const specializedResult = await this.generateAnswerFromMatches({
               question,
-              specialized.context,
-              chatHistory,
-              companyName,
+              matches: specialized.matches,
+              chatHistory: getChatHistoryFormatted(CHAT_HISTORY_LIMIT),
+              organisation: companyName,
               websiteData,
-              {
+              answerOptions: {
                 responseMode: specialized.responseMode,
                 requestedCount: specialized.requestedCount,
                 wantsProductUrls: wantsProductLinks,
+                wasExpanded,
+                retrievalMaxScore: this.getMaxSemanticScore(specialized.matches),
                 ...langOpts,
-              }
-            );
-
-          if (specializedUsage) {
-            logOpenAIUsage({
-              userId,
-              agentId,
-              tokens: specializedUsage.total_tokens,
-              requests: 1,
+              },
             });
-          }
+
+          this.logAnswerUsage(userId, agentId, specializedResult);
 
           return {
             success: true,
-            answer: specializedAnswer,
+            answer: specializedResult.answer,
             sources: this.matchesToSources(specialized.matches),
             conversationId,
             isAgentRequest: false,
@@ -2203,33 +2509,27 @@ Keep responses short, direct, friendly, and professional. Only use information e
       });
 
       if (forcedCatalog) {
-        const { answer: forcedAnswer, usage: forcedUsage } =
-          await this.generateAnswer(
+        const forcedResult = await this.generateAnswerFromMatches({
             question,
-            forcedCatalog.context,
-            chatHistory,
-            companyName,
+            matches: forcedCatalog.matches,
+            chatHistory: getChatHistoryFormatted(CHAT_HISTORY_LIMIT),
+            organisation: companyName,
             websiteData,
-            {
+            answerOptions: {
               responseMode: forcedCatalog.responseMode,
               requestedCount: forcedCatalog.requestedCount,
               wantsProductUrls: wantsProductLinks,
+              wasExpanded,
+              retrievalMaxScore: this.getMaxSemanticScore(forcedCatalog.matches),
               ...langOpts,
-            }
-          );
-
-        if (forcedUsage) {
-          logOpenAIUsage({
-            userId,
-            agentId,
-            tokens: forcedUsage.total_tokens,
-            requests: 1,
+            },
           });
-        }
+
+        this.logAnswerUsage(userId, agentId, forcedResult);
 
         return {
           success: true,
-          answer: forcedAnswer,
+          answer: forcedResult.answer,
           sources: this.matchesToSources(forcedCatalog.matches),
           conversationId,
           isAgentRequest: false,
@@ -2287,11 +2587,19 @@ Keep responses short, direct, friendly, and professional. Only use information e
       const maxScore = queryResponse.length > 0 
         ? Math.max(...queryResponse.map((m) => m.score))
         : 0;
+
+      const clearlyOnTopic =
+        this.isClearlyOnTopicCompanyQuestion(normalizedQuestion, companyName);
+      if (clearlyOnTopic) {
+        console.log(
+          `[QueryController] On-topic company question detected: "${question.substring(0, 60)}..."`
+        );
+      }
         
-      // const isIrrelevant = queryResponse.length > 0 && maxScore < IRRELEVANT_THRESHOLD;
-      const IRRELEVANT_THRESHOLD = 0.3; // If best match is below this, treat as irrelevant
+      const IRRELEVANT_THRESHOLD = 0.3;
       const isIrrelevant =
         !catalogListQuery &&
+        !clearlyOnTopic &&
         queryResponse.length > 0 &&
         maxScore < IRRELEVANT_THRESHOLD;
       
@@ -2302,8 +2610,11 @@ Keep responses short, direct, friendly, and professional. Only use information e
       }
 
       // If no matches found with current threshold, try with a lower threshold as fallback
-      // BUT only if the query seems relevant (maxScore is reasonable)
-      if (relevantMatches.length === 0 && queryResponse.length > 0 && !isIrrelevant) {
+      if (
+        relevantMatches.length === 0 &&
+        queryResponse.length > 0 &&
+        (!isIrrelevant || clearlyOnTopic)
+      ) {
         const fallbackThreshold = Math.max(0.2, effectiveThreshold - 0.15); // Lower by 0.15 but not below 0.2
         console.warn(
           `[QueryController] No matches above threshold ${effectiveThreshold}. Trying fallback threshold ${fallbackThreshold.toFixed(
@@ -2326,7 +2637,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       // bringing back the highest-scoring remaining results (but keep
       // ordering and avoid irrelevant queries).
       if (
-        !isIrrelevant &&
+        (!isIrrelevant || clearlyOnTopic) &&
         queryResponse.length > 0 &&
         relevantMatches.length < requestedTopK
       ) {
@@ -2408,24 +2719,17 @@ Keep responses short, direct, friendly, and professional. Only use information e
           });
           finalAnswer = greetingResult.answer;
         } else {
-          const { answer: greetingAnswer, usage: llmUsage } =
-            await this.generateAnswer(
+          const greetingHistory = getChatHistoryFormatted(CHAT_HISTORY_LIMIT_BRIEF);
+          const greetingResult = await this.generateAnswer(
               question,
               `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
-              chatHistory,
+              greetingHistory,
               companyName,
               websiteData,
               langOpts
             );
-          finalAnswer = greetingAnswer;
-          if (llmUsage) {
-            logOpenAIUsage({
-              userId,
-              agentId,
-              tokens: llmUsage.total_tokens,
-              requests: 1,
-            });
-          }
+          finalAnswer = greetingResult.answer;
+          this.logAnswerUsage(userId, agentId, greetingResult);
         }
       } else if (isAccidental && !this.isSimpleGreeting(question)) {
         if (USE_LIGHTWEIGHT_RESPONSES) {
@@ -2439,48 +2743,78 @@ Keep responses short, direct, friendly, and professional. Only use information e
           });
           finalAnswer = accidentalResult.answer;
         } else {
-          const { answer: accidentalAnswer, usage: llmUsage } =
-            await this.generateAnswer(
+          const accidentalHistory = getChatHistoryFormatted(CHAT_HISTORY_LIMIT_BRIEF);
+          const accidentalResult = await this.generateAnswer(
               question,
               `The user sent a message that looks accidental or like test input: "${question}". This appears to be random characters or accidental typing. Acknowledge it might have been sent by accident, be friendly and understanding, and offer help with ${companyName}'s services. Respond naturally as a human would, not robotically.`,
-              chatHistory,
+              accidentalHistory,
               companyName,
               websiteData,
               langOpts
             );
-          finalAnswer = accidentalAnswer;
-          if (llmUsage) {
-            logOpenAIUsage({
-              userId,
-              agentId,
-              tokens: llmUsage.total_tokens,
-              requests: 1,
-            });
-          }
+          finalAnswer = accidentalResult.answer;
+          this.logAnswerUsage(userId, agentId, accidentalResult);
         }
-      } else if ((relevantMatches.length === 0 || isIrrelevant) && !this.isSimpleGreeting(question) && !isAccidental) {
-        // Default answer when no relevant context found (and not a greeting or accidental)
-        // If query is completely irrelevant (low similarity scores), redirect politely like Fin
-        const contextMessage = isIrrelevant
-          ? `The user asked: "${question}". This question is completely unrelated to ${companyName} (similarity score: ${maxScore.toFixed(3)}). The user might be testing the chat or asking about something outside your scope. Acknowledge their message, redirect politely, and offer help with ${companyName}'s services. Be empathetic and natural, like a human customer support agent. Don't be dismissive - offer value.`
-          : `The user asked: "${question}". This question may not be directly related to ${companyName}. Acknowledge their question, redirect politely, and offer help with relevant topics. Be friendly and natural, not robotic. Always end with an offer to help with something relevant.`;
-        
-        const { answer: irrelaventAnswer, usage: llmUsage } =
-        await this.generateAnswer(
+      } else if (
+        clearlyOnTopic &&
+        (relevantMatches.length === 0 || maxScore < IRRELEVANT_THRESHOLD) &&
+        !this.isSimpleGreeting(question) &&
+        !isAccidental
+      ) {
+        const onTopicResult = await this.answerOnTopicWithFallback({
           question,
-          contextMessage,
-          chatHistory,
+          relevantMatches,
+          queryResponse,
+          requestedTopK,
+          getChatHistoryFormatted,
           companyName,
           websiteData,
-          langOpts
-        );
-      finalAnswer = irrelaventAnswer;
-        logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
+          langOpts,
+          wasExpanded,
+          maxScore,
+          userId,
+          agentId,
+        });
+        finalAnswer = onTopicResult.answer;
+      } else if (
+        (relevantMatches.length === 0 || isIrrelevant) &&
+        !clearlyOnTopic &&
+        !this.isSimpleGreeting(question) &&
+        !isAccidental
+      ) {
+        const useLightTemplate =
+          USE_LIGHTWEIGHT_RESPONSES &&
+          (isIrrelevant || isTrulyOffTopicQuestion(normalizedQuestion));
+
+        if (useLightTemplate) {
+          const offTopicResult = this.respondToOffTopic({
+            question,
+            companyName,
+            routing,
+            websiteLanguage,
+            options,
+            conversationId,
+            isIrrelevant,
+          });
+          finalAnswer = offTopicResult.answer;
+        } else {
+          const contextMessage = isIrrelevant
+            ? `The user asked: "${question}". This question is completely unrelated to ${companyName} (similarity score: ${maxScore.toFixed(3)}). Redirect politely and offer help with ${companyName}'s services.`
+            : `The user asked: "${question}". This question may not be directly related to ${companyName}. Redirect politely and offer help with relevant topics.`;
+
+          const offTopicHistory = getChatHistoryFormatted(CHAT_HISTORY_LIMIT_BRIEF);
+          const offTopicResult = await this.generateAnswer(
+            question,
+            contextMessage,
+            offTopicHistory,
+            companyName,
+            websiteData,
+            { ...langOpts, forcePremium: false }
+          );
+          finalAnswer = offTopicResult.answer;
+          this.logAnswerUsage(userId, agentId, offTopicResult);
+        }
       } else {
-        // Get Context and Generate Answer via LLM
-        const context = catalogListQuery
-          ? this.buildInPageListContext(relevantMatches)
-          : this.getRelevantContext(relevantMatches);
         const wantsUrls = wantsProductLinks || isProductLinkRequest(question);
         const listFallback =
           wantsUrls ||
@@ -2494,27 +2828,32 @@ Keep responses short, direct, friendly, and professional. Only use information e
           question,
           requestedTopK
         );
+        const responseMode = listFallback
+          ? "list"
+          : contactFallback
+            ? "contact"
+            : "brief";
+        const historyLimit = isPremiumResponseMode(responseMode)
+          ? CHAT_HISTORY_LIMIT
+          : CHAT_HISTORY_LIMIT_BRIEF;
 
-        const { answer: generatedAnswer, usage: llmUsage } =
-          await this.generateAnswer(
-            question,
-            context,
-            chatHistory,
-            companyName,
-            websiteData,
-            listFallback
-              ? {
-                  responseMode: "list",
-                  requestedCount,
-                  wantsProductUrls: wantsUrls,
-                  ...langOpts,
-                }
-              : contactFallback
-                ? { responseMode: "contact", ...langOpts }
-                : { wantsProductUrls: wantsUrls, ...langOpts }
-          );
-        finalAnswer = generatedAnswer;
-        logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
+        const answerResult = await this.generateAnswerFromMatches({
+          question,
+          matches: relevantMatches,
+          chatHistory: getChatHistoryFormatted(historyLimit),
+          organisation: companyName,
+          websiteData,
+          answerOptions: {
+            responseMode,
+            requestedCount,
+            wantsProductUrls: wantsUrls,
+            wasExpanded,
+            retrievalMaxScore: maxScore,
+            ...langOpts,
+          },
+        });
+        finalAnswer = answerResult.answer;
+        this.logAnswerUsage(userId, agentId, answerResult);
       }
 
       // 10. Prepare Sources from Qdrant matched payloads
