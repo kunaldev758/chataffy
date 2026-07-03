@@ -539,10 +539,15 @@ async function routeQuery(question, options = {}) {
   });
 }
 
+function isRagRoute(route) {
+  return route === ROUTES.SEMANTIC_RAG || route === ROUTES.HYBRID;
+}
+
 module.exports = {
   ROUTES,
   SUB_INTENTS,
   routeQuery,
+  isRagRoute,
   classifyStructuralSubIntent,
   isSimpleGreeting,
   isPureGreeting,

@@ -32,6 +32,16 @@ const {
   normalizeUserQuery,
   buildRetrievalKeywords,
 } = require("../utils/queryNormalization");
+const {
+  extractQueryAttributes,
+  needsKeywordRetrieval,
+  isExplicitSizedCatalogQuery,
+} = require("../utils/queryAttributes");
+const {
+  rerankByAttributes,
+  logRerankStats,
+  filterMatchesBySizes,
+} = require("../utils/attributeReranker");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -641,6 +651,142 @@ class QuestionAnsweringSystem {
     return merged.sort((a, b) => (b.score || 0) - (a.score || 0));
   }
 
+  applyAttributeRerank(matches, queryAttributes, label = "hybrid") {
+    if (!matches?.length || !queryAttributes) return matches || [];
+    const before = matches.slice(0, 8);
+    const reranked = rerankByAttributes(matches, queryAttributes, {
+      subIntent: queryAttributes.subIntent,
+    });
+    logRerankStats(label, before, reranked);
+    return reranked;
+  }
+
+  async runHybridRetrieval({
+    collectionName,
+    userIdString,
+    semanticTopK,
+    catalogKeywords,
+    getQuestionEmbedding,
+    queryAttributes,
+  }) {
+    const runKeyword =
+      needsKeywordRetrieval(queryAttributes) && catalogKeywords?.length > 0;
+
+    const sizeKeywords = (queryAttributes?.sizes || []).map((s) =>
+      s.replace(/\s/g, "").toLowerCase()
+    );
+    const keywordList = runKeyword
+      ? [...new Set([...sizeKeywords, ...catalogKeywords])]
+      : catalogKeywords;
+
+    const [vectorResults, keywordPoints] = await Promise.all([
+      this.queryQdrant(
+        collectionName,
+        await getQuestionEmbedding(),
+        semanticTopK,
+        userIdString,
+        { sizes: queryAttributes?.sizes }
+      ),
+      runKeyword
+        ? this.structuralFetchByKeywords(
+            collectionName,
+            keywordList,
+            userIdString,
+            isExplicitSizedCatalogQuery(
+              queryAttributes?.normalizedQuestion,
+              queryAttributes
+            )
+              ? 350
+              : 250
+          )
+        : Promise.resolve([]),
+    ]);
+
+    if (runKeyword) {
+      console.log(
+        `[QueryController] Hybrid retrieval: ${vectorResults.length} vector + ${keywordPoints.length} keyword hits`
+      );
+    }
+
+    const merged = this.mergeRetrievalResults(vectorResults, keywordPoints);
+    return this.applyAttributeRerank(merged, queryAttributes, "hybrid");
+  }
+
+  /**
+   * Size-filtered catalog matches for list responses.
+   */
+  selectCatalogMatches(matches, queryAttributes, { strictSize = false } = {}) {
+    if (!matches?.length) return [];
+    let selected = filterMatchesBySizes(matches, queryAttributes?.sizes || [], {
+      strict: strictSize,
+    });
+    if (queryAttributes?.sizes?.length > 0) {
+      const sized = filterMatchesBySizes(matches, queryAttributes.sizes, {
+        strict: true,
+      });
+      if (sized.length > 0) selected = sized;
+    }
+    return selected;
+  }
+
+  buildCatalogListResult(matches, companyName, requestedCount) {
+    const contextBlocks = this.buildInPageListContext(matches);
+    return {
+      context: `The user wants a complete list of items from ${companyName}'s website matching their request. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest other sizes unless the user asked for alternatives.\n\n${contextBlocks}`,
+      matches,
+      responseMode: "list",
+      requestedCount,
+    };
+  }
+
+  /**
+   * Forced catalog list when specialized path bailed but query is explicit sized catalog.
+   */
+  tryForcedCatalogList({
+    question,
+    queryResponse,
+    queryAttributes,
+    companyName,
+    requestedTopK,
+  }) {
+    if (!isExplicitSizedCatalogQuery(question, queryAttributes)) return null;
+    if (!queryResponse?.length) return null;
+
+    const requestedCount = this.extractRequestedCount(question, requestedTopK);
+    let catalogMatches = this.selectCatalogMatches(
+      queryResponse,
+      queryAttributes,
+      { strictSize: true }
+    );
+
+    if (catalogMatches.length === 0) {
+      catalogMatches = this.selectCatalogMatches(queryResponse, queryAttributes);
+    }
+
+    catalogMatches = catalogMatches
+      .filter((m) => /\b(lash|lashes|product|price|\dmm)\b/i.test(
+        `${m.payload?.title || ""} ${m.payload?.text || ""} ${m.payload?.url || ""}`
+      ))
+      .slice(0, Math.max(requestedCount * 4, 25));
+
+    if (catalogMatches.length === 0) {
+      console.log(
+        "[QueryController] Forced catalog: no lash/product matches after size filter"
+      );
+      return null;
+    }
+
+    console.log(
+      `[QueryController] Forced catalog list: ${catalogMatches.length} size-matched chunks for sizes [${(queryAttributes.sizes || []).join(", ")}]`
+    );
+
+    return this.buildCatalogListResult(
+      catalogMatches,
+      companyName,
+      requestedCount
+    );
+  }
+
   prioritizeFooterChunks(matches) {
     const footer = [];
     const rest = [];
@@ -751,6 +897,7 @@ class QuestionAnsweringSystem {
     getQuestionEmbedding,
     wantsProductLinks = false,
     catalogKeywords = null,
+    queryAttributes = null,
   }) {
     const maxSemantic = this.getMaxSemanticScore(semanticMatches);
     const hasGoodSemantic = maxSemantic >= 0.32;
@@ -782,6 +929,11 @@ class QuestionAnsweringSystem {
         semanticMatches,
         keywordPoints
       );
+      mergedMatches = this.applyAttributeRerank(
+        mergedMatches,
+        queryAttributes,
+        "IN_PAGE_LIST"
+      );
 
       if (/\b(homepage|home\s*page|main\s*page)\b/i.test(question)) {
         const homepageMatches = mergedMatches.filter((m) =>
@@ -796,7 +948,22 @@ class QuestionAnsweringSystem {
         keywords,
         keywordPoints
       );
+
+      const forcedCatalog = isExplicitSizedCatalogQuery(
+        question,
+        queryAttributes
+      );
+      let catalogMatches = this.selectCatalogMatches(
+        mergedMatches,
+        queryAttributes,
+        { strictSize: forcedCatalog }
+      );
+      if (catalogMatches.length === 0 && !forcedCatalog) {
+        catalogMatches = mergedMatches;
+      }
+
       if (
+        !forcedCatalog &&
         !hasGoodSemantic &&
         structuralHits < 2 &&
         mergedMatches.length < 2
@@ -807,10 +974,17 @@ class QuestionAnsweringSystem {
         return null;
       }
 
-      const contextBlocks = this.buildInPageListContext(mergedMatches);
+      if (forcedCatalog && catalogMatches.length === 0) {
+        console.log(
+          "[QueryController] IN_PAGE_LIST forced catalog: no matches after size filter"
+        );
+        return null;
+      }
+
+      const contextBlocks = this.buildInPageListContext(catalogMatches);
       return {
-        context: `The user wants a complete list of items from ${companyName}'s website. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below.\n\n${contextBlocks}`,
-        matches: mergedMatches,
+        context: `The user wants a complete list of items from ${companyName}'s website matching their size/style request. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest unrelated sizes.\n\n${contextBlocks}`,
+        matches: catalogMatches,
         responseMode: "list",
         requestedCount,
       };
@@ -842,6 +1016,11 @@ class QuestionAnsweringSystem {
         ...footerPoints,
         ...keywordPoints,
       ]);
+      mergedMatches = this.applyAttributeRerank(
+        mergedMatches,
+        queryAttributes,
+        "CONTACT_INFO"
+      );
       mergedMatches = this.prioritizeFooterChunks(mergedMatches);
 
       const hasFooter = footerPoints.length > 0;
@@ -923,9 +1102,10 @@ class QuestionAnsweringSystem {
         return null;
       }
 
-      const mergedMatches = this.mergeRetrievalResults(
-        semanticMatches,
-        keywordPoints
+      const mergedMatches = this.applyAttributeRerank(
+        this.mergeRetrievalResults(semanticMatches, keywordPoints),
+        queryAttributes,
+        "PAGE_LINKS"
       );
       if (mergedMatches.length > 0 && wantsProductLinks) {
         const contextBlocks = this.buildInPageListContext(mergedMatches);
@@ -1146,10 +1326,22 @@ class QuestionAnsweringSystem {
         const searchTerms = (p.payload?.search_terms || []).map((t) =>
           String(t).toLowerCase()
         );
+        const payloadSizes = (p.payload?.sizes || []).map((s) =>
+          String(s).toLowerCase()
+        );
+        const payloadCollections = (p.payload?.collections || []).map((c) =>
+          String(c).toLowerCase()
+        );
 
         return keywords.some((k) => {
           const key = k.toLowerCase();
           if (url.includes(key) || title.includes(key) || text.includes(key)) {
+            return true;
+          }
+          if (
+            payloadSizes.some((s) => s.includes(key) || key.includes(s)) ||
+            payloadCollections.some((c) => c.includes(key) || key.includes(c))
+          ) {
             return true;
           }
           return searchTerms.some(
@@ -1313,7 +1505,12 @@ Keep responses short, direct, friendly, and professional. Only use information e
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
-        temperature: 0.4, // Increased for more natural, human-like responses
+        temperature:
+          effectiveMode === "list" ||
+          effectiveMode === "contact" ||
+          effectiveMode === "page_links"
+            ? 0
+            : 0.4,
         ...chatCompletionLimitPayload(dynamicMaxTokens),
       });
 
@@ -1368,7 +1565,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
     return blocks.join("\n\n");
   }
 
-  async queryQdrant(collectionName, queryEmbedding, topK, userId) {
+  async queryQdrant(collectionName, queryEmbedding, topK, userId, options = {}) {
     try {
       console.log(
         `[QueryController] Querying Qdrant collection: ${collectionName} with topK: ${topK}, userId: ${userId}`
@@ -1425,24 +1622,68 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       // First try with user_id filter
       let searchResult = [];
+      const sizeTokens = (options.sizes || [])
+        .map((s) => s.replace(/\s/g, "").toLowerCase())
+        .filter(Boolean);
+
+      const buildFilter = (withSizeBoost = false) => {
+        const must = [];
+        if (userId) {
+          must.push({
+            key: "user_id",
+            match: { value: userId.toString() },
+          });
+        }
+        if (withSizeBoost && sizeTokens.length > 0) {
+          must.push({
+            key: "sizes",
+            match: { any: sizeTokens },
+          });
+        }
+        return must.length > 0 ? { must } : undefined;
+      };
+
       if (userId) {
         try {
-          searchResult = await this.qdrantClient.search(collectionName, {
-            vector: queryEmbedding,
-            limit: topK,
-            with_payload: true,
-            filter: {
-              must: [
-                {
-                  key: "user_id",
-                  match: { value: userId.toString() },
-                },
-              ],
-            },
-          });
-          console.log(
-            `[QueryController] Query with user_id filter returned ${searchResult.length} results`
-          );
+          if (sizeTokens.length > 0) {
+            try {
+              await this.qdrantClient.createPayloadIndex(collectionName, {
+                field_name: "sizes",
+                field_schema: "keyword",
+              });
+            } catch (e) {
+              if (!e.message?.includes("already exists")) {
+                console.warn(
+                  `[QueryController] sizes index: ${e.message}`
+                );
+              }
+            }
+          }
+
+          const sizedFilter = buildFilter(sizeTokens.length > 0);
+          if (sizedFilter) {
+            searchResult = await this.qdrantClient.search(collectionName, {
+              vector: queryEmbedding,
+              limit: topK,
+              with_payload: true,
+              filter: sizedFilter,
+            });
+            console.log(
+              `[QueryController] Query with size filter [${sizeTokens.join(", ")}] returned ${searchResult.length} results`
+            );
+          }
+
+          if (searchResult.length === 0) {
+            searchResult = await this.qdrantClient.search(collectionName, {
+              vector: queryEmbedding,
+              limit: topK,
+              with_payload: true,
+              filter: buildFilter(false),
+            });
+            console.log(
+              `[QueryController] Query with user_id filter returned ${searchResult.length} results`
+            );
+          }
         } catch (filterError) {
           console.warn(
             `[QueryController] Error with user_id filter: ${filterError.message}`
@@ -1696,6 +1937,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
 
       const websiteLanguage = websiteData?.primary_language || "en";
 
+      // --- Light normalization ---
       const queryNorm = normalizeUserQuery(question);
       const normalizedQuestion = queryNorm.normalized;
 
@@ -1829,13 +2071,34 @@ Keep responses short, direct, friendly, and professional. Only use information e
         effectiveSubIntent = "IN_PAGE_LIST";
       }
 
-      const keywordSource = routing.rewrittenQuery || retrievalQuery;
-      const catalogKeywords = this.buildCatalogKeywords(keywordSource, {
-        ...queryNorm,
-        sizes: queryNorm.sizes?.length
-          ? queryNorm.sizes
-          : currentSizes || [],
+      const queryAttributes = extractQueryAttributes({
+        normalizedQuestion,
+        queryNorm,
+        queryExpansion,
+        routing,
+        subIntent: effectiveSubIntent,
       });
+
+      console.log(
+        `[QueryController] Attributes: sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length} flags=${JSON.stringify(queryAttributes.flags)}`
+      );
+
+      // const embeddingQuery = queryAttributes.embeddingQuery;
+      // if (embeddingQuery !== retrievalQuery) {
+      //   console.log(
+      //     `[QueryController] Enriched embedding query: "${embeddingQuery}"`
+      //   );
+      // }
+
+      const catalogKeywords =
+        queryAttributes.keywords.length > 0
+          ? queryAttributes.keywords
+          : this.buildCatalogKeywords(queryAttributes.keywordSource, {
+              ...queryNorm,
+              sizes: queryNorm.sizes?.length
+                ? queryNorm.sizes
+                : currentSizes || [],
+            });
 
       let questionEmbedding = null;
       const getQuestionEmbedding = async () => {
@@ -1871,31 +2134,20 @@ Keep responses short, direct, friendly, and professional. Only use information e
         semanticTopK = Math.max(semanticTopK, 15);
       }
 
-      let queryResponse = await this.queryQdrant(
+      let queryResponse = await this.runHybridRetrieval({
         collectionName,
-        await getQuestionEmbedding(),
+        userIdString,
         semanticTopK,
-        userIdString
-      );
-
-      if (isCatalogQuery || wasExpanded || queryNorm.sizes?.length > 0) {
-        const keywordPoints = await this.structuralFetchByKeywords(
-          collectionName,
-          catalogKeywords,
-          userIdString,
-          250
-        );
-        queryResponse = this.mergeRetrievalResults(
-          queryResponse,
-          keywordPoints
-        );
-      }
+        catalogKeywords,
+        getQuestionEmbedding,
+        queryAttributes,
+      });
 
       if (effectiveSubIntent) {
         const specialized = await this.trySpecializedRetrieval({
           subIntent: effectiveSubIntent,
           question,
-          keywordSource,
+          keywordSource: queryAttributes.keywordSource,
           collectionName,
           userIdString,
           requestedTopK,
@@ -1904,6 +2156,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           getQuestionEmbedding,
           wantsProductLinks,
           catalogKeywords,
+          queryAttributes,
         });
 
         if (specialized) {
@@ -1941,6 +2194,48 @@ Keep responses short, direct, friendly, and professional. Only use information e
         }
       }
 
+      const forcedCatalog = this.tryForcedCatalogList({
+        question: normalizedQuestion,
+        queryResponse,
+        queryAttributes,
+        companyName,
+        requestedTopK,
+      });
+
+      if (forcedCatalog) {
+        const { answer: forcedAnswer, usage: forcedUsage } =
+          await this.generateAnswer(
+            question,
+            forcedCatalog.context,
+            chatHistory,
+            companyName,
+            websiteData,
+            {
+              responseMode: forcedCatalog.responseMode,
+              requestedCount: forcedCatalog.requestedCount,
+              wantsProductUrls: wantsProductLinks,
+              ...langOpts,
+            }
+          );
+
+        if (forcedUsage) {
+          logOpenAIUsage({
+            userId,
+            agentId,
+            tokens: forcedUsage.total_tokens,
+            requests: 1,
+          });
+        }
+
+        return {
+          success: true,
+          answer: forcedAnswer,
+          sources: this.matchesToSources(forcedCatalog.matches),
+          conversationId,
+          isAgentRequest: false,
+        };
+      }
+
       // Standard semantic RAG path (always runs; specialized path only when quality passes)
 
       // Log if no results found at all
@@ -1959,6 +2254,15 @@ Keep responses short, direct, friendly, and professional. Only use information e
       let effectiveThreshold =
         widgetThreshold !== undefined ? widgetThreshold : scoreThreshold;
 
+      const sizedCatalogQuery = isExplicitSizedCatalogQuery(
+        normalizedQuestion,
+        queryAttributes
+      );
+      const catalogListQuery =
+        sizedCatalogQuery ||
+        (effectiveSubIntent === "IN_PAGE_LIST" &&
+          this.isExplicitInPageListQuestion(normalizedQuestion));
+
       // Warn if threshold is very low (may include irrelevant results)
       if (effectiveThreshold < 0.3) {
         console.warn(
@@ -1966,17 +2270,30 @@ Keep responses short, direct, friendly, and professional. Only use information e
         );
       }
 
-      // Filter matches by score threshold
-      let relevantMatches = queryResponse.filter(
-        (match) => match.score >= effectiveThreshold
-      );
+      // Filter matches by score threshold (bypass for explicit catalog list queries)
+      let relevantMatches = catalogListQuery
+        ? this.selectCatalogMatches(queryResponse, queryAttributes, {
+            strictSize: sizedCatalogQuery,
+          }).slice(0, Math.max(requestedTopK * 4, 25))
+        : queryResponse.filter((match) => match.score >= effectiveThreshold);
+
+      if (catalogListQuery && relevantMatches.length > 0) {
+        console.log(
+          `[QueryController] Catalog list bypass: using ${relevantMatches.length} size-matched chunks (threshold bypassed)`
+        );
+      }
 
       // Check if query is completely irrelevant (all scores are very low)
       const maxScore = queryResponse.length > 0 
         ? Math.max(...queryResponse.map((m) => m.score))
         : 0;
-      const IRRELEVANT_THRESHOLD = 0.2; // If best match is below this, treat as irrelevant
-      const isIrrelevant = queryResponse.length > 0 && maxScore < IRRELEVANT_THRESHOLD;
+        
+      // const isIrrelevant = queryResponse.length > 0 && maxScore < IRRELEVANT_THRESHOLD;
+      const IRRELEVANT_THRESHOLD = 0.3; // If best match is below this, treat as irrelevant
+      const isIrrelevant =
+        !catalogListQuery &&
+        queryResponse.length > 0 &&
+        maxScore < IRRELEVANT_THRESHOLD;
       
       if (isIrrelevant) {
         console.warn(
@@ -2161,7 +2478,9 @@ Keep responses short, direct, friendly, and professional. Only use information e
         logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
       } else {
         // Get Context and Generate Answer via LLM
-        const context = this.getRelevantContext(relevantMatches);
+        const context = catalogListQuery
+          ? this.buildInPageListContext(relevantMatches)
+          : this.getRelevantContext(relevantMatches);
         const wantsUrls = wantsProductLinks || isProductLinkRequest(question);
         const listFallback =
           wantsUrls ||

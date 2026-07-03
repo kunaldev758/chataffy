@@ -172,5 +172,6 @@ module.exports = {
   isEcommerceCatalogQuery,
   extractSizeTokens,
   extractTopicsFromHistory,
+  extractCollectionHints,
   detectCatalogFollowUp,
 };
