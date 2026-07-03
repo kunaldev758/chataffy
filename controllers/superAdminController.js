@@ -872,8 +872,16 @@ module.exports.deleteAiModel = async (req, res) => {
 
 
 function validateAiModel(model, status, inputCost, outputCost, cacheCost, categories) {
-  if(!model || !status || !inputCost || !outputCost || !cacheCost || !categories) {
-    return { success: false, message: "All fields are required" };
+  if (!model || !status) {
+    return { success: false, message: "Model and status are required" };
+  }
+
+  if (inputCost == null || outputCost == null || cacheCost == null) {
+    return { success: false, message: "All cost fields are required" };
+  }
+
+  if (!categories) {
+    return { success: false, message: "Categories are required" };
   }
 
   if(status !== "active" && status !== "inactive") {
@@ -881,7 +889,7 @@ function validateAiModel(model, status, inputCost, outputCost, cacheCost, catego
   }
 
   if(inputCost < 0 || outputCost < 0 || cacheCost < 0) {
-    return { success: false, message: "Costs must be greater than 0" };
+    return { success: false, message: "Costs must not be negative" };
   }
 
   if(categories.length === 0) {
