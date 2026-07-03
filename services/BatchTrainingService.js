@@ -71,6 +71,7 @@ class BatchTrainingService {
       await vectorStore.createCollection();
 
       const upsertResult = await vectorStore.upsertDocuments(allChunks, userId, {
+        agentId,
         onProgress: onProgress
           ? async (event) => {
               if (event.step === "embedding") {

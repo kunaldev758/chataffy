@@ -1,12 +1,27 @@
-const AiModel = require("../models/AiModel");
+const { AiModelsCategory, AiModel } = require("../models/AiModel");
 
 exports.getModelForCategory = async (category) => {
-    let model = await AiModel.findOne({
+  try {
+    let model = await AiModelsCategory.findOne({
+      category: category,
+    })
+      .select("_id")
+      .lean();
+
+    if (!model) throw new Error(`No AI model category found for "${category}"`);
+
+    const aiModal = await AiModel.findOne({
       status: "active",
-      categories: category,
+      categories: model._id,
     }).lean();
-  
-    if (!model) throw new Error(`No active AI model configured for category "${category}"`);
-  
-    return model;
-}
+
+    if (!aiModal)
+      throw new Error(
+        `No active AI model configured for category "${category}"`,
+      );
+
+    return aiModal;
+  } catch (err) {
+    console.error(`Error fetching model for category ${category}:`, err);
+  }
+};

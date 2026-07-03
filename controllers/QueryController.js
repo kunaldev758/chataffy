@@ -10,6 +10,7 @@ const Agent = require("../models/Agent");
 const WebsiteData = require("../models/WebsiteData");
 const HumanAgent = require("../models/HumanAgent");
 const { logOpenAIUsage } = require("../services/UsageTrackingService");
+const { getModelForCategory } = require("../services/aiModelService");
 const { routeQuery, ROUTES, isLiveAgentRequest } = require("../services/QueryRouter");
 const {
   expandQueryForRetrieval,
@@ -24,13 +25,13 @@ const {
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 // Define models used in this service
-const EMBEDDING_MODEL =
+const DEFAULT_EMBEDDING_MODEL =
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
-const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-5";
+const DEFAULT_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-5";
 
 /** GPT-5 / o-series chat models reject `max_tokens`; they require `max_completion_tokens`. */
-function chatCompletionLimitPayload(maxTokens) {
-  if (/^gpt-5|^o\d/i.test(CHAT_MODEL)) {
+function chatCompletionLimitPayload(maxTokens, chatModelName = DEFAULT_CHAT_MODEL) {
+  if (/^gpt-5|^o\d/i.test(chatModelName)) {
     return { max_completion_tokens: maxTokens };
   }
   return { max_tokens: maxTokens };
@@ -41,21 +42,253 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // Initialize Qdrant client
 const qdrantClient = new QdrantClient({
-  url: process.env.QDRANT_URL || "https://8659fcda-ff81-4896-8786-55418a544b55.eu-central-1-0.aws.cloud.qdrant.io",
+  url: process.env.QDRANT_URL,
   apiKey:
-    process.env.QDRANT_API_KEY ||
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.HRXxjdjkAjB3phjpoI9inwpfxo8Bv8DjQ11EMdiUrGk",
+    process.env.QDRANT_API_KEY 
 });
 
 class QuestionAnsweringSystem {
   constructor() {
-    // Explicitly set the model in OpenAIEmbeddings
-    this.embeddingModel = new OpenAIEmbeddings({
-      openAIApiKey: OPENAI_API_KEY,
-      modelName: EMBEDDING_MODEL,
-    });
+    this.embeddingModel = null;
+    this.embeddingModelInitPromise = null;
+    this.chatModelName = DEFAULT_CHAT_MODEL;
+    this.chatModelInitPromise = null;
+    this.chatModelRecord = null;
+    this.chatModelContextKey = null;
 
     this.qdrantClient = qdrantClient;
+
+    this.embeddingModelInitPromise = this.initializeEmbeddingModel();
+    this.chatModelInitPromise = this.initializeChatModel();
+  }
+
+  async initializeEmbeddingModel(forceRefresh = false) {
+    try {
+      const modelRecord = await getModelForCategory("embedding").catch((error) => {
+        console.warn(
+          `Unable to fetch embedding model from aiModelService, using fallback: ${error.message}`
+        );
+        return null;
+      });
+
+      const modelName =
+        modelRecord?.model ||
+        process.env.OPENAI_EMBEDDING_MODEL ||
+        DEFAULT_EMBEDDING_MODEL;
+
+      if (!forceRefresh && this.embeddingModel && this.embeddingModelName === modelName) {
+        return this.embeddingModel;
+      }
+
+      this.embeddingModelName = modelName;
+      this.embeddingModel = new OpenAIEmbeddings({
+        openAIApiKey: OPENAI_API_KEY,
+        modelName,
+      });
+
+      return this.embeddingModel;
+    } catch (error) {
+      console.warn(
+        `Failed to initialize embedding model, falling back to default: ${error.message}`
+      );
+      if (!forceRefresh && this.embeddingModel) {
+        return this.embeddingModel;
+      }
+      this.embeddingModelName = DEFAULT_EMBEDDING_MODEL;
+      this.embeddingModel = new OpenAIEmbeddings({
+        openAIApiKey: OPENAI_API_KEY,
+        modelName: DEFAULT_EMBEDDING_MODEL,
+      });
+      return this.embeddingModel;
+    }
+  }
+
+  async initializeChatModel(forceRefresh = false) {
+    try {
+      const modelRecord = await getModelForCategory("chat").catch((error) => {
+        console.warn(
+          `Unable to fetch chat model from aiModelService, using fallback: ${error.message}`
+        );
+        return null;
+      });
+
+      const modelName =
+        modelRecord?.model ||
+        process.env.OPENAI_CHAT_MODEL ||
+        DEFAULT_CHAT_MODEL;
+
+      if (!forceRefresh && this.chatModelName === modelName) {
+        this.chatModelRecord = modelRecord || this.chatModelRecord;
+        return this.chatModelName;
+      }
+
+      this.chatModelName = modelName;
+      this.chatModelRecord = modelRecord || this.chatModelRecord;
+      return this.chatModelName;
+    } catch (error) {
+      console.warn(
+        `Failed to initialize chat model, falling back to default: ${error.message}`
+      );
+      if (!forceRefresh && this.chatModelName) {
+        return this.chatModelName;
+      }
+      this.chatModelName = DEFAULT_CHAT_MODEL;
+      return this.chatModelName;
+    }
+  }
+
+  async getChatModelRecord(forceRefresh = false) {
+    if (!forceRefresh && this.chatModelRecord) {
+      return this.chatModelRecord;
+    }
+
+    const modelRecord = await getModelForCategory("chat").catch((error) => {
+      console.warn(
+        `Unable to fetch chat model record from aiModelService: ${error.message}`
+      );
+      return null;
+    });
+
+    if (modelRecord) {
+      this.chatModelRecord = modelRecord;
+    }
+
+    return modelRecord;
+  }
+
+  async logOpenAIChatUsage({
+    userId,
+    agentId,
+    conversationId,
+    usage,
+    modelName,
+    type = "chat",
+  }) {
+    if (!usage) {
+      return;
+    }
+
+    // Fetch model record based on type category (chat, embedding, intent, etc.)
+    let modelRecord = null;
+    try {
+      if (type === "chat") {
+        modelRecord = await this.getChatModelRecord();
+      } else {
+        // For other types (embedding, intent, text-embedding-3-small, etc.), fetch from category
+        modelRecord = await getModelForCategory(type).catch((error) => {
+          console.warn(
+            `Unable to fetch model record for category "${type}": ${error.message}`
+          );
+          return null;
+        });
+      }
+    } catch (error) {
+      console.warn(
+        `Error fetching model record for type "${type}": ${error.message}`
+      );
+      modelRecord = null;
+    }
+
+    const inputCostPerMillion = modelRecord?.inputCost || 0;
+    const outputCostPerMillion = modelRecord?.outputCost || 0;
+    const cacheCostPerMillion = modelRecord?.cacheCost || 0;
+
+    const promptTokens = usage.prompt_tokens || 0;
+    const completionTokens = usage.completion_tokens || 0;
+    const cacheTokens = usage?.prompt_tokens_details?.cached_tokens ?? 0;
+
+    const uncachedPromptTokens = Math.max(0, promptTokens - cacheTokens);
+
+    const inputCost =
+      (uncachedPromptTokens / 1000000) * inputCostPerMillion;
+
+    const cacheCost =
+      (cacheTokens / 1000000) * cacheCostPerMillion;
+
+    const outputCost =
+      (completionTokens / 1000000) * outputCostPerMillion;
+
+    const totalCost = inputCost + cacheCost + outputCost;
+
+    await logOpenAIUsage({
+      userId,
+      agentId,
+      conversationId,
+      model: modelName,
+      type,
+      inputTokens: promptTokens,
+      outputTokens: completionTokens,
+      cacheTokens: cacheTokens,
+      totalTokens: usage.total_tokens || 0,
+      inputCost,
+      outputCost,
+      cacheCost,
+      totalCost: inputCost + outputCost + cacheCost,
+    });
+  }
+
+  async ensureEmbeddingModelReady() {
+    try {
+      const modelRecord = await getModelForCategory("embedding").catch((error) => {
+        console.warn(
+          `Unable to fetch embedding model from aiModelService while ensuring readiness: ${error.message}`
+        );
+        return null;
+      });
+
+      const modelName =
+        modelRecord?.model ||
+        process.env.OPENAI_EMBEDDING_MODEL ||
+        DEFAULT_EMBEDDING_MODEL;
+
+      if (this.embeddingModel && this.embeddingModelName === modelName) {
+        return this.embeddingModel;
+      }
+
+      this.embeddingModelInitPromise = this.initializeEmbeddingModel(true);
+      return this.embeddingModelInitPromise;
+    } catch (error) {
+      console.warn(
+        `Failed to ensure embedding model readiness, falling back to default: ${error.message}`
+      );
+      this.embeddingModelInitPromise = this.initializeEmbeddingModel(true);
+      return this.embeddingModelInitPromise;
+    }
+  }
+
+  async getChatModelName({
+    agentId = null,
+    websiteData = null,
+    query = null,
+    conversationId = null,
+    forceRefresh = false,
+  } = {}) {
+    try {
+      const contextKey = `${agentId || ""}:${websiteData?.id || websiteData?.website_name || websiteData?.company_name || ""}`;
+
+      if (!forceRefresh && this.chatModelName && this.chatModelContextKey === contextKey) {
+        return this.chatModelName;
+      }
+
+      if (!forceRefresh && this.chatModelInitPromise) {
+        await this.chatModelInitPromise;
+        if (this.chatModelContextKey === contextKey) {
+          return this.chatModelName;
+        }
+      }
+
+      this.chatModelContextKey = contextKey;
+      this.chatModelInitPromise = this.initializeChatModel(forceRefresh);
+      await this.chatModelInitPromise;
+      return this.chatModelName;
+    } catch (error) {
+      console.warn(
+        `Failed to resolve chat model, falling back to default: ${error.message}`
+      );
+      this.chatModelInitPromise = this.initializeChatModel(true);
+      await this.chatModelInitPromise;
+      return this.chatModelName;
+    }
   }
 
   // check 2 ----> 
@@ -1229,14 +1462,16 @@ Keep responses short, direct, friendly, and professional. Only use information e
         );
       }
       
+      const chatModelName = await this.getChatModelName();
+
       const response = await openai.chat.completions.create({
-        model: CHAT_MODEL,
+        model: chatModelName,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
         temperature: 0.4, // Increased for more natural, human-like responses
-        ...chatCompletionLimitPayload(dynamicMaxTokens),
+        ...chatCompletionLimitPayload(dynamicMaxTokens, chatModelName),
       });
 
       const answer =
@@ -1245,7 +1480,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         "I apologize, I encountered an issue generating a response.";
       const usage = response.usage; // { prompt_tokens, completion_tokens, total_tokens }
 
-      return { answer, usage };
+      return { answer, usage, model: chatModelName };
     } catch (error) {
       console.error("Error generating answer with OpenAI:", error);
       return {
@@ -1562,6 +1797,13 @@ Keep responses short, direct, friendly, and professional. Only use information e
       const websiteData = await WebsiteData.findOne({ agentId }).lean();
       const companyName = this.resolveCompanyName({ websiteData, widgetData, agentData });
 
+      await this.getChatModelName({
+        agentId,
+        websiteData,
+        query: question,
+        conversationId,
+      });
+
       if (
         !clientData ||
         !agentData.qdrantIndexName ||
@@ -1642,6 +1884,21 @@ Keep responses short, direct, friendly, and professional. Only use information e
         chatMessages: chatSession,
         websiteLanguage,
         openaiClient: openai,
+        logOpenAIUsage: async (usageData) => {
+          try {
+            await this.logOpenAIChatUsage({
+              userId,
+              agentId,
+              conversationId,
+              usage: usageData.usage,
+              modelName: usageData.modelName,
+              type: "intent",
+            });
+          } catch (logError) {
+            console.warn(`[QueryController] Error logging OpenAI usage: ${logError.message}`);
+          }
+        },
+        routerModel: (await getModelForCategory("intent"))?.model || process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano",
       });
 
       console.log(
@@ -1651,7 +1908,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       const langOpts = { userLanguage: routing.userLanguage };
 
       if (routing.route === ROUTES.GREETING) {
-        const { answer: greetingAnswer, usage: greetingUsage } =
+        const { answer: greetingAnswer, usage: greetingUsage, model: greetingModelName } =
           await this.generateAnswer(
             question,
             `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
@@ -1661,12 +1918,17 @@ Keep responses short, direct, friendly, and professional. Only use information e
             langOpts
           );
         if (greetingUsage) {
-          logOpenAIUsage({
-            userId,
-            agentId,
-            tokens: greetingUsage.total_tokens,
-            requests: 1,
-          });
+          try {
+            this.logOpenAIChatUsage({
+              userId,
+              agentId,
+              conversationId,
+              usage: greetingUsage,
+              modelName: greetingModelName,
+            });
+          } catch (logError) {
+            console.warn(`[QueryController] Error logging greeting usage: ${logError.message}`);
+          }
         }
         return {
           success: true,
@@ -1677,7 +1939,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       }
 
       if (routing.route === ROUTES.LIVE_AGENT) {
-        const { answer: agentAnswer, usage: agentUsage } =
+        const { answer: agentAnswer, usage: agentUsage, model: agentModelName } =
           await this.generateAnswer(
             question,
             `The visitor wants to speak with a live human agent or representative. Acknowledge warmly, confirm they will be connected to a team member shortly, and be brief and natural.`,
@@ -1687,12 +1949,17 @@ Keep responses short, direct, friendly, and professional. Only use information e
             langOpts
           );
         if (agentUsage) {
-          logOpenAIUsage({
-            userId,
-            agentId,
-            tokens: agentUsage.total_tokens,
-            requests: 1,
-          });
+          try {
+            this.logOpenAIChatUsage({
+              userId,
+              agentId,
+              conversationId,
+              usage: agentUsage,
+              modelName: agentModelName,
+            });
+          } catch (logError) {
+            console.warn(`[QueryController] Error logging live agent usage: ${logError.message}`);
+          }
         }
         return {
           success: true,
@@ -1733,10 +2000,28 @@ Keep responses short, direct, friendly, and professional. Only use information e
       let questionEmbedding = null;
       const getQuestionEmbedding = async () => {
         if (!questionEmbedding) {
-          questionEmbedding =
-            await this.embeddingModel.embedQuery(embeddingQuery);
-          if (!questionEmbedding) {
+          const embeddingModel = await this.ensureEmbeddingModelReady();
+          const embeddingResponse = await embeddingModel.embedQuery(embeddingQuery);
+          if (!embeddingResponse) {
             throw new Error("Failed to generate question embedding.");
+          }
+          // Handle response object with usage or direct embedding
+          questionEmbedding = embeddingResponse.embedding || embeddingResponse;
+          
+          // Log embedding API usage if available
+          if (embeddingResponse.usage) {
+            try {
+              this.logOpenAIChatUsage({
+                userId,
+                agentId,
+                conversationId,
+                usage: embeddingResponse.usage,
+                modelName: embeddingResponse.model || "embedding",
+                type: "embedding"
+              });
+            } catch (logError) {
+              console.warn(`[QueryController] Error logging embedding usage: ${logError.message}`);
+            }
           }
         }
         return questionEmbedding;
@@ -1800,7 +2085,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
         });
 
         if (specialized) {
-          const { answer: specializedAnswer, usage: specializedUsage } =
+          const { answer: specializedAnswer, usage: specializedUsage, model: specializedModel } =
             await this.generateAnswer(
               question,
               specialized.context,
@@ -1816,12 +2101,18 @@ Keep responses short, direct, friendly, and professional. Only use information e
             );
 
           if (specializedUsage) {
-            logOpenAIUsage({
-              userId,
-              agentId,
-              tokens: specializedUsage.total_tokens,
-              requests: 1,
-            });
+            try {
+              this.logOpenAIChatUsage({
+                userId,
+                agentId,
+                conversationId,
+                usage: specializedUsage,
+                modelName: specializedModel,
+                type: "chat",
+              });
+            } catch (logError) {
+              console.warn(`[QueryController] Error logging specialized answer usage: ${logError.message}`);
+            }
           }
 
           return {
@@ -1974,7 +2265,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       // Handle simple greetings even without context
       if (relevantMatches.length === 0 && this.isSimpleGreeting(question)) {
         // For greetings, generate a friendly response even without context
-        const { answer: greetingAnswer, usage: llmUsage } =
+        const { answer: greetingAnswer, usage: llmUsage, model: greetingModel } =
           await this.generateAnswer(
             question,
             `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
@@ -1985,16 +2276,23 @@ Keep responses short, direct, friendly, and professional. Only use information e
           );
         finalAnswer = greetingAnswer;
         if (llmUsage) {
-          logOpenAIUsage({
-            userId,
-            agentId,
-            tokens: llmUsage.total_tokens,
-            requests: 1,
-          });
+          // logOpenAIUsage({
+          //   userId,
+          //   agentId,
+          //   tokens: llmUsage.total_tokens,
+          //   requests: 1,
+          // });
+            this.logOpenAIChatUsage({
+              userId,
+              agentId,
+              conversationId,
+              usage: llmUsage,
+              modelName: greetingModel,
+            });
         }
       } else if (isAccidental && !this.isSimpleGreeting(question)) {
         // Handle accidental/test messages like Fin does
-        const { answer: accidentalAnswer, usage: llmUsage } =
+        const { answer: accidentalAnswer, usage: llmUsage, model: accidentalModelName } =
           await this.generateAnswer(
             question,
             `The user sent a message that looks accidental or like test input: "${question}". This appears to be random characters or accidental typing. Acknowledge it might have been sent by accident, be friendly and understanding, and offer help with ${companyName}'s services. Respond naturally as a human would, not robotically.`,
@@ -2004,7 +2302,20 @@ Keep responses short, direct, friendly, and professional. Only use information e
             langOpts
           );
         finalAnswer = accidentalAnswer;
-        logOpenAIUsage({ userId, agentId, tokens: llmUsage.total_tokens, requests: 1 });
+        if (llmUsage) {
+          try {
+            this.logOpenAIChatUsage({
+              userId,
+              agentId,
+              conversationId,
+              usage: llmUsage,
+              modelName: accidentalModelName,
+              type:"chat"
+            });
+          } catch (logError) {
+            console.warn(`[QueryController] Error logging accidental message usage: ${logError.message}`);
+          }
+        }
       } else if ((relevantMatches.length === 0 || isIrrelevant) && !this.isSimpleGreeting(question) && !isAccidental) {
         // Default answer when no relevant context found (and not a greeting or accidental)
         // If query is completely irrelevant (low similarity scores), redirect politely like Fin
@@ -2012,7 +2323,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           ? `The user asked: "${question}". This question is completely unrelated to ${companyName} (similarity score: ${maxScore.toFixed(3)}). The user might be testing the chat or asking about something outside your scope. Acknowledge their message, redirect politely, and offer help with ${companyName}'s services. Be empathetic and natural, like a human customer support agent. Don't be dismissive - offer value.`
           : `The user asked: "${question}". This question may not be directly related to ${companyName}. Acknowledge their question, redirect politely, and offer help with relevant topics. Be friendly and natural, not robotic. Always end with an offer to help with something relevant.`;
         
-        const { answer: irrelaventAnswer, usage: llmUsage } =
+        const { answer: irrelaventAnswer, usage: llmUsage, model: irrelevantModelName } =
         await this.generateAnswer(
           question,
           contextMessage,
@@ -2022,7 +2333,20 @@ Keep responses short, direct, friendly, and professional. Only use information e
           langOpts
         );
       finalAnswer = irrelaventAnswer;
-        logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
+        if (llmUsage) {
+          try {
+            this.logOpenAIChatUsage({
+              userId,
+              agentId,
+              conversationId,
+              usage: llmUsage,
+              modelName: irrelevantModelName,
+              type:"chat"
+            });
+          } catch (logError) {
+            console.warn(`[QueryController] Error logging irrelevant query usage: ${logError.message}`);
+          }
+        }
       } else {
         // Get Context and Generate Answer via LLM
         const context = this.getRelevantContext(relevantMatches);
@@ -2040,7 +2364,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
           requestedTopK
         );
 
-        const { answer: generatedAnswer, usage: llmUsage } =
+        const { answer: generatedAnswer, usage: llmUsage, model: replyModelName } =
           await this.generateAnswer(
             question,
             context,
@@ -2059,7 +2383,20 @@ Keep responses short, direct, friendly, and professional. Only use information e
                 : { wantsProductUrls: wantsUrls, ...langOpts }
           );
         finalAnswer = generatedAnswer;
-        logOpenAIUsage({ userId,agentId, tokens: llmUsage.total_tokens, requests: 1 });
+        if (llmUsage) {
+          try {
+            this.logOpenAIChatUsage({
+              userId,
+              agentId,
+              conversationId,
+              usage: llmUsage,
+              modelName: replyModelName,
+              type:"chat"
+            });
+          } catch (logError) {
+            console.warn(`[QueryController] Error logging answer generation usage: ${logError.message}`);
+          }
+        }
       }
 
       // 10. Prepare Sources from Qdrant matched payloads

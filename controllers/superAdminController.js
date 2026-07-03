@@ -314,8 +314,15 @@ module.exports.getDashboardData = async (req, res) => {
         last7Days
       },
       openAIUsage: {
+        totalInputTokens: openAIUsage.totalInputTokens || 0,
+        totalOutputTokens: openAIUsage.totalOutputTokens || 0,
+        totalCacheTokens: openAIUsage.totalCacheTokens || 0,
         totalTokens: openAIUsage.totalTokens || 0,
-        totalCost: openAIUsage.totalCost || 0
+        totalInputCost: openAIUsage.totalInputCost || 0,
+        totalOutputCost: openAIUsage.totalOutputCost || 0,
+        totalCacheCost: openAIUsage.totalCacheCost || 0,
+        totalCost: openAIUsage.totalCost || 0,
+        totalRequests: openAIUsage.totalRequests || 0,
       },
       qdrantUsage: {
         totalVectorsAdded: qdrantUsage.totalVectorsAdded || 0,
