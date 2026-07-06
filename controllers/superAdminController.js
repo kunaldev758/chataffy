@@ -21,6 +21,7 @@ const User = require("../models/User");
 const ImpersonationSession = require("../models/ImpersonationSession");
 const {AiModelsCategory,AiModel} = require("../models/AiModel");
 const { default: mongoose } = require("mongoose");
+const { clearModelCache } = require("../services/aiModelService");
 
 // SuperAdmin login
 module.exports.superAdminLogin = async (req, res) => {
@@ -829,6 +830,8 @@ module.exports.createAiModel = async (req, res) => {
       );
     }
 
+    clearModelCache();
+
     res.status(200).json({ success: true, data: aiModel });
   } catch (error) {
     if (error.code === 11000) {
@@ -863,6 +866,8 @@ module.exports.updateAiModel = async (req, res) => {
       );
     }
 
+    clearModelCache();
+
     res.status(200).json({ success: true, data: updated });
   } catch (error) {
     console.error("Error updating ai model:", error);
@@ -878,6 +883,7 @@ module.exports.deleteAiModel = async (req, res) => {
     if (!deletedModel) {
       return res.status(404).json({ message: "Ai model not found" });
     }
+    clearModelCache();
     res.status(200).json({ success: true, message: "Ai model deleted successfully" });
   } catch (error) {
     console.error("Error deleting ai model:", error);
@@ -942,6 +948,7 @@ module.exports.createAiModelCategory = async (req, res) => {
     }
 
     const category = await AiModelsCategory.create({ category: rawName.trim() });
+    clearModelCache();
     res.status(200).json({ success: true, data: category });
   } catch (error) {
     console.error("Error creating ai model category:", error);
@@ -975,6 +982,8 @@ module.exports.updateAiModelCategory = async (req, res) => {
       return res.status(404).json({ message: "Category not found" });
     }
 
+    clearModelCache();
+
     res.status(200).json({ success: true, data: updatedCategory });
   } catch (error) {
     console.error("Error updating ai model category:", error);
@@ -999,6 +1008,8 @@ module.exports.deleteAiModelCategory = async (req, res) => {
 
     // Delete the category
     await AiModelsCategory.findByIdAndDelete(categoryId);
+
+    clearModelCache();
 
     res.status(200).json({ success: true, message: "Category deleted successfully" });
   } catch (error) {

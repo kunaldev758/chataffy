@@ -48,112 +48,47 @@ const qdrantClient = new QdrantClient({
 });
 
 class QuestionAnsweringSystem {
-  constructor() {
+   constructor() {
     this.embeddingModel = null;
-    this.embeddingModelInitPromise = null;
-    this.chatModelName = DEFAULT_CHAT_MODEL;
-    this.chatModelInitPromise = null;
-    this.chatModelRecord = null;
-    this.chatModelContextKey = null;
-
-    this.qdrantClient = qdrantClient;
-
-    this.embeddingModelInitPromise = this.initializeEmbeddingModel();
-    this.chatModelInitPromise = this.initializeChatModel();
+    this.currentModelName = null;
   }
 
-  async initializeEmbeddingModel(forceRefresh = false) {
-    try {
-      const modelRecord = await getModelForCategory("embedding").catch((error) => {
-        console.warn(
-          `Unable to fetch embedding model from aiModelService, using fallback: ${error.message}`
-        );
-        return null;
-      });
+  async getEmbeddingModel() {
+    const modelRecord = await getModelForCategory("embedding");
+    const modelName =
+      modelRecord?.model ||
+      process.env.OPENAI_EMBEDDING_MODEL ||
+      DEFAULT_EMBEDDING_MODEL;
 
-      const modelName =
-        modelRecord?.model ||
-        process.env.OPENAI_EMBEDDING_MODEL ||
-        DEFAULT_EMBEDDING_MODEL;
-
-      if (!forceRefresh && this.embeddingModel && this.embeddingModelName === modelName) {
-        return this.embeddingModel;
-      }
-
-      this.embeddingModelName = modelName;
-      this.embeddingModel = new OpenAIEmbeddings({
-        openAIApiKey: OPENAI_API_KEY,
-        modelName,
-      });
-
-      return this.embeddingModel;
-    } catch (error) {
-      console.warn(
-        `Failed to initialize embedding model, falling back to default: ${error.message}`
-      );
-      if (!forceRefresh && this.embeddingModel) {
-        return this.embeddingModel;
-      }
-      this.embeddingModelName = DEFAULT_EMBEDDING_MODEL;
-      this.embeddingModel = new OpenAIEmbeddings({
-        openAIApiKey: OPENAI_API_KEY,
-        modelName: DEFAULT_EMBEDDING_MODEL,
-      });
+    if (
+      this.embeddingModel &&
+      this.currentModelName === modelName
+    ) {
       return this.embeddingModel;
     }
-  }
 
-  async initializeChatModel(forceRefresh = false) {
-    try {
-      const modelRecord = await getModelForCategory("chat").catch((error) => {
-        console.warn(
-          `Unable to fetch chat model from aiModelService, using fallback: ${error.message}`
-        );
-        return null;
-      });
+    console.log(`Switching embedding model to ${modelName}`);
 
-      const modelName =
-        modelRecord?.model ||
-        process.env.OPENAI_CHAT_MODEL ||
-        DEFAULT_CHAT_MODEL;
-
-      if (!forceRefresh && this.chatModelName === modelName) {
-        this.chatModelRecord = modelRecord || this.chatModelRecord;
-        return this.chatModelName;
-      }
-
-      this.chatModelName = modelName;
-      this.chatModelRecord = modelRecord || this.chatModelRecord;
-      return this.chatModelName;
-    } catch (error) {
-      console.warn(
-        `Failed to initialize chat model, falling back to default: ${error.message}`
-      );
-      if (!forceRefresh && this.chatModelName) {
-        return this.chatModelName;
-      }
-      this.chatModelName = DEFAULT_CHAT_MODEL;
-      return this.chatModelName;
-    }
-  }
-
-  async getChatModelRecord(forceRefresh = false) {
-    if (!forceRefresh && this.chatModelRecord) {
-      return this.chatModelRecord;
-    }
-
-    const modelRecord = await getModelForCategory("chat").catch((error) => {
-      console.warn(
-        `Unable to fetch chat model record from aiModelService: ${error.message}`
-      );
-      return null;
+    this.embeddingModel = new OpenAIEmbeddings({
+      openAIApiKey: OPENAI_API_KEY,
+      modelName,
     });
 
-    if (modelRecord) {
-      this.chatModelRecord = modelRecord;
-    }
+    this.currentModelName = modelName;
 
-    return modelRecord;
+    return this.embeddingModel;
+  }
+
+  async getChatModelName() {
+    try {
+      const modelRecord = await getModelForCategory("chat");
+      return modelRecord?.model || process.env.OPENAI_CHAT_MODEL || DEFAULT_CHAT_MODEL;
+    } catch (error) {
+      console.warn(
+        `[QueryController] Failed to resolve chat model, falling back to default: ${error.message}`
+      );
+      return process.env.OPENAI_CHAT_MODEL || DEFAULT_CHAT_MODEL;
+    }
   }
 
   async logOpenAIChatUsage({
@@ -171,22 +106,11 @@ class QuestionAnsweringSystem {
     // Fetch model record based on type category (chat, embedding, intent, etc.)
     let modelRecord = null;
     try {
-      if (type === "chat") {
-        modelRecord = await this.getChatModelRecord();
-      } else {
-        // For other types (embedding, intent, text-embedding-3-small, etc.), fetch from category
-        modelRecord = await getModelForCategory(type).catch((error) => {
-          console.warn(
-            `Unable to fetch model record for category "${type}": ${error.message}`
-          );
-          return null;
-        });
-      }
+      modelRecord = await getModelForCategory(type);
     } catch (error) {
       console.warn(
-        `Error fetching model record for type "${type}": ${error.message}`
+        `Unable to fetch model record for category "${type}": ${error.message}`
       );
-      modelRecord = null;
     }
 
     const inputCostPerMillion = modelRecord?.inputCost || 0;
@@ -227,69 +151,7 @@ class QuestionAnsweringSystem {
     });
   }
 
-  async ensureEmbeddingModelReady() {
-    try {
-      const modelRecord = await getModelForCategory("embedding").catch((error) => {
-        console.warn(
-          `Unable to fetch embedding model from aiModelService while ensuring readiness: ${error.message}`
-        );
-        return null;
-      });
 
-      const modelName =
-        modelRecord?.model ||
-        process.env.OPENAI_EMBEDDING_MODEL ||
-        DEFAULT_EMBEDDING_MODEL;
-
-      if (this.embeddingModel && this.embeddingModelName === modelName) {
-        return this.embeddingModel;
-      }
-
-      this.embeddingModelInitPromise = this.initializeEmbeddingModel(true);
-      return this.embeddingModelInitPromise;
-    } catch (error) {
-      console.warn(
-        `Failed to ensure embedding model readiness, falling back to default: ${error.message}`
-      );
-      this.embeddingModelInitPromise = this.initializeEmbeddingModel(true);
-      return this.embeddingModelInitPromise;
-    }
-  }
-
-  async getChatModelName({
-    agentId = null,
-    websiteData = null,
-    query = null,
-    conversationId = null,
-    forceRefresh = false,
-  } = {}) {
-    try {
-      const contextKey = `${agentId || ""}:${websiteData?.id || websiteData?.website_name || websiteData?.company_name || ""}`;
-
-      if (!forceRefresh && this.chatModelName && this.chatModelContextKey === contextKey) {
-        return this.chatModelName;
-      }
-
-      if (!forceRefresh && this.chatModelInitPromise) {
-        await this.chatModelInitPromise;
-        if (this.chatModelContextKey === contextKey) {
-          return this.chatModelName;
-        }
-      }
-
-      this.chatModelContextKey = contextKey;
-      this.chatModelInitPromise = this.initializeChatModel(forceRefresh);
-      await this.chatModelInitPromise;
-      return this.chatModelName;
-    } catch (error) {
-      console.warn(
-        `Failed to resolve chat model, falling back to default: ${error.message}`
-      );
-      this.chatModelInitPromise = this.initializeChatModel(true);
-      await this.chatModelInitPromise;
-      return this.chatModelName;
-    }
-  }
 
   // check 2 ----> 
   
@@ -1797,12 +1659,12 @@ Keep responses short, direct, friendly, and professional. Only use information e
       const websiteData = await WebsiteData.findOne({ agentId }).lean();
       const companyName = this.resolveCompanyName({ websiteData, widgetData, agentData });
 
-      await this.getChatModelName({
-        agentId,
-        websiteData,
-        query: question,
-        conversationId,
-      });
+      // await this.getChatModelName({
+      //   agentId,
+      //   websiteData,
+      //   query: question,
+      //   conversationId,
+      // });
 
       if (
         !clientData ||
@@ -2000,7 +1862,7 @@ Keep responses short, direct, friendly, and professional. Only use information e
       let questionEmbedding = null;
       const getQuestionEmbedding = async () => {
         if (!questionEmbedding) {
-          const embeddingModel = await this.ensureEmbeddingModelReady();
+          const embeddingModel = await this.getEmbeddingModel();
           const embeddingResponse = await embeddingModel.embedQuery(embeddingQuery);
           if (!embeddingResponse) {
             throw new Error("Failed to generate question embedding.");

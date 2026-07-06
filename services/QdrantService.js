@@ -5,6 +5,7 @@ const { QdrantClient } = require("@qdrant/js-client-rest");
 const {logOpenAIUsage , logQdrantUsage} = require('../services/UsageTrackingService');
 const { getModelForCategory } = require("./aiModelService");
 const { v4: uuidv4 } = require("uuid");
+const { encoding_for_model } = require("tiktoken");
 
 const DEFAULT_EMBEDDING_MODEL =
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
@@ -129,62 +130,86 @@ class QdrantVectorStoreManager {
     try {
       await this.ensureEmbeddingsReady();
 
-      const contents = documents.map((doc) => doc.pageContent);
-      // console.log(`Generating embeddings for ${contents.length} documents...`);
+      const modelRecord = await getModelForCategory("embedding").catch(() => null);
+      const embeddingModelName =
+          modelRecord?.model || this.embeddingModelName;
+      const inputCostPerMillion =
+          modelRecord?.inputCost || 0;
 
-      // Batch embedding requests for efficiency
-      const batchSize = 100; // OpenAI embedding batch limit
+      let enc;
       const embeddings = [];
-      // Removed redeclaration of totalUpserted to fix lint error
+      try {
+        try {
+          enc = encoding_for_model(embeddingModelName || "text-embedding-3-small");
+        } catch (encInitError) {
+          console.warn(`[QdrantService] Failed to init tokenizer, will fall back to char estimate: ${encInitError.message}`);
+          enc = null;
+        }
 
-      for (let i = 0; i < contents.length; i += batchSize) {
-        const batch = contents.slice(i, i + batchSize);
-        // console.log(`Processing embedding batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(contents.length / batchSize)}`);
-        const batchEmbeddings = await this.embeddings.embedDocuments(batch);
-        
-        const totalInputTokens = batch.reduce((sum, text) => {
-          if (typeof text === 'string' && text.length > 0) {
-            return sum + Math.ceil(text.length / 4);
+        const contents = documents.map((doc) => doc.pageContent);
+        // console.log(`Generating embeddings for ${contents.length} documents...`);
+
+        // Batch embedding requests for efficiency
+        const batchSize = 100; // OpenAI embedding batch limit
+        // const embeddings = [];
+        // Removed redeclaration of totalUpserted to fix lint error
+
+        for (let i = 0; i < contents.length; i += batchSize) {
+          const batch = contents.slice(i, i + batchSize);
+          // console.log(`Processing embedding batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(contents.length / batchSize)}`);
+          const batchEmbeddings = await this.embeddings.embedDocuments(batch);
+          
+          const totalInputTokens = batch.reduce((sum, text) => {
+              if (typeof text !== 'string' || text.length === 0) return sum;
+              try {
+                if (enc) return sum + enc.encode(text).length;
+                return sum + Math.ceil(text.length / 4);  
+              } catch {
+                return sum + Math.ceil(text.length / 4); // per-string fallback
+              }
+          }, 0);
+          
+          if (totalInputTokens > 0) {
+            try {
+              // const modelRecord = await getModelForCategory("embedding").catch(() => null);
+              // const embeddingModelName = modelRecord?.model || this.embeddingModelName;
+              // const inputCostPerMillion = modelRecord?.inputCost || 0;
+              const inputCost = (totalInputTokens / 1000000) * inputCostPerMillion;
+              
+              logOpenAIUsage({
+                userId,
+                agentId,
+                model: embeddingModelName,
+                type: 'embedding',
+                inputTokens: totalInputTokens,
+                outputTokens: 0,
+                cacheTokens: 0,
+                totalTokens: totalInputTokens,
+                inputCost,
+                outputCost: 0,
+                cacheCost: 0,
+                totalCost: inputCost,
+              }).catch((logErr) => {
+                console.warn(`[QdrantService] Error logging embedding usage: ${logErr.message}`);
+              });
+            } catch (logError) {
+              console.warn(`[QdrantService] Error logging embedding usage: ${logError.message}`);
+            }
           }
-          return sum;
-        }, 0);
-        
-        if (totalInputTokens > 0) {
-          try {
-            const modelRecord = await getModelForCategory("embedding").catch(() => null);
-            const embeddingModelName = modelRecord?.model || this.embeddingModelName;
-            const inputCostPerMillion = modelRecord?.inputCost || 0;
-            const inputCost = (totalInputTokens / 1000000) * inputCostPerMillion;
-            
-            logOpenAIUsage({
-              userId,
-              agentId,
-              model: embeddingModelName,
-              type: 'embedding',
-              inputTokens: totalInputTokens,
-              outputTokens: 0,
-              cacheTokens: 0,
-              totalTokens: totalInputTokens,
-              inputCost,
-              outputCost: 0,
-              cacheCost: 0,
-              totalCost: inputCost,
-            }).catch((logErr) => {
-              console.warn(`[QdrantService] Error logging embedding usage: ${logErr.message}`);
+          
+          embeddings.push(...batchEmbeddings);
+
+          if (onProgress) {
+            await onProgress({
+              step: "embedding",
+              embedded: Math.min(i + batch.length, contents.length),
+              total: contents.length,
             });
-          } catch (logError) {
-            console.warn(`[QdrantService] Error logging embedding usage: ${logError.message}`);
           }
         }
-        
-        embeddings.push(...batchEmbeddings);
-
-        if (onProgress) {
-          await onProgress({
-            step: "embedding",
-            embedded: Math.min(i + batch.length, contents.length),
-            total: contents.length,
-          });
+      } finally {
+        if (enc) {
+          enc.free();
         }
       }
 
