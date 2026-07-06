@@ -70,7 +70,7 @@ const CHAT_MODEL_PREMIUM =
   process.env.OPENAI_CHAT_MODEL ||
   "gpt-4.1";
 const CHAT_MODEL_BRIEF = process.env.OPENAI_CHAT_MODEL_BRIEF || "gpt-4.1-mini";
-const CHAT_HISTORY_LIMIT = Number(process.env.CHAT_HISTORY_LIMIT) || 8;
+const CHAT_HISTORY_LIMIT = Number(process.env.CHAT_HISTORY_LIMIT) || 5;
 const CHAT_HISTORY_LIMIT_BRIEF =
   Number(process.env.CHAT_HISTORY_LIMIT_BRIEF) || 5;
 const RAG_MAX_CHUNK_CHARS = Number(process.env.RAG_MAX_CHUNK_CHARS) || 1200;
@@ -79,6 +79,14 @@ const RAG_MAX_CHUNK_CHARS_BRIEF =
 const RAG_MAX_CONTEXT_CHARS = Number(process.env.RAG_MAX_CONTEXT_CHARS) || 6000;
 const RAG_MAX_CONTEXT_CHARS_BRIEF =
   Number(process.env.RAG_MAX_CONTEXT_CHARS_BRIEF) || 4000;
+const RAG_MAX_CONTEXT_CHARS_LIST =
+  Number(process.env.RAG_MAX_CONTEXT_CHARS_LIST) || 12000;
+const RAG_MAX_CONTEXT_CHARS_LINKS =
+  Number(process.env.RAG_MAX_CONTEXT_CHARS_LINKS) || 3000;
+const RAG_MAX_CHUNK_CHARS_LIST =
+  Number(process.env.RAG_MAX_CHUNK_CHARS_LIST) || 800;
+const RAG_LIST_MAX_URLS = Number(process.env.RAG_LIST_MAX_URLS) || 30;
+const RAG_KEYWORD_FETCH_MAX = Number(process.env.RAG_KEYWORD_FETCH_MAX) || 120;
 const USE_LIGHTWEIGHT_RESPONSES =
   process.env.USE_LIGHTWEIGHT_RESPONSES !== "false";
 const LOW_RETRIEVAL_SCORE_PREMIUM =
@@ -90,6 +98,32 @@ function stripHtmlForContext(text) {
     .replace(/&nbsp;/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function keywordFetchLimit(requestedCount, perItemMultiplier, floor) {
+  const raw = Math.max(floor, (Number(requestedCount) || 5) * perItemMultiplier);
+  return Math.min(raw, RAG_KEYWORD_FETCH_MAX);
+}
+
+function hasProductSignals(text) {
+  return /\b(price|cost|\$|£|€|usd|sale|add to cart|in stock)\b/i.test(text);
+}
+
+function pickBestChunkForUrl(chunks) {
+  if (!chunks?.length) return { text: "", score: 0 };
+  if (chunks.length === 1) return chunks[0];
+
+  return chunks.reduce((best, cur) => {
+    const curScore = cur.score ?? 0;
+    const bestScore = best.score ?? 0;
+    if (curScore !== bestScore) return curScore > bestScore ? cur : best;
+
+    const curProduct = hasProductSignals(cur.text) ? 1 : 0;
+    const bestProduct = hasProductSignals(best.text) ? 1 : 0;
+    if (curProduct !== bestProduct) return curProduct > bestProduct ? cur : best;
+
+    return cur.text.length > best.text.length ? cur : best;
+  });
 }
 
 /** GPT-5 / o-series chat models reject `max_tokens`; they require `max_completion_tokens`. */
@@ -131,6 +165,19 @@ function selectChatModel({
 }
 
 function getContextLimitsForMode(responseMode) {
+  if (responseMode === "page_links") {
+    return {
+      maxChunkChars: RAG_MAX_CHUNK_CHARS,
+      maxTotalChars: RAG_MAX_CONTEXT_CHARS_LINKS,
+    };
+  }
+  if (responseMode === "list") {
+    return {
+      maxChunkChars: RAG_MAX_CHUNK_CHARS_LIST,
+      maxTotalChars: RAG_MAX_CONTEXT_CHARS_LIST,
+      maxUrls: RAG_LIST_MAX_URLS,
+    };
+  }
   if (isPremiumResponseMode(responseMode)) {
     return {
       maxChunkChars: RAG_MAX_CHUNK_CHARS,
@@ -564,20 +611,27 @@ class QuestionAnsweringSystem {
     }
 
     const contextLimits = getContextLimitsForMode(effectiveMode);
-    const context =
-      effectiveMode === "list" || effectiveMode === "page_links"
-        ? this.buildInPageListContext(matches)
-        : this.getRelevantContext(matches, contextLimits);
+    let context;
 
-    // console.log("question : ", question);
+    if (answerOptions.prebuiltContext) {
+      context = answerOptions.prebuiltContext;
+    } else if (effectiveMode === "page_links") {
+      context = this.buildCompactPageLinksContext(matches, {
+        ...contextLimits,
+        requestedCount,
+      });
+    } else if (effectiveMode === "list") {
+      context = this.buildInPageListContext(matches, {
+        ...contextLimits,
+        requestedCount,
+      });
+    } else {
+      context = this.getRelevantContext(matches, contextLimits);
+    }
 
-    // console.log(`[QueryController] Generating answer with ${matches.length} matches, responseMode=${effectiveMode}, context length=${context.length} chars`);
-
-    // console.log(`chat history length: ${chatHistory.length} messages`);
-    // console.log(`organisation: ${organisation}`);
-    // console.log(`websiteData: ${websiteData ? "available" : "not available"}`);
-    // console.log(`answerOptions: ${JSON.stringify(answerOptions)}`);
-    // console.log("context data : ", context);
+    console.log(
+      `[QueryController] Context: ${context.length} chars, mode=${effectiveMode}, matches=${matches?.length ?? 0}`,
+    );
 
     return this.generateAnswer(
       question,
@@ -923,8 +977,8 @@ class QuestionAnsweringSystem {
               queryAttributes?.normalizedQuestion,
               queryAttributes,
             )
-              ? 350
-              : 250,
+              ? Math.min(120, RAG_KEYWORD_FETCH_MAX)
+              : Math.min(80, RAG_KEYWORD_FETCH_MAX),
           )
         : Promise.resolve([]),
     ]);
@@ -957,7 +1011,11 @@ class QuestionAnsweringSystem {
   }
 
   buildCatalogListResult(matches, companyName, requestedCount) {
-    const contextBlocks = this.buildInPageListContext(matches);
+    const listLimits = getContextLimitsForMode("list");
+    const contextBlocks = this.buildInPageListContext(matches, {
+      ...listLimits,
+      requestedCount,
+    });
     return {
       context: `The user wants a complete list of items from ${companyName}'s website matching their request. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest other sizes unless the user asked for alternatives.\n\n${contextBlocks}`,
       matches,
@@ -999,7 +1057,7 @@ class QuestionAnsweringSystem {
           `${m.payload?.title || ""} ${m.payload?.text || ""} ${m.payload?.url || ""}`,
         ),
       )
-      .slice(0, Math.max(requestedCount * 4, 25));
+      .slice(0, Math.max(requestedCount * 2, 15));
 
     if (catalogMatches.length === 0) {
       console.log(
@@ -1140,7 +1198,7 @@ class QuestionAnsweringSystem {
         collectionName,
         keywords.length > 0 ? keywords : ["featured", "product"],
         userIdString,
-        Math.max(200, requestedCount * 15),
+        keywordFetchLimit(requestedCount, 3, 40),
       );
 
       let mergedMatches = this.mergeRetrievalResults(
@@ -1199,7 +1257,11 @@ class QuestionAnsweringSystem {
         return null;
       }
 
-      const contextBlocks = this.buildInPageListContext(catalogMatches);
+      const listLimits = getContextLimitsForMode("list");
+      const contextBlocks = this.buildInPageListContext(catalogMatches, {
+        ...listLimits,
+        requestedCount,
+      });
       return {
         context: `The user wants a complete list of items from ${companyName}'s website matching their size/style request. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest unrelated sizes.\n\n${contextBlocks}`,
         matches: catalogMatches,
@@ -1221,13 +1283,13 @@ class QuestionAnsweringSystem {
         collectionName,
         ["footer links", "footer"],
         userIdString,
-        150,
+        80,
       );
       const keywordPoints = await this.structuralFetchByKeywords(
         collectionName,
         keywords,
         userIdString,
-        250,
+        keywordFetchLimit(requestedCount, 2, 40),
       );
 
       let mergedMatches = this.mergeRetrievalResults(semanticMatches, [
@@ -1256,7 +1318,8 @@ class QuestionAnsweringSystem {
 
       if (mergedMatches.length === 0) return null;
 
-      const contextBlocks = this.buildInPageListContext(mergedMatches);
+      const contactLimits = getContextLimitsForMode("contact");
+      const contextBlocks = this.getRelevantContext(mergedMatches, contactLimits);
       return {
         context: `The user is asking about contact information, social media profiles, phone, email, address, or business hours for ${companyName}. Use ONLY the content below. Include every social media URL and relevant contact detail found. Do not say information is missing if it appears below.\n\n${contextBlocks}`,
         matches: mergedMatches,
@@ -1278,7 +1341,7 @@ class QuestionAnsweringSystem {
         collectionName,
         keywords,
         userIdString,
-        Math.max(500, requestedCount * 5),
+        keywordFetchLimit(requestedCount, 2, 50),
       );
 
       const uniquePages = this.dedupeByUrl(keywordPoints);
@@ -1323,11 +1386,15 @@ class QuestionAnsweringSystem {
         "PAGE_LINKS",
       );
       if (mergedMatches.length > 0 && wantsProductLinks) {
-        const contextBlocks = this.buildInPageListContext(mergedMatches);
+        const linkLimits = getContextLimitsForMode("page_links");
+        const pagesLines = this.buildCompactPageLinksContext(mergedMatches, {
+          ...linkLimits,
+          requestedCount,
+        });
         return {
-          context: `The user wants product or collection page links from ${companyName}. Use ONLY the content below. Include every matching URL as a clickable link. Do not say products are unavailable if they appear below.\n\n${contextBlocks}`,
+          context: `The user wants product or collection page links from ${companyName}. Use ONLY the entries below. Include every matching URL as a clickable link. Do not say products are unavailable if they appear below.\n\n${pagesLines}`,
           matches: mergedMatches,
-          responseMode: "list",
+          responseMode: "page_links",
           requestedCount,
         };
       }
@@ -1392,31 +1459,103 @@ class QuestionAnsweringSystem {
     return Array.from(keywords).filter((w) => w.length > 2);
   }
 
-  buildInPageListContext(matches) {
+  buildInPageListContext(matches, options = {}) {
+    const maxChunkChars = options.maxChunkChars ?? RAG_MAX_CHUNK_CHARS_LIST;
+    const maxTotalChars = options.maxTotalChars ?? RAG_MAX_CONTEXT_CHARS_LIST;
+    const requestedCount = options.requestedCount ?? 5;
+    const maxUrls = Math.min(
+      options.maxUrls ?? RAG_LIST_MAX_URLS,
+      Math.max(requestedCount * 2, 10),
+    );
+
     const byUrl = new Map();
 
     for (const match of matches || []) {
       const payload = match.payload || {};
       const url = payload.url || "unknown";
       const title = payload.title || url;
-      const text = payload.text || payload.pageContent || "";
+      const text = stripHtmlForContext(payload.text || payload.pageContent || "");
       if (!text) continue;
 
+      const score = match.score ?? 0;
       if (!byUrl.has(url)) {
-        byUrl.set(url, { title, url, texts: [] });
+        byUrl.set(url, { title, url, chunks: [] });
       }
       const entry = byUrl.get(url);
-      if (!entry.texts.includes(text)) {
-        entry.texts.push(text);
+      if (!entry.chunks.some((c) => c.text === text)) {
+        entry.chunks.push({ text, score });
       }
     }
 
-    return Array.from(byUrl.values())
-      .map(
-        ({ title, url, texts }) =>
-          `Source: ${title} (${url})\n---\n${texts.join("\n\n")}\n---`,
-      )
-      .join("\n\n");
+    const sortedUrls = Array.from(byUrl.values())
+      .map((entry) => ({
+        ...entry,
+        bestScore: Math.max(...entry.chunks.map((c) => c.score ?? 0), 0),
+      }))
+      .sort((a, b) => b.bestScore - a.bestScore)
+      .slice(0, maxUrls);
+
+    const blocks = [];
+    let totalChars = 0;
+
+    for (const { title, url, chunks } of sortedUrls) {
+      const best = pickBestChunkForUrl(chunks);
+      let text = best.text;
+      if (text.length > maxChunkChars) {
+        text = `${text.slice(0, maxChunkChars)}…`;
+      }
+
+      const block =
+        url && url !== "unknown"
+          ? `Source: ${title} (${url})\n---\n${text}\n---`
+          : text;
+
+      if (totalChars + block.length > maxTotalChars) break;
+
+      blocks.push(block);
+      totalChars += block.length;
+    }
+
+    return blocks.join("\n\n");
+  }
+
+  buildCompactPageLinksContext(matches, options = {}) {
+    const maxTotalChars = options.maxTotalChars ?? RAG_MAX_CONTEXT_CHARS_LINKS;
+    const requestedCount = options.requestedCount ?? 5;
+    const maxItems = Math.min(
+      options.maxUrls ?? RAG_LIST_MAX_URLS,
+      Math.max(requestedCount, 5),
+    );
+
+    const sorted = [...(matches || [])].sort(
+      (a, b) => (b.score ?? 0) - (a.score ?? 0),
+    );
+    const seen = new Set();
+    const pages = [];
+
+    for (const match of sorted) {
+      const payload = match.payload || {};
+      const url = payload.url;
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      pages.push(payload);
+      if (pages.length >= maxItems) break;
+    }
+
+    const lines = [];
+    let totalChars = 0;
+
+    for (let i = 0; i < pages.length; i++) {
+      const p = pages[i];
+      const url = p.url || "";
+      const title = p.title || url || `Page ${i + 1}`;
+      const line = `${i + 1}. ${title} — ${url}`;
+      if (totalChars + line.length + 1 > maxTotalChars) break;
+      lines.push(line);
+      totalChars += line.length + 1;
+    }
+
+    return lines.join("\n");
   }
 
   matchesToSources(matches) {
@@ -1698,8 +1837,6 @@ ${answerInstructions}`;
     // console.log("chat history : ",chatHistory);
 
     // console.log("system prompt : ",systemPrompt);
-
-    console.log("context length is : ", context.length);
 
     try {
       // Determine dynamic max_tokens based on query type
@@ -2391,6 +2528,7 @@ ${answerInstructions}`;
               responseMode: specialized.responseMode,
               requestedCount: specialized.requestedCount,
               wantsProductUrls: wantsProductLinks,
+              prebuiltContext: specialized.context,
               wasExpanded,
               retrievalMaxScore: this.getMaxSemanticScore(specialized.matches),
               ...langOpts,
@@ -2428,6 +2566,7 @@ ${answerInstructions}`;
             responseMode: forcedCatalog.responseMode,
             requestedCount: forcedCatalog.requestedCount,
             wantsProductUrls: wantsProductLinks,
+            prebuiltContext: forcedCatalog.context,
             wasExpanded,
             retrievalMaxScore: this.getMaxSemanticScore(forcedCatalog.matches),
             ...langOpts,
@@ -2483,7 +2622,7 @@ ${answerInstructions}`;
       let relevantMatches = catalogListQuery
         ? this.selectCatalogMatches(queryResponse, queryAttributes, {
             strictSize: sizedCatalogQuery,
-          }).slice(0, Math.max(requestedTopK * 4, 25))
+          }).slice(0, Math.max(requestedTopK * 2, 15))
         : queryResponse.filter((match) => match.score >= effectiveThreshold);
 
       if (catalogListQuery && relevantMatches.length > 0) {
