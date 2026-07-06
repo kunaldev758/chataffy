@@ -7,6 +7,13 @@ const {
   normalizeQueryText,
   extractSizeTokens,
 } = require("./queryNormalization");
+const { isContactIntentQuestion } = require("./contactIntentDetection");
+
+function hasCjkOrComplexScript(text) {
+  return /[\u3040-\u30FF\u4E00-\u9FFF\u0900-\u097F\u0400-\u04FF]/.test(
+    text || ""
+  );
+}
 
 function extractCollectionHints(text) {
   const hints = new Set();
@@ -143,6 +150,9 @@ function expandQueryForRetrieval(question, chatMessages = [], options = {}) {
 function detectCatalogFollowUp(question, chatMessages) {
   const q = normalizeQueryText(question);
   if (!q || !chatMessages?.length) return false;
+
+  if (isContactIntentQuestion(q)) return false;
+
   const wordCount = q.split(/\s+/).filter(Boolean).length;
   if (wordCount > 10) return false;
 
@@ -158,12 +168,16 @@ function detectCatalogFollowUp(question, chatMessages) {
 
   if (!hasCatalogThread) return false;
 
-  return (
+  const hasCatalogSignalInMessage =
     /\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(q) ||
     isProductLinkRequest(q) ||
-    /\b(options?|styles?|more|share|urls?|links?)\b/i.test(q) ||
-    wordCount <= 5
-  );
+    /\b(options?|styles?|more|share|urls?|links?)\b/i.test(q);
+
+  if (hasCatalogSignalInMessage) return true;
+
+  // Short Latin follow-ups ("more", "yes") after a catalog thread — not bare CJK
+  // messages, which are often full sentences counted as one "word".
+  return !hasCjkOrComplexScript(q) && wordCount <= 5;
 }
 
 module.exports = {

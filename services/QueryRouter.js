@@ -7,6 +7,7 @@ const {
   expandQueryForRetrieval,
 } = require("../utils/queryContextExpansion");
 const { normalizeQueryText } = require("../utils/queryNormalization");
+const { isContactIntentQuestion } = require("../utils/contactIntentDetection");
 const {
   normalizeGreetingInput,
   isGibberishOrAccidentalMessage,
@@ -105,6 +106,13 @@ const LIVE_AGENT_PHRASES = [
 const FOLLOW_UP_ACCEPTANCE =
   /^(okay\s+)?(tell\s+me|yes|yeah|yep|sure|go\s+ahead|please\s+do|do\s+it|ok|okay|continue|proceed)[\s!.?]*$/i;
 
+const TRUSTED_RULE_SOURCES = new Set([
+  "rules_greeting",
+  "rules_live_agent",
+  "rules_accidental",
+  "rules_follow_up",
+]);
+
 /**
  * True only when the message is a short greeting with no real question attached.
  * Avoids classifying "hello, what are your prices?" as a greeting.
@@ -182,7 +190,8 @@ function classifyStructuralSubIntent(query) {
         q
       )) ||
     (/\b(give\s+me|show\s+me|what\s+are|list)\b/.test(q) &&
-      /\bsocial\b/.test(q));
+      /\bsocial\b/.test(q)) ||
+    isContactIntentQuestion(query);
 
   const wantsPageLinks =
     !wantsContactInfo &&
@@ -330,6 +339,20 @@ function applyRuleEngine(question, { chatMessages } = {}) {
     };
   }
 
+  const subIntentOnQuestion = classifyStructuralSubIntent(normalizedQuestion);
+  if (subIntentOnQuestion) {
+    return {
+      confident: true,
+      result: buildRouteResult({
+        route: routeFromSubIntent(subIntentOnQuestion),
+        subIntent: subIntentOnQuestion,
+        userLanguage,
+        confidence: 0.88,
+        source: "rules_structural",
+      }),
+    };
+  }
+
   if (detectCatalogFollowUp(normalizedQuestion, chatMessages)) {
     const { retrievalQuery } = expandQueryForRetrieval(
       normalizedQuestion,
@@ -337,7 +360,12 @@ function applyRuleEngine(question, { chatMessages } = {}) {
     );
     const subIntent = isProductLinkRequest(normalizedQuestion)
       ? SUB_INTENTS.PAGE_LINKS
-      : classifyStructuralSubIntent(retrievalQuery) || SUB_INTENTS.IN_PAGE_LIST;
+      : classifyStructuralSubIntent(retrievalQuery);
+
+    if (!subIntent) {
+      return { confident: false };
+    }
+
     return {
       confident: true,
       result: buildRouteResult({
@@ -351,25 +379,34 @@ function applyRuleEngine(question, { chatMessages } = {}) {
     };
   }
 
-  const subIntent = classifyStructuralSubIntent(normalizedQuestion);
-  if (subIntent) {
-    const route = routeFromSubIntent(subIntent);
-    return {
-      confident: true,
-      result: buildRouteResult({
-        route,
-        subIntent,
-        userLanguage,
-        confidence: 0.88,
-        source: "rules_structural",
-      }),
-    };
-  }
-
   return { confident: false };
 }
 
-function parseRouterJson(content) {
+function shouldDeferToLlmRouter(question, ruleOutcome) {
+  if (!ruleOutcome.confident) return true;
+
+  const { result } = ruleOutcome;
+  if (TRUSTED_RULE_SOURCES.has(result.source)) return false;
+
+  if (result.source === "rules_catalog_follow_up") {
+    if (result.userLanguage !== "en") return true;
+    if (isContactIntentQuestion(question)) return true;
+    return false;
+  }
+
+  if (
+    result.source === "rules_structural" &&
+    result.route === ROUTES.HYBRID &&
+    result.userLanguage !== "en"
+  ) {
+    const subOnQuestion = classifyStructuralSubIntent(question);
+    if (!subOnQuestion || subOnQuestion !== result.subIntent) return true;
+  }
+
+  return false;
+}
+
+function parseRouterJson(content, question = "") {
   try {
     const parsed = JSON.parse(content || "{}");
     const route = String(parsed.route || "").toUpperCase();
@@ -466,8 +503,11 @@ Classify the visitor message into exactly one route:
 IMPORTANT: Prefer SEMANTIC_RAG for pricing, features, policies, how-to, and general questions even if they contain words like "show" or "list". Only use HYBRID for explicit listing/navigation/contact requests. Real questions in any language (Japanese, Russian, Spanish, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
 
 For HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
+- CONTACT_INFO: phone, email, address, hours, social media profiles — in ANY language (e.g. Japanese 連絡先, お問い合わせ, 電話番号)
+- IN_PAGE_LIST: product catalog with prices/sizes
+- PAGE_LINKS: list of site pages or collection URLs
 
-Detect userLanguage: ISO 639-1 code for the language the visitor wrote in (e.g. en, de, hi).
+Detect userLanguage: ISO 639-1 code for the language the visitor wrote in (e.g. en, de, hi, ja).
 
 If route is HYBRID and userLanguage differs from website language, provide rewrittenQuery: search keywords/phrases in the website language (${websiteLanguage}) for keyword matching. Otherwise rewrittenQuery can be null.
 
@@ -501,7 +541,7 @@ Respond with JSON only:
       response_format: { type: "json_object" },
     });
 
-    return parseRouterJson(response.choices[0]?.message?.content);
+    return parseRouterJson(response.choices[0]?.message?.content, question);
   } catch (error) {
     console.error("[QueryRouter] LLM routing failed:", error.message);
     return buildRouteResult({
@@ -527,11 +567,16 @@ async function routeQuery(question, options = {}) {
     websiteLanguage,
   });
 
-  if (ruleOutcome.confident) {
+  if (!shouldDeferToLlmRouter(question, ruleOutcome)) {
     return ruleOutcome.result;
   }
 
   const chatHistorySnippet = formatRecentChatForRouter(chatMessages);
+
+  console.log(
+    `[QueryRouter] LLM routing (rules deferred: ${ruleOutcome.confident ? ruleOutcome.result?.source : "no_match"}) for: ${question.substring(0, 80)}`
+  );
+
   return llmRoute(question, {
     chatHistorySnippet,
     websiteLanguage,

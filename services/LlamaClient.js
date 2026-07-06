@@ -31,16 +31,24 @@ function getLlamaConfig() {
   };
 }
 
-function isLlamaConfigured() {
-  if (String(process.env.LLAMA_GREETING_ENABLED || "").toLowerCase() === "false") {
-    return false;
-  }
-  if (String(process.env.LLAMA_GREETING_ENABLED || "").toLowerCase() === "true") {
+function isLlamaFeatureEnabled(feature = "greeting") {
+  if (String(process.env.LLAMA_ENABLED || "").toLowerCase() === "true") {
     return true;
   }
+
+  const envKey =
+    feature === "contact" ? "LLAMA_CONTACT_ENABLED" : "LLAMA_GREETING_ENABLED";
+  const flag = String(process.env[envKey] || "").toLowerCase();
+  if (flag === "false") return false;
+  if (flag === "true") return true;
+
   const cfg = getLlamaConfig();
   if (cfg.provider === "groq") return Boolean(cfg.apiKey);
   return false;
+}
+
+function isLlamaConfigured(feature = "greeting") {
+  return isLlamaFeatureEnabled(feature);
 }
 
 async function callOllama({ model, prompt, baseUrl, timeoutMs, system }) {
@@ -62,7 +70,7 @@ async function callOllama({ model, prompt, baseUrl, timeoutMs, system }) {
   return String(res.data?.message?.content || res.data?.response || "").trim();
 }
 
-async function callGroq({ model, prompt, apiKey, timeoutMs, system }) {
+async function callGroq({ model, prompt, apiKey, timeoutMs, system, maxTokens = 120 }) {
   const url = "https://api.groq.com/openai/v1/chat/completions";
   const messages = [];
   if (system) messages.push({ role: "system", content: system });
@@ -73,7 +81,7 @@ async function callGroq({ model, prompt, apiKey, timeoutMs, system }) {
     {
       model,
       temperature: 0.4,
-      max_tokens: 120,
+      max_tokens: maxTokens,
       messages,
     },
     {
@@ -84,8 +92,13 @@ async function callGroq({ model, prompt, apiKey, timeoutMs, system }) {
   return String(res.data?.choices?.[0]?.message?.content || "").trim();
 }
 
-async function completeLlama({ system, prompt }) {
-  if (!isLlamaConfigured()) return null;
+async function completeLlama({
+  system,
+  prompt,
+  feature = "greeting",
+  maxTokens = 120,
+}) {
+  if (!isLlamaFeatureEnabled(feature)) return null;
 
   const cfg = getLlamaConfig();
   try {
@@ -97,6 +110,7 @@ async function completeLlama({ system, prompt }) {
         apiKey: cfg.apiKey,
         timeoutMs: cfg.timeoutMs,
         system,
+        maxTokens,
       });
     }
     return await callOllama({
@@ -115,5 +129,6 @@ async function completeLlama({ system, prompt }) {
 module.exports = {
   completeLlama,
   isLlamaConfigured,
+  isLlamaFeatureEnabled,
   getLlamaConfig,
 };
