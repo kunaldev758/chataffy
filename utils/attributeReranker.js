@@ -2,6 +2,9 @@
  * Rule-based attribute-aware re-ranking after hybrid retrieval merge.
  */
 
+const { DOC_TYPE } = require("../constants/contentTypes");
+const { querySizesMatchAttributes } = require("./entitySizeMatch");
+
 const SIZE_PATTERN = /\b\d{1,2}(?:-\d{1,2})?mm\b/gi;
 
 function normalizeSize(s) {
@@ -134,6 +137,21 @@ function typePenalty(text, url, attributes, subIntent) {
 function matchContainsQuerySize(match, querySizes) {
   if (!querySizes?.length) return true;
 
+  const p = match.payload || match;
+  const isEntity = (p.doc_type || "") === DOC_TYPE.ENTITY;
+
+  if (isEntity && p.attributes) {
+    return querySizesMatchAttributes(querySizes, p.attributes);
+  }
+
+  if (isEntity && (p.size_min != null || p.size_max != null)) {
+    return querySizesMatchAttributes(querySizes, {
+      sizes: p.sizes,
+      size_min: p.size_min,
+      size_max: p.size_max,
+    });
+  }
+
   const docSizes = payloadSizes(match);
   if (sizeOverlap(querySizes, docSizes) > 0) return true;
 
@@ -154,13 +172,20 @@ function matchContainsQuerySize(match, querySizes) {
 /**
  * Keep only chunks matching requested sizes. Falls back to input if filter is empty.
  */
-function filterMatchesBySizes(matches, querySizes, { strict = false } = {}) {
+function filterMatchesBySizes(matches, querySizes, { strict = false, entityOnly = false } = {}) {
   if (!querySizes?.length) return matches || [];
-  const filtered = (matches || []).filter((m) =>
-    matchContainsQuerySize(m, querySizes)
-  );
+
+  let pool = matches || [];
+  if (entityOnly) {
+    pool = pool.filter(
+      (m) => (m.payload?.doc_type || m.doc_type) === DOC_TYPE.ENTITY,
+    );
+  }
+
+  const filtered = pool.filter((m) => matchContainsQuerySize(m, querySizes));
   if (filtered.length > 0) return filtered;
-  return strict ? [] : matches || [];
+  if (strict || entityOnly) return [];
+  return matches || [];
 }
 
 /**
@@ -175,7 +200,7 @@ function rerankByAttributes(candidates, attributes, options = {}) {
   }
 
   const subIntent = options.subIntent || attributes.subIntent || null;
-  const { sizes, collections, keywords } = attributes;
+  const { sizes, collections, keywords, flags } = attributes;
 
   const reranked = candidates.map((match) => {
     const baseScore = match.score ?? 0;
@@ -198,6 +223,17 @@ function rerankByAttributes(candidates, attributes, options = {}) {
     bonus += Math.min(textHits * 0.03, 0.12);
     bonus += urlBonus(url, attributes, subIntent);
     bonus -= typePenalty(text, url, attributes, subIntent);
+
+    const docType = (match.payload?.doc_type || "").toLowerCase();
+    if (docType === DOC_TYPE.ENTITY) {
+      bonus += 0.1;
+    } else if (
+      (flags?.isCatalogQuery || subIntent === "IN_PAGE_LIST") &&
+      docType === DOC_TYPE.CATEGORY &&
+      sizes?.length > 0
+    ) {
+      bonus -= 0.15;
+    }
 
     const rerankScore = baseScore + bonus;
 

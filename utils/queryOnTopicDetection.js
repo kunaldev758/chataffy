@@ -16,6 +16,11 @@ const ON_TOPIC_PATTERNS = [
   /\b(?:how\s+(?:much|do\s+i|can\s+i|does)|pricing|refund|return|shipping|warranty|support|billing|cancel)\b/i,
   /\b(?:contact|phone|email|address|hours|office)\b/i,
   /\bhow\s+(?:does|do)\s+(?:it|this|your|the)\s+(?:work|help)\b/i,
+  /\b(?:give|show)\s+me\b[\s\S]{0,40}\b(?:lash|lashes|products?|items?)\b/i,
+  /\b\d{1,2}(?:-\d{1,2})?mm\b[\s\S]{0,30}\b(?:lash|lashes|products?)\b/i,
+  /\b(?:give|show)\s+me\b[\s\S]{0,40}\b(?:social|social\s*media)\b/i,
+  /\b(?:social\s*media|social)\b[\s\S]{0,30}\b(?:links?|urls?|profiles?)\b/i,
+  /\b(?:facebook|instagram|twitter|tiktok|youtube|linkedin|pinterest)\b/i,
 ];
 
 const IDENTITY_PATTERNS = [

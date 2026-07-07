@@ -36,17 +36,42 @@ function extractCollectionHints(text) {
   return Array.from(hints);
 }
 
-function isProductLinkRequest(question) {
+function isSocialOrContactLinkRequest(question) {
   const q = (question || "").toLowerCase();
+  if (isContactIntentQuestion(question)) return true;
   return (
-    /\b(urls?|links?)\b/.test(q) ||
-    /\b(link\s+to)\b/.test(q) ||
-    (/\b(share|send|give|show)\b/.test(q) &&
-      /\b(url|link|options?|styles?|products?|lashes?|collection)\b/.test(q))
+    /\bsocial\s*media\b/.test(q) ||
+    (/\b(urls?|links?)\b/.test(q) && /\bsocial\b/.test(q))
+  );
+}
+
+function isProductLinkRequest(question) {
+  if (isSocialOrContactLinkRequest(question)) return false;
+
+  const q = (question || "").toLowerCase();
+
+  if (/\b(link\s+to)\b/.test(q)) {
+    return /\b(products?|items?|lashes?|collection|catalog|styles?|pages?)\b/.test(
+      q,
+    );
+  }
+
+  if (/\b(urls?|links?)\b/.test(q)) {
+    return (
+      /\b(products?|items?|lashes?|collection|catalog|styles?|pages?)\b/.test(q) ||
+      (/\b(give|show|share|send|list)\b/.test(q) && !/\bsocial\b/.test(q))
+    );
+  }
+
+  return (
+    /\b(share|send|give|show)\b/.test(q) &&
+    /\b(url|link|options?|styles?|products?|lashes?|collection)\b/.test(q)
   );
 }
 
 function isEcommerceCatalogQuery(question) {
+  if (isContactIntentQuestion(question)) return false;
+
   const q = normalizeQueryText(question).toLowerCase();
   return (
     isProductLinkRequest(question) ||
@@ -84,6 +109,21 @@ function extractTopicsFromHistory(chatMessages, limit = 8) {
  */
 function expandQueryForRetrieval(question, chatMessages = [], options = {}) {
   const q = normalizeQueryText(question);
+
+  if (isContactIntentQuestion(q)) {
+    const topics = extractTopicsFromHistory(chatMessages);
+    const userSizes =
+      options.sizes?.length > 0 ? options.sizes : extractSizeTokens(q);
+    return {
+      retrievalQuery: q,
+      topics: { ...topics, sizes: userSizes },
+      currentSizes: userSizes,
+      wasExpanded: false,
+      wantsProductLinks: false,
+      isCatalogQuery: false,
+    };
+  }
+
   const wordCount = q.split(/\s+/).filter(Boolean).length;
   const topics = extractTopicsFromHistory(chatMessages);
 
@@ -183,6 +223,7 @@ function detectCatalogFollowUp(question, chatMessages) {
 module.exports = {
   expandQueryForRetrieval,
   isProductLinkRequest,
+  isSocialOrContactLinkRequest,
   isEcommerceCatalogQuery,
   extractSizeTokens,
   extractTopicsFromHistory,

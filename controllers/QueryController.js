@@ -45,6 +45,20 @@ const {
   filterMatchesBySizes,
 } = require("../utils/attributeReranker");
 const {
+  buildTypedContext,
+  buildEntityTableContext,
+  buildEmptyCatalogContext,
+  buildEmptyContactContext,
+  filterEntityMatches,
+  deduplicateEntityMatches,
+} = require("../utils/entityContextBuilder");
+const { DOC_TYPE } = require("../constants/contentTypes");
+const {
+  inferSubIntentFromQuestion,
+  resolveResponseMode,
+  SUB_INTENT,
+} = require("../utils/intentMapping");
+const {
   isClearlyOnTopicCompanyQuestion: detectClearlyOnTopicQuestion,
   isCompanyIdentityQuestion: detectCompanyIdentityQuestion,
   isTrulyOffTopicQuestion,
@@ -960,13 +974,22 @@ class QuestionAnsweringSystem {
       ? [...new Set([...sizeKeywords, ...catalogKeywords])]
       : catalogKeywords;
 
+    const structuralDocTypes =
+      queryAttributes?.filterStructuralByDocType === false
+        ? null
+        : queryAttributes?.docTypes;
+
     const [vectorResults, keywordPoints] = await Promise.all([
       this.queryQdrant(
         collectionName,
         await getQuestionEmbedding(),
         semanticTopK,
         userIdString,
-        { sizes: queryAttributes?.sizes },
+        {
+          sizes: queryAttributes?.sizes,
+          docTypes: queryAttributes?.docTypes,
+          strictSizedSearch: queryAttributes?.strictEntitySearch,
+        },
       ),
       runKeyword
         ? this.structuralFetchByKeywords(
@@ -979,6 +1002,7 @@ class QuestionAnsweringSystem {
             )
               ? Math.min(120, RAG_KEYWORD_FETCH_MAX)
               : Math.min(80, RAG_KEYWORD_FETCH_MAX),
+            { docTypes: structuralDocTypes },
           )
         : Promise.resolve([]),
     ]);
@@ -998,29 +1022,74 @@ class QuestionAnsweringSystem {
    */
   selectCatalogMatches(matches, queryAttributes, { strictSize = false } = {}) {
     if (!matches?.length) return [];
+    const entityOnly =
+      queryAttributes?.strictEntitySearch ||
+      (queryAttributes?.docTypes?.length === 1 &&
+        queryAttributes.docTypes[0] === DOC_TYPE.ENTITY);
+
     let selected = filterMatchesBySizes(matches, queryAttributes?.sizes || [], {
       strict: strictSize,
+      entityOnly,
     });
     if (queryAttributes?.sizes?.length > 0) {
       const sized = filterMatchesBySizes(matches, queryAttributes.sizes, {
         strict: true,
+        entityOnly,
       });
       if (sized.length > 0) selected = sized;
     }
-    return selected;
+
+    const sizes = queryAttributes?.sizes || [];
+    const deduped = filterEntityMatches(selected, sizes, {
+      entityOnlyStrict: entityOnly && strictSize,
+    });
+
+    return deduped.length > 0 ? deduped : deduplicateEntityMatches(selected);
   }
 
-  buildCatalogListResult(matches, companyName, requestedCount) {
+  buildCatalogListResult(matches, companyName, requestedCount, queryAttributes = null) {
     const listLimits = getContextLimitsForMode("list");
-    const contextBlocks = this.buildInPageListContext(matches, {
-      ...listLimits,
-      requestedCount,
+    const sizes = queryAttributes?.sizes || [];
+    const entityOnlyStrict = Boolean(queryAttributes?.strictEntitySearch);
+    const filtered = filterEntityMatches(matches, sizes, { entityOnlyStrict });
+    const entityContext = buildEntityTableContext(filtered, {
+      querySizes: sizes,
+      maxItems: Math.max(requestedCount * 2, 15),
+      companyName,
+      entityOnlyStrict,
     });
+
+    const contextBlocks =
+      entityContext && !entityContext.startsWith("No matching")
+        ? entityContext
+        : this.buildInPageListContext(filtered, {
+            ...listLimits,
+            requestedCount,
+          });
+
     return {
-      context: `The user wants a complete list of items from ${companyName}'s website matching their request. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest other sizes unless the user asked for alternatives.\n\n${contextBlocks}`,
-      matches,
+      context: `The user wants a complete list of items from ${companyName}'s website matching their request. Use ONLY the content below. List each unique product ONCE with name, price (if shown), and link. Do not repeat the same product. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest other sizes unless the user asked for alternatives.\n\n${contextBlocks}`,
+      matches: filtered,
       responseMode: "list",
       requestedCount,
+    };
+  }
+
+  buildEmptyCatalogListResult(question, queryAttributes, companyName) {
+    return {
+      context: buildEmptyCatalogContext(question, queryAttributes, companyName),
+      matches: [],
+      responseMode: "list",
+      requestedCount: 1,
+    };
+  }
+
+  buildEmptyContactListResult(question, companyName) {
+    return {
+      context: buildEmptyContactContext(question, companyName),
+      matches: [],
+      responseMode: "contact",
+      requestedCount: 1,
     };
   }
 
@@ -1044,10 +1113,14 @@ class QuestionAnsweringSystem {
       { strictSize: true },
     );
 
-    if (catalogMatches.length === 0) {
+    if (
+      catalogMatches.length === 0 &&
+      !queryAttributes?.strictEntitySearch
+    ) {
       catalogMatches = this.selectCatalogMatches(
         queryResponse,
         queryAttributes,
+        { strictSize: false },
       );
     }
 
@@ -1061,9 +1134,13 @@ class QuestionAnsweringSystem {
 
     if (catalogMatches.length === 0) {
       console.log(
-        "[QueryController] Forced catalog: no lash/product matches after size filter",
+        "[QueryController] Forced catalog: no lash/product matches after size filter — empty catalog response",
       );
-      return null;
+      return this.buildEmptyCatalogListResult(
+        question,
+        queryAttributes,
+        companyName,
+      );
     }
 
     console.log(
@@ -1074,6 +1151,7 @@ class QuestionAnsweringSystem {
       catalogMatches,
       companyName,
       requestedCount,
+      queryAttributes,
     );
   }
 
@@ -1252,19 +1330,37 @@ class QuestionAnsweringSystem {
 
       if (forcedCatalog && catalogMatches.length === 0) {
         console.log(
-          "[QueryController] IN_PAGE_LIST forced catalog: no matches after size filter",
+          "[QueryController] IN_PAGE_LIST forced catalog: no matches after size filter — empty catalog response",
         );
-        return null;
+        return this.buildEmptyCatalogListResult(
+          question,
+          queryAttributes,
+          companyName,
+        );
       }
 
       const listLimits = getContextLimitsForMode("list");
-      const contextBlocks = this.buildInPageListContext(catalogMatches, {
-        ...listLimits,
-        requestedCount,
+      const sizes = queryAttributes?.sizes || [];
+      const entityOnlyStrict = Boolean(queryAttributes?.strictEntitySearch);
+      const filteredCatalog = filterEntityMatches(catalogMatches, sizes, {
+        entityOnlyStrict,
       });
+      const entityRows = buildEntityTableContext(filteredCatalog, {
+        querySizes: sizes,
+        maxItems: Math.max(requestedCount * 2, 15),
+        companyName,
+        entityOnlyStrict,
+      });
+      const contextBlocks =
+        entityRows && !entityRows.startsWith("No matching")
+          ? entityRows
+          : this.buildInPageListContext(filteredCatalog, {
+              ...listLimits,
+              requestedCount,
+            });
       return {
-        context: `The user wants a complete list of items from ${companyName}'s website matching their size/style request. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest unrelated sizes.\n\n${contextBlocks}`,
-        matches: catalogMatches,
+        context: `The user wants a complete list of items from ${companyName}'s website matching their size/style request. Use ONLY the content below. List each unique product ONCE with name, price (if shown), and link. Do not repeat the same product. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest unrelated sizes.\n\n${contextBlocks}`,
+        matches: filteredCatalog,
         responseMode: "list",
         requestedCount,
       };
@@ -1316,7 +1412,12 @@ class QuestionAnsweringSystem {
         return null;
       }
 
-      if (mergedMatches.length === 0) return null;
+      if (mergedMatches.length === 0) {
+        console.log(
+          "[QueryController] CONTACT_INFO: no matches — empty contact response",
+        );
+        return this.buildEmptyContactListResult(question, companyName);
+      }
 
       const contactLimits = getContextLimitsForMode("contact");
       const contextBlocks = this.getRelevantContext(mergedMatches, contactLimits);
@@ -1703,8 +1804,11 @@ class QuestionAnsweringSystem {
     keywords,
     userId,
     limit = 500,
+    options = {},
   ) {
     if (!keywords || keywords.length === 0) return [];
+
+    const docTypes = options.docTypes || null;
 
     const filter =
       userId && userId.toString().length
@@ -1727,16 +1831,22 @@ class QuestionAnsweringSystem {
       const batch = res.points || [];
 
       const filtered = batch.filter((p) => {
-        const url = (p.payload?.url || "").toLowerCase();
-        const title = (p.payload?.title || "").toLowerCase();
-        const text = (p.payload?.text || "").toLowerCase();
-        const searchTerms = (p.payload?.search_terms || []).map((t) =>
+        const payload = p.payload || p;
+        if (docTypes?.length > 0) {
+          const dt = payload.doc_type || null;
+          if (dt && !docTypes.includes(dt)) return false;
+        }
+
+        const url = (payload.url || "").toLowerCase();
+        const title = (payload.title || "").toLowerCase();
+        const text = (payload.text || "").toLowerCase();
+        const searchTerms = (payload.search_terms || []).map((t) =>
           String(t).toLowerCase(),
         );
-        const payloadSizes = (p.payload?.sizes || []).map((s) =>
+        const payloadSizes = (payload.sizes || []).map((s) =>
           String(s).toLowerCase(),
         );
-        const payloadCollections = (p.payload?.collections || []).map((c) =>
+        const payloadCollections = (payload.collections || []).map((c) =>
           String(c).toLowerCase(),
         );
 
@@ -1978,13 +2088,27 @@ ${answerInstructions}`;
         }
       }
 
-      // First try with user_id filter
       let searchResult = [];
       const sizeTokens = (options.sizes || [])
         .map((s) => s.replace(/\s/g, "").toLowerCase())
         .filter(Boolean);
+      const docTypes = options.docTypes || null;
+      const strictSizedSearch = Boolean(options.strictSizedSearch);
 
-      const buildFilter = (withSizeBoost = false) => {
+      const ensurePayloadIndex = async (fieldName) => {
+        try {
+          await this.qdrantClient.createPayloadIndex(collectionName, {
+            field_name: fieldName,
+            field_schema: "keyword",
+          });
+        } catch (e) {
+          if (!e.message?.includes("already exists")) {
+            console.warn(`[QueryController] ${fieldName} index: ${e.message}`);
+          }
+        }
+      };
+
+      const buildFilter = ({ withSizes = false, withDocTypes = true } = {}) => {
         const must = [];
         if (userId) {
           must.push({
@@ -1992,7 +2116,16 @@ ${answerInstructions}`;
             match: { value: userId.toString() },
           });
         }
-        if (withSizeBoost && sizeTokens.length > 0) {
+        if (withDocTypes && docTypes?.length > 0) {
+          must.push({
+            key: "doc_type",
+            match:
+              docTypes.length === 1
+                ? { value: docTypes[0] }
+                : { any: docTypes },
+          });
+        }
+        if (withSizes && sizeTokens.length > 0) {
           must.push({
             key: "sizes",
             match: { any: sizeTokens },
@@ -2003,41 +2136,65 @@ ${answerInstructions}`;
 
       if (userId) {
         try {
-          if (sizeTokens.length > 0) {
-            try {
-              await this.qdrantClient.createPayloadIndex(collectionName, {
-                field_name: "sizes",
-                field_schema: "keyword",
+          if (sizeTokens.length > 0) await ensurePayloadIndex("sizes");
+          if (docTypes?.length > 0) await ensurePayloadIndex("doc_type");
+
+          const attempts = [
+            { withSizes: true, withDocTypes: true, label: "doc_type+size" },
+            { withSizes: false, withDocTypes: true, label: "doc_type" },
+          ];
+
+          if (!strictSizedSearch) {
+            attempts.push(
+              { withSizes: true, withDocTypes: false, label: "size" },
+              { withSizes: false, withDocTypes: false, label: "user_id" },
+            );
+          }
+
+          for (const attempt of attempts) {
+            const filter = buildFilter(attempt);
+            if (!filter) continue;
+
+            searchResult = await this.qdrantClient.search(collectionName, {
+              vector: queryEmbedding,
+              limit: topK,
+              with_payload: true,
+              filter,
+            });
+
+            if (searchResult.length > 0) {
+              console.log(
+                `[QueryController] Query (${attempt.label}) returned ${searchResult.length} results` +
+                  (sizeTokens.length ? ` | sizes [${sizeTokens.join(", ")}]` : "") +
+                  (docTypes?.length ? ` | doc_types [${docTypes.join(", ")}]` : ""),
+              );
+              break;
+            }
+          }
+
+          if (searchResult.length === 0 && docTypes?.includes(DOC_TYPE.ENTITY)) {
+            const legacyFilter = buildFilter({
+              withSizes: sizeTokens.length > 0,
+              withDocTypes: false,
+            });
+            if (legacyFilter) {
+              searchResult = await this.qdrantClient.search(collectionName, {
+                vector: queryEmbedding,
+                limit: topK,
+                with_payload: true,
+                filter: legacyFilter,
               });
-            } catch (e) {
-              if (!e.message?.includes("already exists")) {
-                console.warn(`[QueryController] sizes index: ${e.message}`);
+              if (searchResult.length > 0) {
+                console.log(
+                  `[QueryController] Legacy fallback (no doc_type) returned ${searchResult.length} results`,
+                );
               }
             }
           }
 
-          const sizedFilter = buildFilter(sizeTokens.length > 0);
-          if (sizedFilter) {
-            searchResult = await this.qdrantClient.search(collectionName, {
-              vector: queryEmbedding,
-              limit: topK,
-              with_payload: true,
-              filter: sizedFilter,
-            });
+          if (searchResult.length === 0 && strictSizedSearch) {
             console.log(
-              `[QueryController] Query with size filter [${sizeTokens.join(", ")}] returned ${searchResult.length} results`,
-            );
-          }
-
-          if (searchResult.length === 0) {
-            searchResult = await this.qdrantClient.search(collectionName, {
-              vector: queryEmbedding,
-              limit: topK,
-              with_payload: true,
-              filter: buildFilter(false),
-            });
-            console.log(
-              `[QueryController] Query with user_id filter returned ${searchResult.length} results`,
+              `[QueryController] Strict entity search: no results for sizes [${sizeTokens.join(", ")}] — skipping unfiltered fallback`,
             );
           }
         } catch (filterError) {
@@ -2391,42 +2548,31 @@ ${answerInstructions}`;
       const {
         retrievalQuery,
         wasExpanded,
-        wantsProductLinks,
-        isCatalogQuery,
         currentSizes,
       } = queryExpansion;
-
-      const embeddingQuery = queryNorm.enrichForEmbedding(retrievalQuery);
 
       if (wasExpanded) {
         console.log(
           `[QueryController] Expanded retrieval query: "${retrievalQuery}"`,
         );
       }
-      if (embeddingQuery !== retrievalQuery) {
-        console.log(
-          `[QueryController] Enriched embedding query: "${embeddingQuery}"`,
-        );
-      }
 
       const subIntent = routing.subIntent || null;
-      let effectiveSubIntent = subIntent;
       const hasSizeFilter =
         (queryNorm.sizes?.length > 0 || currentSizes?.length > 0) &&
         /\b(lash|lashes|product|style|collection)\b/i.test(normalizedQuestion);
 
-      if (wantsProductLinks && !effectiveSubIntent) {
-        effectiveSubIntent = /\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(retrievalQuery)
-          ? "IN_PAGE_LIST"
-          : "PAGE_LINKS";
-      } else if (
-        isCatalogQuery &&
-        (wasExpanded || hasSizeFilter) &&
-        !effectiveSubIntent
-      ) {
-        effectiveSubIntent = "IN_PAGE_LIST";
-      } else if (hasSizeFilter && !effectiveSubIntent) {
-        effectiveSubIntent = "IN_PAGE_LIST";
+      const effectiveSubIntent =
+        subIntent ||
+        inferSubIntentFromQuestion(normalizedQuestion, {
+          sizes: queryNorm.sizes?.length ? queryNorm.sizes : currentSizes,
+          hasSizeFilter,
+        });
+
+      if (effectiveSubIntent && !subIntent) {
+        console.log(
+          `[QueryController] Inferred subIntent: ${effectiveSubIntent} (router had none)`,
+        );
       }
 
       const queryAttributes = extractQueryAttributes({
@@ -2437,16 +2583,26 @@ ${answerInstructions}`;
         subIntent: effectiveSubIntent,
       });
 
-      // console.log(
-      //   `[QueryController] Attributes: sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length} flags=${JSON.stringify(queryAttributes.flags)}`
-      // );
+      let questionEmbedding = null;
+      const getQuestionEmbedding = async () => {
+        if (!questionEmbedding) {
+          const finalEmbeddingQuery = queryNorm.enrichForEmbedding(
+            queryAttributes.canonicalQuery || retrievalQuery,
+          );
+          questionEmbedding =
+            await this.embeddingModel.embedQuery(finalEmbeddingQuery);
+          if (!questionEmbedding) {
+            throw new Error("Failed to generate question embedding.");
+          }
+        }
+        return questionEmbedding;
+      };
 
-      // const embeddingQuery = queryAttributes.embeddingQuery;
-      // if (embeddingQuery !== retrievalQuery) {
-      //   console.log(
-      //     `[QueryController] Enriched embedding query: "${embeddingQuery}"`
-      //   );
-      // }
+      if (queryAttributes.subIntent || queryAttributes.retrievalIntent) {
+        console.log(
+          `[QueryController] Intent: subIntent=${queryAttributes.subIntent || "none"} | retrieval=${queryAttributes.retrievalIntent} | doc_types=[${(queryAttributes.docTypes || []).join(", ")}] | responseMode=${queryAttributes.responseMode}`,
+        );
+      }
 
       const catalogKeywords =
         queryAttributes.keywords.length > 0
@@ -2457,18 +2613,6 @@ ${answerInstructions}`;
                 ? queryNorm.sizes
                 : currentSizes || [],
             });
-
-      let questionEmbedding = null;
-      const getQuestionEmbedding = async () => {
-        if (!questionEmbedding) {
-          questionEmbedding =
-            await this.embeddingModel.embedQuery(embeddingQuery);
-          if (!questionEmbedding) {
-            throw new Error("Failed to generate question embedding.");
-          }
-        }
-        return questionEmbedding;
-      };
 
       let semanticTopK =
         effectiveSubIntent === "IN_PAGE_LIST"
@@ -2488,7 +2632,7 @@ ${answerInstructions}`;
                 )
               : requestedTopK;
 
-      if (isCatalogQuery || wantsProductLinks) {
+      if (queryAttributes.flags?.isCatalogQuery || queryAttributes.flags?.wantsProductLinks) {
         semanticTopK = Math.max(semanticTopK, 15);
       }
 
@@ -2512,7 +2656,7 @@ ${answerInstructions}`;
           companyName,
           semanticMatches: queryResponse,
           getQuestionEmbedding,
-          wantsProductLinks,
+          wantsProductLinks: queryAttributes.flags?.wantsProductLinks,
           catalogKeywords,
           queryAttributes,
         });
@@ -2527,7 +2671,7 @@ ${answerInstructions}`;
             answerOptions: {
               responseMode: specialized.responseMode,
               requestedCount: specialized.requestedCount,
-              wantsProductUrls: wantsProductLinks,
+              wantsProductUrls: queryAttributes.flags?.wantsProductLinks,
               prebuiltContext: specialized.context,
               wasExpanded,
               retrievalMaxScore: this.getMaxSemanticScore(specialized.matches),
@@ -2565,7 +2709,7 @@ ${answerInstructions}`;
           answerOptions: {
             responseMode: forcedCatalog.responseMode,
             requestedCount: forcedCatalog.requestedCount,
-            wantsProductUrls: wantsProductLinks,
+            wantsProductUrls: queryAttributes.flags?.wantsProductLinks,
             prebuiltContext: forcedCatalog.context,
             wasExpanded,
             retrievalMaxScore: this.getMaxSemanticScore(forcedCatalog.matches),
@@ -2688,6 +2832,7 @@ ${answerInstructions}`;
       // bringing back the highest-scoring remaining results (but keep
       // ordering and avoid irrelevant queries).
       if (
+        !catalogListQuery &&
         (!isIrrelevant || clearlyOnTopic) &&
         queryResponse.length > 0 &&
         relevantMatches.length < requestedTopK
@@ -2756,7 +2901,64 @@ ${answerInstructions}`;
       const isAgentRequest = isLiveAgentRequest(question);
 
       // Handle simple greetings even without context
-      if (relevantMatches.length === 0 && this.isSimpleGreeting(question)) {
+      // Sized catalog with zero matches: helpful answer, not off-topic fallback
+      if (
+        catalogListQuery &&
+        sizedCatalogQuery &&
+        relevantMatches.length === 0 &&
+        !this.isSimpleGreeting(question) &&
+        !isAccidental
+      ) {
+        const emptyCatalog = this.buildEmptyCatalogListResult(
+          question,
+          queryAttributes,
+          companyName,
+        );
+        const emptyResult = await this.generateAnswerFromMatches({
+          question,
+          matches: emptyCatalog.matches,
+          chatHistory: getChatHistoryFormatted(CHAT_HISTORY_LIMIT),
+          organisation: companyName,
+          websiteData,
+          answerOptions: {
+            responseMode: emptyCatalog.responseMode,
+            requestedCount: emptyCatalog.requestedCount,
+            prebuiltContext: emptyCatalog.context,
+            wasExpanded,
+            retrievalMaxScore: maxScore,
+            ...langOpts,
+          },
+        });
+        finalAnswer = emptyResult.answer;
+        this.logAnswerUsage(userId, agentId, emptyResult);
+      } else if (
+        effectiveSubIntent === SUB_INTENT.CONTACT_INFO &&
+        relevantMatches.length === 0 &&
+        !this.isSimpleGreeting(question) &&
+        !isAccidental
+      ) {
+        const emptyContact = this.buildEmptyContactListResult(
+          question,
+          companyName,
+        );
+        const emptyResult = await this.generateAnswerFromMatches({
+          question,
+          matches: emptyContact.matches,
+          chatHistory: getChatHistoryFormatted(CHAT_HISTORY_LIMIT),
+          organisation: companyName,
+          websiteData,
+          answerOptions: {
+            responseMode: emptyContact.responseMode,
+            requestedCount: emptyContact.requestedCount,
+            prebuiltContext: emptyContact.context,
+            wasExpanded,
+            retrievalMaxScore: maxScore,
+            ...langOpts,
+          },
+        });
+        finalAnswer = emptyResult.answer;
+        this.logAnswerUsage(userId, agentId, emptyResult);
+      } else if (relevantMatches.length === 0 && this.isSimpleGreeting(question)) {
         if (USE_LIGHTWEIGHT_RESPONSES) {
           const greetingResult = await this.respondToGreeting({
             question,
@@ -2831,6 +3033,7 @@ ${answerInstructions}`;
         finalAnswer = onTopicResult.answer;
       } else if (
         (relevantMatches.length === 0 || isIrrelevant) &&
+        !catalogListQuery &&
         !clearlyOnTopic &&
         !this.isSimpleGreeting(question) &&
         !isAccidental
@@ -2870,24 +3073,14 @@ ${answerInstructions}`;
           this.logAnswerUsage(userId, agentId, offTopicResult);
         }
       } else {
-        const wantsUrls = wantsProductLinks || isProductLinkRequest(question);
-        const listFallback =
-          wantsUrls ||
-          hasSizeFilter ||
-          (effectiveSubIntent === "IN_PAGE_LIST" &&
-            this.isExplicitInPageListQuestion(normalizedQuestion));
-        const contactFallback =
-          effectiveSubIntent === "CONTACT_INFO" &&
-          this.isPrimarilyContactQuestion(question);
+        const responseMode =
+          queryAttributes.responseMode ||
+          resolveResponseMode(effectiveSubIntent, queryAttributes);
+        const wantsUrls = queryAttributes.flags?.wantsProductLinks;
         const requestedCount = this.extractRequestedCount(
           question,
           requestedTopK,
         );
-        const responseMode = listFallback
-          ? "list"
-          : contactFallback
-            ? "contact"
-            : "brief";
         const historyLimit = isPremiumResponseMode(responseMode)
           ? CHAT_HISTORY_LIMIT
           : CHAT_HISTORY_LIMIT_BRIEF;

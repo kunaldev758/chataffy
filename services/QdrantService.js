@@ -17,6 +17,10 @@ const {
   extractPayloadAttributes,
 } = require("../utils/searchTerms");
 
+const {
+  INDEXED_PAYLOAD_FIELDS,
+} = require("../constants/contentTypes");
+
 const PAYLOAD_INDEX_SCHEMAS = {
   user_id: "keyword",
   agent_id: "keyword",
@@ -24,6 +28,8 @@ const PAYLOAD_INDEX_SCHEMAS = {
   title: "keyword",
   source_type: "keyword",
   type: "integer",
+  sizes: "keyword",
+  ...INDEXED_PAYLOAD_FIELDS,
 };
 
 class QdrantVectorStoreManager {
@@ -107,7 +113,7 @@ class QdrantVectorStoreManager {
         }
         
         const pageContent = doc.pageContent || "";
-        const title = metadata.title || "";
+        const title = metadata.title || metadata.entity_name || "";
         const url = metadata.url || "";
         const payloadAttrs = extractPayloadAttributes({
           text: pageContent,
@@ -116,22 +122,49 @@ class QdrantVectorStoreManager {
           source_type: metadata.source_type,
         });
 
+        const entityAttributes = metadata.attributes || null;
+        const sizes =
+          metadata.sizes?.length > 0
+            ? metadata.sizes
+            : entityAttributes?.sizes?.length > 0
+              ? entityAttributes.sizes
+              : payloadAttrs.sizes;
+
+        const collections =
+          metadata.collections?.length > 0
+            ? metadata.collections
+            : payloadAttrs.collections;
+
+        const docType = metadata.doc_type || null;
+        const entityType = metadata.entity_type || null;
+
+        const payload = {
+          ...metadata,
+          text: pageContent,
+          search_terms: extractSearchTerms({
+            text: pageContent,
+            title,
+            url,
+          }),
+          sizes,
+          collections,
+          source_type: metadata.source_type || payloadAttrs.source_type,
+          doc_type: docType,
+          entity_type: entityType,
+          entity_name: metadata.entity_name || title || null,
+          attributes: entityAttributes,
+          created_at: metadata.created_at || new Date().toISOString(),
+        };
+
+        if (entityAttributes) {
+          payload.size_min = entityAttributes.size_min ?? null;
+          payload.size_max = entityAttributes.size_max ?? null;
+        }
+
         return {
           id: uuidv4(),
           vector: embeddings[i],
-          payload: {
-            ...metadata,
-            text: pageContent,
-            search_terms: extractSearchTerms({
-              text: pageContent,
-              title,
-              url,
-            }),
-            sizes: payloadAttrs.sizes,
-            collections: payloadAttrs.collections,
-            source_type: payloadAttrs.source_type,
-            created_at: new Date().toISOString(),
-          },
+          payload,
         };
       });
 
