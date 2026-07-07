@@ -51,6 +51,7 @@ class QuestionAnsweringSystem {
    constructor() {
     this.embeddingModel = null;
     this.currentModelName = null;
+    this.qdrantClient = qdrantClient;
   }
 
   async getEmbeddingModel() {
