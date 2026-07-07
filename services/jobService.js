@@ -169,25 +169,87 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
       $('meta[name="description"]').attr("content")?.toLowerCase() || "";
     const combinedText = (keywords + " " + description).toLowerCase();
 
-    // Detect company type
-    if (combinedText.includes("saas") || combinedText.includes("software")) {
-      metadata.company_type = "SaaS company";
-    } else if (
-      combinedText.includes("e-commerce") ||
-      combinedText.includes("online store") ||
-      combinedText.includes("shop")
-    ) {
-      metadata.company_type = "e-commerce platform";
-    } else if (
-      combinedText.includes("service") ||
-      combinedText.includes("consulting")
-    ) {
-      metadata.company_type = "service provider";
-    } else if (combinedText.includes("agency")) {
-      metadata.company_type = "agency";
-    } else {
-      metadata.company_type = "company";
+    // Collect schema.org JSON-LD @type values — the strongest self-declared signal
+    const schemaTypes = [];
+    $('script[type="application/ld+json"]').each((_, el) => {
+      try {
+        const parsed = JSON.parse($(el).contents().text() || $(el).text());
+        const collect = (node) => {
+          if (!node) return;
+          if (Array.isArray(node)) return node.forEach(collect);
+          if (typeof node === "object") {
+            const t = node["@type"];
+            if (typeof t === "string") schemaTypes.push(t.toLowerCase());
+            else if (Array.isArray(t))
+              t.forEach((x) => typeof x === "string" && schemaTypes.push(x.toLowerCase()));
+            if (node["@graph"]) collect(node["@graph"]);
+          }
+        };
+        collect(parsed);
+      } catch (_) {
+        // Ignore invalid JSON-LD blocks
+      }
+    });
+
+    // Broader text signal for classification: title + h1 + og:title + meta keywords/description
+    const classifyText = [title, h1, ogTitle, keywords, description]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    // Detect website type using a weighted scoring system.
+    // Each type lists keyword phrases; schema.org matches score much higher.
+    const typeDefinitions = [
+      { type: "E-commerce Website", schema: ["product", "offer", "onlinestore", "store"], keywords: ["e-commerce", "ecommerce", "online store", "add to cart", "shop now", "buy online", "checkout", "shopping cart", "free shipping"] },
+      { type: "SaaS Website", schema: ["softwareapplication"], keywords: ["saas", "software as a service", "subscription", "free trial", "pricing plan", "per month", "start free", "cloud software"] },
+      { type: "Job Portal", schema: ["jobposting"], keywords: ["job portal", "jobs", "careers", "hiring", "vacancy", "vacancies", "recruitment", "apply now", "resume", "find jobs", "post a job"] },
+      { type: "Real Estate Website", schema: ["realestatelisting", "residence", "apartment", "house", "singlefamilyresidence"], keywords: ["real estate", "property", "properties", "for sale", "for rent", "realty", "listings", "square feet", "bedroom", "mortgage"] },
+      { type: "Healthcare Website", schema: ["hospital", "medicalclinic", "physician", "medicalorganization", "dentist"], keywords: ["hospital", "clinic", "doctor", "patient", "healthcare", "medical", "telemedicine", "appointment", "treatment", "wellness"] },
+      { type: "Banking/Finance Website", schema: ["bankorcreditunion", "financialservice"], keywords: ["banking", "bank", "investment", "loan", "credit card", "fintech", "payments", "insurance", "trading", "financial services"] },
+      { type: "Educational Website", schema: ["educationalorganization", "school", "collegeoruniversity", "course"], keywords: ["education", "e-learning", "online course", "courses", "school", "university", "college", "tutorial", "students", "enroll", "curriculum"] },
+      { type: "News Website", schema: ["newsarticle", "newsmediaorganization"], keywords: ["news", "breaking news", "headlines", "journalism", "latest news", "press", "reporter", "editorial"] },
+      { type: "Blog Website", schema: ["blog", "blogposting"], keywords: ["blog", "articles", "posts", "read more", "author", "recent posts", "categories", "tags"] },
+      { type: "Government Website", schema: ["governmentorganization", "governmentservice"], keywords: ["government", "ministry", "department of", "public services", "official website", "gov", "municipal", "citizen"] },
+      { type: "Nonprofit Website", schema: ["ngo", "nonprofit"], keywords: ["nonprofit", "non-profit", "ngo", "charity", "donate", "foundation", "volunteer", "fundraising", "mission"] },
+      { type: "Crowdfunding Website", keywords: ["crowdfunding", "back this project", "pledge", "fundraiser", "raise funds", "campaign goal", "backers"] },
+      { type: "Booking Website", schema: ["reservation", "lodgingbusiness", "hotel", "traveleagency"], keywords: ["book now", "booking", "reservation", "flights", "hotels", "check-in", "check-out", "travel", "reserve"] },
+      { type: "Streaming Website", keywords: ["streaming", "watch online", "live stream", "on-demand", "ott", "episodes", "seasons", "stream now"] },
+      { type: "Entertainment Website", keywords: ["entertainment", "movies", "music", "games", "gaming", "videos", "celebrity", "shows"] },
+      { type: "Media Sharing Website", keywords: ["upload", "share photos", "share videos", "media sharing", "gallery", "user uploads"] },
+      { type: "Social Media Website", schema: ["socialmediaposting"], keywords: ["social network", "social media", "connect with friends", "followers", "share your", "profile", "feed", "timeline"] },
+      { type: "Forum/Community Website", schema: ["discussionforumposting"], keywords: ["forum", "community", "discussion", "threads", "ask a question", "replies", "topics", "members online"] },
+      { type: "Wiki Website", keywords: ["wiki", "edit this page", "knowledge base", "encyclopedia", "collaborative", "revision history"] },
+      { type: "Search Engine", schema: ["searchaction"], keywords: ["search engine", "search the web", "web search"] },
+      { type: "Documentation Website", keywords: ["documentation", "docs", "api reference", "developer guide", "getting started", "user guide", "sdk"] },
+      { type: "Knowledge Base", keywords: ["knowledge base", "help center", "support articles", "faq", "troubleshooting", "how do i", "support center"] },
+      { type: "Membership Website", keywords: ["membership", "members only", "premium content", "subscribe to access", "member login", "exclusive content"] },
+      { type: "Directory Website", keywords: ["directory", "business listings", "find businesses", "listed", "browse categories", "yellow pages"] },
+      { type: "Portfolio Website", keywords: ["portfolio", "my work", "case studies", "projects", "showcase", "selected works", "hire me"] },
+      { type: "Personal Website", keywords: ["personal website", "about me", "my resume", "my blog", "personal blog", "curriculum vitae"] },
+      { type: "Landing Page", keywords: ["sign up now", "get started", "limited offer", "join the waitlist", "coming soon", "lead generation"] },
+      { type: "Web Application", schema: ["webapplication"], keywords: ["dashboard", "crm", "erp", "web app", "login to your account", "workspace", "admin panel"] },
+      { type: "Business/Corporate Website", keywords: ["our services", "about us", "company", "solutions", "consulting", "agency", "our team", "contact us", "enterprise"] },
+    ];
+
+    const scores = {};
+    for (const def of typeDefinitions) {
+      let score = 0;
+      if (def.schema) {
+        for (const s of def.schema) {
+          if (schemaTypes.includes(s)) score += 5;
+        }
+      }
+      if (def.keywords) {
+        for (const kw of def.keywords) {
+          if (classifyText.includes(kw)) score += 1;
+        }
+      }
+      if (score > 0) scores[def.type] = score;
     }
+
+    const bestType = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+    // Fall back to a generic corporate site when no signal is strong enough
+    metadata.company_type = bestType ? bestType[0] : "Business/Corporate Website";
 
     // Extract industry
     const industryKeywords = {
