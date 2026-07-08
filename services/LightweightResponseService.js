@@ -1,4 +1,4 @@
-const { normalizeLanguageCode } = require("../utils/websiteLanguage");
+const { normalizeLanguageCode, resolveUserLanguage } = require("../utils/websiteLanguage");
 
 const GREETING_LANGUAGE_BY_PHRASE = {
   hi: "en",
@@ -132,8 +132,6 @@ function isKnownGreetingPhrase(question) {
   if (GREETING_LANGUAGE_BY_PHRASE[normalized]) return true;
   const withoutBang = normalized.replace(/!+$/g, "").trim();
   if (GREETING_LANGUAGE_BY_PHRASE[withoutBang]) return true;
-  // If greeting is in a non-Latin script, we can infer language from script reliably.
-  if (detectScriptLanguage(question)) return true;
   return false;
 }
 
@@ -143,22 +141,18 @@ function resolveReplyLanguage({
   visitorLocale,
   websiteLanguage,
 }) {
-  const fromPhrase = languageFromGreetingPhrase(userMessage);
-  if (fromPhrase) return fromPhrase;
+  const resolved = resolveUserLanguage({
+    routingUserLanguage,
+    visitorLocale,
+    websiteLanguage,
+  });
 
-  const fromScript = detectScriptLanguage(userMessage);
-  if (fromScript) return fromScript;
+  if (resolved !== "en") return resolved;
 
-  const fromRouting = normalizeLanguageCode(routingUserLanguage);
-  if (fromRouting && fromRouting !== "en") return fromRouting;
+  const fromGreeting = languageFromGreetingPhrase(userMessage);
+  if (fromGreeting) return fromGreeting;
 
-  const fromVisitor = normalizeLanguageCode(visitorLocale);
-  if (fromVisitor) return fromVisitor;
-
-  const fromWebsite = normalizeLanguageCode(websiteLanguage);
-  if (fromWebsite) return fromWebsite;
-
-  return "en";
+  return resolved;
 }
 
 const OFF_TOPIC_TEMPLATES = {

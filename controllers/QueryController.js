@@ -12,6 +12,7 @@ const HumanAgent = require("../models/HumanAgent");
 const { logOpenAIUsage } = require("../services/UsageTrackingService");
 const {
   routeQuery,
+  classifyQueryIntent,
   ROUTES,
   isLiveAgentRequest,
   isPureGreeting,
@@ -59,9 +60,8 @@ const {
   SUB_INTENT,
 } = require("../utils/intentMapping");
 const {
-  isClearlyOnTopicCompanyQuestion: detectClearlyOnTopicQuestion,
-  isCompanyIdentityQuestion: detectCompanyIdentityQuestion,
-  isTrulyOffTopicQuestion,
+  resolveQueryIntent,
+  needsLazyIntentClassification,
 } = require("../utils/queryOnTopicDetection");
 const {
   buildSystemPrompt,
@@ -461,12 +461,33 @@ class QuestionAnsweringSystem {
     };
   }
 
-  isClearlyOnTopicCompanyQuestion(question, companyName) {
-    return detectClearlyOnTopicQuestion(question, companyName);
+  isClearlyOnTopicCompanyQuestion(question, companyName, routing = {}) {
+    return resolveQueryIntent(question, companyName, routing).clearlyOnTopic;
   }
 
-  isCompanyIdentityQuestion(question, companyName) {
-    return detectCompanyIdentityQuestion(question, companyName);
+  isCompanyIdentityQuestion(question, companyName, routing = {}) {
+    return resolveQueryIntent(question, companyName, routing).isIdentity;
+  }
+
+  async resolveQueryIntentWithFallback({
+    question,
+    companyName,
+    routing,
+    openaiClient,
+  }) {
+    let activeRouting = { ...routing };
+    let intent = resolveQueryIntent(question, companyName, activeRouting);
+
+    if (needsLazyIntentClassification(intent, activeRouting)) {
+      console.log(
+        `[QueryController] Lazy LLM intent classification for: "${question.substring(0, 60)}..."`,
+      );
+      const llmIntent = await classifyQueryIntent(question, { openaiClient });
+      activeRouting = { ...activeRouting, ...llmIntent };
+      intent = resolveQueryIntent(question, companyName, activeRouting);
+    }
+
+    return { intent, routing: activeRouting };
   }
 
   buildWebsiteDataFallbackContext(websiteData, companyName) {
@@ -503,6 +524,7 @@ class QuestionAnsweringSystem {
     companyName,
     websiteData,
     langOpts,
+    queryIntent,
     wasExpanded,
     maxScore,
     userId,
@@ -518,10 +540,7 @@ class QuestionAnsweringSystem {
       );
     }
 
-    const identityQuestion = this.isCompanyIdentityQuestion(
-      question,
-      companyName,
-    );
+    const identityQuestion = queryIntent?.isIdentity === true;
     const historyLimit = identityQuestion
       ? CHAT_HISTORY_LIMIT
       : CHAT_HISTORY_LIMIT_BRIEF;
@@ -1965,6 +1984,10 @@ ${answerInstructions}`;
         );
       }
 
+
+
+      console.log("effective mode : ", effectiveMode);
+
       const response = await openai.chat.completions.create({
         model: chatModel,
         messages: [
@@ -2468,9 +2491,10 @@ ${answerInstructions}`;
       }
 
       // Intent classification FIRST (rules → gpt-4.1-nano)
-      const routing = await routeQuery(normalizedQuestion, {
+      let routing = await routeQuery(normalizedQuestion, {
         chatMessages: chatSession,
         websiteLanguage,
+        visitorLocale: options.visitorLocale,
         openaiClient: openai,
       });
 
@@ -2781,13 +2805,22 @@ ${answerInstructions}`;
           ? Math.max(...queryResponse.map((m) => m.score))
           : 0;
 
-      const clearlyOnTopic = this.isClearlyOnTopicCompanyQuestion(
-        normalizedQuestion,
-        companyName,
-      );
+      const { intent: queryIntent, routing: resolvedRouting } =
+        await this.resolveQueryIntentWithFallback({
+          question: normalizedQuestion,
+          companyName,
+          routing,
+          openaiClient: openai,
+        });
+      routing = resolvedRouting;
+      if (routing.userLanguage) {
+        langOpts.userLanguage = routing.userLanguage;
+      }
+
+      const clearlyOnTopic = queryIntent.clearlyOnTopic;
       if (clearlyOnTopic) {
         console.log(
-          `[QueryController] On-topic company question detected: "${question.substring(0, 60)}..."`,
+          `[QueryController] On-topic company question detected (${queryIntent.source}): "${question.substring(0, 60)}..."`,
         );
       }
 
@@ -3025,6 +3058,7 @@ ${answerInstructions}`;
           companyName,
           websiteData,
           langOpts,
+          queryIntent,
           wasExpanded,
           maxScore,
           userId,
@@ -3040,7 +3074,7 @@ ${answerInstructions}`;
       ) {
         const useLightTemplate =
           USE_LIGHTWEIGHT_RESPONSES &&
-          (isIrrelevant || isTrulyOffTopicQuestion(normalizedQuestion));
+          (isIrrelevant || queryIntent.isTrulyOffTopic);
 
         if (useLightTemplate) {
           const offTopicResult = this.respondToOffTopic({

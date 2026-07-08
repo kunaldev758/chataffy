@@ -87,12 +87,18 @@ function buildMediumPrompt(ctx) {
 
   const servicesText =
     servicesList.length > 0
-      ? servicesList.slice(0, 8).map((s) => `- ${s}`).join("\n")
+      ? servicesList
+          .slice(0, 8)
+          .map((s) => `- ${s}`)
+          .join("\n")
       : null;
 
   const doesNotText =
     doesNotList.length > 0
-      ? doesNotList.slice(0, 5).map((item) => `- ${item}`).join("\n")
+      ? doesNotList
+          .slice(0, 5)
+          .map((item) => `- ${item}`)
+          .join("\n")
       : null;
 
   const parts = [
@@ -149,24 +155,68 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
   const countHint =
     requestedCount != null ? String(requestedCount) : "all found";
 
-  if (effectiveMode === "list") {
-    let instructions = `Instructions:
-- Write as customer support for ${org}
-- List **every** matching item from the context (up to ${countHint} if a number was requested, otherwise all found in context)
-- Each item: name, price (if shown), clickable link when URL is in context
-- HTML: <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>
-- Never say items/sizes are unavailable if they appear in context or conversation history
-- You may use more than 2 sentences when listing multiple items
-- Only use context and conversation; do not invent products, sizes, or URLs`;
+    if (effectiveMode === "list") {
+      let instructions = `Instructions:
+  - Write as customer support for ${org}
+  - List **every** matching item from the context (up to ${countHint} if a number was requested, otherwise all found in context)
+  - Each item: name, price (if shown), clickable link when URL is in context
+  - HTML: <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>
+  - Never say items/sizes are unavailable if they appear in context or conversation history
+  - You may use more than 2 sentences when listing multiple items
+  - Only use context and conversation; do not invent products, sizes, or URLs`;
 
-    if (wantsProductUrls) {
-      instructions += `
-- **CRITICAL**: User asked for URLs — every product/collection MUST include its URL from context
-- Do not contradict links or collections from earlier in the conversation
-- If context has a collection page for the requested size, link to it — do not invent different minimum sizes`;
+      if (wantsProductUrls) {
+        instructions += `
+  - **CRITICAL**: User asked for URLs — every product/collection MUST include its URL from context
+  - Do not contradict links or collections from earlier in the conversation
+  - If context has a collection page for the requested size, link to it — do not invent different minimum sizes`;
+      }
+      return instructions;
     }
-    return instructions;
-  }
+
+// if (effectiveMode === "list") {
+//   let instructions = `Instructions:
+// You are a customer support assistant for ${org}.
+
+// Task:
+// 1. Identify only the context items that directly answer the user's request.
+// 2. Ignore unrelated context, even if it contains similar words.
+// 3. Rank the remaining items by relevance:
+//    - Exact matches first
+//    - Close matches second (only if useful)
+// 4. Return the results as an HTML list.
+
+// Rules:
+// - Use only the provided context and conversation history.
+// - Never invent products, collections, prices, descriptions, availability, or URLs.
+// - If the same item appears multiple times, merge it into one result.
+// - If an attribute is missing, omit it instead of guessing.
+// - If exact matches exist, do not include loosely related products, tools, blogs, wishlists, navigation pages, or other unrelated content.
+// - If the user requests a limit, return up to ${countHint} items; otherwise include all relevant matches.
+// - If no matching items exist, clearly say so.
+
+// Output:
+// - Return valid HTML using <ul> and <li>.
+// - Each item should include:
+//   • Name
+//   • Price (if available)
+//   • Short description (if available)
+//   • Clickable link (if available)
+
+// Links:
+// <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">Title</a>
+
+// Before responding, verify that every listed item directly satisfies the user's request.`;
+
+//   if (wantsProductUrls) {
+//     instructions += `
+// - Include a URL for every listed item when available.
+// - Prefer product URLs over collection URLs.
+// - Never invent or modify URLs.`;
+//   }
+
+//   return instructions;
+// }
 
   if (effectiveMode === "page_links") {
     return `Instructions:

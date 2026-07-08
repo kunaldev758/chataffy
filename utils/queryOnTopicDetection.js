@@ -1,6 +1,9 @@
 /**
  * Detect business-support questions that should never be treated as off-topic
  * based only on low embedding similarity scores.
+ *
+ * Regex patterns run first (fast path for English). When regex does not match,
+ * LLM router intent flags are used as a multilingual fallback.
  */
 
 const ON_TOPIC_PATTERNS = [
@@ -41,40 +44,102 @@ const TRULY_OFF_TOPIC_PATTERNS = [
   /\b(?:president|prime\s+minister)\s+of\b/i,
 ];
 
-function isClearlyOnTopicCompanyQuestion(question, companyName = "") {
+function isClearlyOnTopicByRegex(question, companyName = "") {
   const q = String(question || "").trim();
   if (!q) return false;
   return (
     ON_TOPIC_PATTERNS.some((re) => re.test(q)) ||
-    isCompanyIdentityQuestion(q, companyName)
+    isCompanyIdentityByRegex(q, companyName)
   );
 }
 
-function isCompanyIdentityQuestion(question, companyName = "") {
+function isCompanyIdentityByRegex(question, companyName = "") {
   const q = String(question || "").trim();
   if (!q) return false;
   if (IDENTITY_PATTERNS.some((re) => re.test(q))) return true;
   const company = String(companyName || "").trim();
   if (company.length >= 3) {
     const escaped = company.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const companyRe = new RegExp(
-      `\\bwhat\\s+is\\s+${escaped}\\b`,
-      "i"
-    );
+    const companyRe = new RegExp(`\\bwhat\\s+is\\s+${escaped}\\b`, "i");
     if (companyRe.test(q)) return true;
   }
   return false;
 }
 
-function isTrulyOffTopicQuestion(question) {
+function isTrulyOffTopicByRegex(question, companyName = "") {
   const q = String(question || "").trim();
   if (!q) return false;
-  if (isClearlyOnTopicCompanyQuestion(q)) return false;
+  if (isClearlyOnTopicByRegex(q, companyName)) return false;
   return TRULY_OFF_TOPIC_PATTERNS.some((re) => re.test(q));
 }
 
+/**
+ * Resolve query intent: regex first, then LLM router flags as multilingual fallback.
+ * @param {object} routing - routeQuery result (may include isIdentityQuestion, isBusinessQuestion, isTrulyOffTopic)
+ */
+function resolveQueryIntent(question, companyName = "", routing = {}) {
+  const q = String(question || "").trim();
+
+  if (isClearlyOnTopicByRegex(q, companyName)) {
+    return {
+      clearlyOnTopic: true,
+      isIdentity: isCompanyIdentityByRegex(q, companyName),
+      isTrulyOffTopic: false,
+      source: "regex",
+    };
+  }
+
+  if (isTrulyOffTopicByRegex(q, companyName)) {
+    return {
+      clearlyOnTopic: false,
+      isIdentity: false,
+      isTrulyOffTopic: true,
+      source: "regex",
+    };
+  }
+
+  const llmOnTopic =
+    routing.isBusinessQuestion === true ||
+    routing.isIdentityQuestion === true;
+  const llmOffTopic = routing.isTrulyOffTopic === true;
+
+  return {
+    clearlyOnTopic: llmOnTopic,
+    isIdentity: routing.isIdentityQuestion === true,
+    isTrulyOffTopic: llmOffTopic && !llmOnTopic,
+    source: routing.intentClassified ? "llm_intent" : "none",
+  };
+}
+
+function isClearlyOnTopicCompanyQuestion(question, companyName = "", routing = {}) {
+  return resolveQueryIntent(question, companyName, routing).clearlyOnTopic;
+}
+
+function isCompanyIdentityQuestion(question, companyName = "", routing = {}) {
+  const intent = resolveQueryIntent(question, companyName, routing);
+  return intent.isIdentity;
+}
+
+function isTrulyOffTopicQuestion(question, companyName = "", routing = {}) {
+  return resolveQueryIntent(question, companyName, routing).isTrulyOffTopic;
+}
+
+function needsLazyIntentClassification(intent, routing = {}) {
+  return (
+    intent.source !== "regex" &&
+    !routing.intentClassified &&
+    !intent.clearlyOnTopic &&
+    !intent.isTrulyOffTopic
+  );
+}
+
 module.exports = {
+  resolveQueryIntent,
   isClearlyOnTopicCompanyQuestion,
   isCompanyIdentityQuestion,
   isTrulyOffTopicQuestion,
+  needsLazyIntentClassification,
+  isClearlyOnTopicByRegex,
+  isCompanyIdentityByRegex,
+  isTrulyOffTopicByRegex,
 };

@@ -1,6 +1,6 @@
 require("dotenv").config();
 const { OpenAI } = require("openai");
-const { normalizeLanguageCode, detectLanguageFromText } = require("../utils/websiteLanguage");
+const { normalizeLanguageCode, resolveUserLanguage } = require("../utils/websiteLanguage");
 const {
   detectCatalogFollowUp,
   isProductLinkRequest,
@@ -11,7 +11,7 @@ const { isContactIntentQuestion } = require("../utils/contactIntentDetection");
 const {
   normalizeGreetingInput,
   isGibberishOrAccidentalMessage,
-  detectScriptLanguage,
+  languageFromGreetingPhrase,
 } = require("./LightweightResponseService");
 
 const ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano";
@@ -261,12 +261,13 @@ function detectFollowUpAcceptance(question, chatMessages) {
   );
 }
 
-function detectUserLanguageFromQuestion(question) {
-  const fromScript = detectScriptLanguage(question);
-  if (fromScript) return fromScript;
-
-  const fromText = detectLanguageFromText(question);
-  return fromText?.language || "en";
+function detectUserLanguageFromQuestion(question, { visitorLocale, websiteLanguage } = {}) {
+  const fromGreeting = languageFromGreetingPhrase(question);
+  return resolveUserLanguage({
+    routingUserLanguage: fromGreeting,
+    visitorLocale,
+    websiteLanguage,
+  });
 }
 
 function buildRouteResult({
@@ -276,6 +277,10 @@ function buildRouteResult({
   confidence = 1,
   rewrittenQuery = null,
   source = "rules",
+  isIdentityQuestion = false,
+  isBusinessQuestion = false,
+  isTrulyOffTopic = false,
+  intentClassified = false,
 }) {
   return {
     route,
@@ -284,12 +289,19 @@ function buildRouteResult({
     confidence,
     rewrittenQuery,
     source,
+    isIdentityQuestion: Boolean(isIdentityQuestion),
+    isBusinessQuestion: Boolean(isBusinessQuestion),
+    isTrulyOffTopic: Boolean(isTrulyOffTopic),
+    intentClassified: Boolean(intentClassified),
   };
 }
 
-function applyRuleEngine(question, { chatMessages } = {}) {
+function applyRuleEngine(question, { chatMessages, visitorLocale, websiteLanguage } = {}) {
   const normalizedQuestion = normalizeQueryText(question);
-  const userLanguage = detectUserLanguageFromQuestion(normalizedQuestion);
+  const userLanguage = detectUserLanguageFromQuestion(normalizedQuestion, {
+    visitorLocale,
+    websiteLanguage,
+  });
 
   if (isPureGreeting(normalizedQuestion)) {
     return {
@@ -411,7 +423,7 @@ function parseRouterJson(content, question = "") {
     const parsed = JSON.parse(content || "{}");
     const route = String(parsed.route || "").toUpperCase();
     const validRoutes = Object.values(ROUTES);
-    const resolvedRoute = validRoutes.includes(route)
+    let resolvedRoute = validRoutes.includes(route)
       ? route
       : ROUTES.SEMANTIC_RAG;
 
@@ -434,6 +446,10 @@ function parseRouterJson(content, question = "") {
       typeof parsed.rewrittenQuery === "string" && parsed.rewrittenQuery.trim()
         ? parsed.rewrittenQuery.trim()
         : null;
+
+    const isIdentityQuestion = parsed.isIdentityQuestion === true;
+    const isBusinessQuestion = parsed.isBusinessQuestion === true;
+    const isTrulyOffTopic = parsed.isTrulyOffTopic === true;
 
     if (
       resolvedRoute === ROUTES.STRUCTURAL ||
@@ -470,12 +486,17 @@ function parseRouterJson(content, question = "") {
       confidence,
       rewrittenQuery,
       source: "llm_router",
+      isIdentityQuestion,
+      isBusinessQuestion,
+      isTrulyOffTopic,
+      intentClassified: true,
     });
   } catch {
     return buildRouteResult({
       route: ROUTES.SEMANTIC_RAG,
       confidence: 0.5,
       source: "llm_router_fallback",
+      intentClassified: false,
     });
   }
 }
@@ -484,6 +505,7 @@ async function llmRoute(question, options = {}) {
   const {
     chatHistorySnippet = "",
     websiteLanguage = "en",
+    visitorLocale = null,
     openaiClient = null,
   } = options;
 
@@ -500,14 +522,21 @@ Classify the visitor message into exactly one route:
 - HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), homepage product catalog with prices, or contact/social profiles
 - SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
 
-IMPORTANT: Prefer SEMANTIC_RAG for pricing, features, policies, how-to, and general questions even if they contain words like "show" or "list". Only use HYBRID for explicit listing/navigation/contact requests. Real questions in any language (Japanese, Russian, Spanish, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
+IMPORTANT: Prefer SEMANTIC_RAG for pricing, features, policies, how-to, and general questions even if they contain words like "show" or "list". Only use HYBRID for explicit listing/navigation/contact requests. Real questions in any language (Japanese, Chinese, Russian, Spanish, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
 
 For HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
 - CONTACT_INFO: phone, email, address, hours, social media profiles — in ANY language (e.g. Japanese 連絡先, お問い合わせ, 電話番号)
 - IN_PAGE_LIST: product catalog with prices/sizes
 - PAGE_LINKS: list of site pages or collection URLs
 
-Detect userLanguage: ISO 639-1 code for the language the visitor wrote in (e.g. en, de, hi, ja).
+Also classify business intent in ANY language:
+- isIdentityQuestion: true when the user asks who you are or to introduce yourself/the company (e.g. "who are you", "describe yourself", "介绍一下你自己", "自己紹介してください", "qui êtes-vous")
+- isBusinessQuestion: true for products, services, pricing, policies, company info, or any support question about the business
+- isTrulyOffTopic: true ONLY for unrelated general knowledge (weather, jokes, sports, recipes, crypto prices, politics) — NOT for business questions even in non-English
+
+If isIdentityQuestion or isBusinessQuestion is true, route MUST be SEMANTIC_RAG and isTrulyOffTopic MUST be false.
+
+Detect userLanguage: ISO 639-1 code for the language the visitor WROTE IN (e.g. en, es, fr, de, zh, ja, ko, ar, hi, ru, pt, th, vi, tr). Do NOT guess language from script alone.
 
 If route is HYBRID and userLanguage differs from website language, provide rewrittenQuery: search keywords/phrases in the website language (${websiteLanguage}) for keyword matching. Otherwise rewrittenQuery can be null.
 
@@ -519,16 +548,22 @@ Respond with JSON only:
   "subIntent": null,
   "userLanguage": "en",
   "confidence": 0.85,
-  "rewrittenQuery": null
+  "rewrittenQuery": null,
+  "isIdentityQuestion": false,
+  "isBusinessQuestion": false,
+  "isTrulyOffTopic": false
 }`;
 
   const userContent = [
     `Website language: ${websiteLanguage}`,
+    visitorLocale ? `Visitor browser locale: ${visitorLocale}` : null,
     chatHistorySnippet
       ? `Recent conversation:\n${chatHistorySnippet}`
       : "Recent conversation: (none)",
     `User message: ${question}`,
-  ].join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
   try {
     const response = await client.chat.completions.create({
@@ -548,7 +583,63 @@ Respond with JSON only:
       route: ROUTES.SEMANTIC_RAG,
       confidence: 0.5,
       source: "llm_router_error",
+      intentClassified: false,
     });
+  }
+}
+
+const INTENT_CLASSIFIER_PROMPT = `You are an intent classifier for a multilingual customer-support chatbot.
+
+Classify the visitor message intent in ANY language:
+- isIdentityQuestion: true when asking who you are or to introduce yourself/the company
+- isBusinessQuestion: true for products, services, pricing, policies, company info, or business support
+- isTrulyOffTopic: true ONLY for unrelated topics (weather, jokes, sports, recipes, crypto) — NOT business questions
+
+If isIdentityQuestion or isBusinessQuestion is true, isTrulyOffTopic MUST be false.
+
+Respond with JSON only:
+{
+  "isIdentityQuestion": false,
+  "isBusinessQuestion": false,
+  "isTrulyOffTopic": false
+}`;
+
+/**
+ * Lazy LLM intent classification when regex missed and the router did not run.
+ */
+async function classifyQueryIntent(question, options = {}) {
+  const { openaiClient = null } = options;
+
+  const client =
+    openaiClient ||
+    new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+  try {
+    const response = await client.chat.completions.create({
+      model: ROUTER_MODEL,
+      messages: [
+        { role: "system", content: INTENT_CLASSIFIER_PROMPT },
+        { role: "user", content: `User message: ${question}` },
+      ],
+      temperature: 0,
+      response_format: { type: "json_object" },
+    });
+
+    const parsed = JSON.parse(response.choices[0]?.message?.content || "{}");
+    return {
+      isIdentityQuestion: parsed.isIdentityQuestion === true,
+      isBusinessQuestion: parsed.isBusinessQuestion === true,
+      isTrulyOffTopic: parsed.isTrulyOffTopic === true,
+      intentClassified: true,
+    };
+  } catch (error) {
+    console.error("[QueryRouter] Intent classification failed:", error.message);
+    return {
+      isIdentityQuestion: false,
+      isBusinessQuestion: false,
+      isTrulyOffTopic: false,
+      intentClassified: false,
+    };
   }
 }
 
@@ -559,16 +650,24 @@ async function routeQuery(question, options = {}) {
   const {
     chatMessages = [],
     websiteLanguage = "en",
+    visitorLocale = null,
     openaiClient = null,
   } = options;
 
   const ruleOutcome = applyRuleEngine(question, {
     chatMessages,
     websiteLanguage,
+    visitorLocale,
   });
 
   if (!shouldDeferToLlmRouter(question, ruleOutcome)) {
-    return ruleOutcome.result;
+    const result = ruleOutcome.result;
+    result.userLanguage = resolveUserLanguage({
+      routingUserLanguage: result.userLanguage,
+      visitorLocale,
+      websiteLanguage,
+    });
+    return result;
   }
 
   const chatHistorySnippet = formatRecentChatForRouter(chatMessages);
@@ -577,11 +676,20 @@ async function routeQuery(question, options = {}) {
     `[QueryRouter] LLM routing (rules deferred: ${ruleOutcome.confident ? ruleOutcome.result?.source : "no_match"}) for: ${question.substring(0, 80)}`
   );
 
-  return llmRoute(question, {
+  const llmResult = await llmRoute(question, {
     chatHistorySnippet,
     websiteLanguage,
+    visitorLocale,
     openaiClient,
   });
+
+  llmResult.userLanguage = resolveUserLanguage({
+    routingUserLanguage: llmResult.userLanguage,
+    visitorLocale,
+    websiteLanguage,
+  });
+
+  return llmResult;
 }
 
 function isRagRoute(route) {
@@ -592,6 +700,7 @@ module.exports = {
   ROUTES,
   SUB_INTENTS,
   routeQuery,
+  classifyQueryIntent,
   isRagRoute,
   classifyStructuralSubIntent,
   isSimpleGreeting,

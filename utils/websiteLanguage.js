@@ -132,8 +132,30 @@ function detectWebsiteLanguage($, bodyText = "") {
   };
 }
 
+/**
+ * Resolve the language to use for replies.
+ * Priority: LLM router > browser locale > website language > en.
+ */
+function resolveUserLanguage({
+  routingUserLanguage,
+  visitorLocale,
+  websiteLanguage,
+} = {}) {
+  const fromRouting = normalizeLanguageCode(routingUserLanguage);
+  if (fromRouting) return fromRouting;
+
+  const fromVisitor = normalizeLanguageCode(visitorLocale);
+  if (fromVisitor) return fromVisitor;
+
+  const fromWebsite = normalizeLanguageCode(websiteLanguage);
+  if (fromWebsite) return fromWebsite;
+
+  return "en";
+}
+
 module.exports = {
   normalizeLanguageCode,
   detectWebsiteLanguage,
   detectLanguageFromText,
+  resolveUserLanguage,
 };
