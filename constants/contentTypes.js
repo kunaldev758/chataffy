@@ -12,11 +12,28 @@ const DOC_TYPE = {
 const ENTITY_TYPE = {
   PRODUCT: "product",
   SERVICE: "service",
+  FAQ: "faq",
+  CONTACT: "contact",
+  CATEGORY: "category",
+  ABOUT: "about",
+  BLOG: "blog",
   COURSE: "course",
   PERSON: "person",
   PROPERTY: "property",
   GENERIC: "generic",
 };
+
+/** Entity types detected at the page level by the Entity Extraction Engine.
+ *  A single page URL can match multiple of these. */
+const PAGE_ENTITY_TYPES = [
+  ENTITY_TYPE.PRODUCT,
+  ENTITY_TYPE.FAQ,
+  ENTITY_TYPE.CONTACT,
+  ENTITY_TYPE.SERVICE,
+  ENTITY_TYPE.CATEGORY,
+  ENTITY_TYPE.ABOUT,
+  ENTITY_TYPE.BLOG,
+];
 
 const SEARCH_INTENT = {
   ENTITY: "entity_search",
@@ -35,6 +52,7 @@ const INDEXED_PAYLOAD_FIELDS = {
 module.exports = {
   DOC_TYPE,
   ENTITY_TYPE,
+  PAGE_ENTITY_TYPES,
   SEARCH_INTENT,
   INDEXED_PAYLOAD_FIELDS,
 };
