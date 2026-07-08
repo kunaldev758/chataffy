@@ -172,17 +172,6 @@ async function callGroq({ model, prompt, apiKey, timeoutMs, system }) {
   return String(res.data?.choices?.[0]?.message?.content || "").trim();
 }
 
-/**
- * Classify website type from full page content using Llama via Ollama or Groq.
- *
- * Env vars:
- * - LLAMA_WEBSITE_TYPE_ENABLED=true|false (falls back to LLAMA_ENABLED / LLAMA_MICRO_ENABLED)
- * - LLAMA_WEBSITE_TYPE_MODEL (default llama3.2:3b-instruct for ollama)
- * - LLAMA_WEBSITE_TYPE_PROVIDER=ollama|groq (default ollama)
- * - OLLAMA_BASE_URL (default http://127.0.0.1:11434)
- * - GROQ_API_KEY (required for groq)
- * - LLAMA_WEBSITE_TYPE_TIMEOUT_MS (default 30000)
- */
 async function classifyWebsiteType({
   url,
   title,
