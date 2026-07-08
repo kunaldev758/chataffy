@@ -491,7 +491,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
       metadata.company_type = bestType[0];
       metadata.company_type_source = "keywords";
     } else {
-      // Weak keyword/schema signal — Llama reads full page content in processWebPage.
       metadata.company_type = bestType
         ? bestType[0]
         : "Business/Corporate Website";
@@ -499,7 +498,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
       metadata._schemaTypes = schemaTypes;
     }
 
-    // Extract industry
     const industryKeywords = {
       technology: ["tech", "software", "it", "saas", "platform"],
       healthcare: ["health", "medical", "hospital", "clinic", "wellness"],
