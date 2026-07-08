@@ -144,15 +144,12 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
   };
 
   try {
-    // Extract company name from various sources
     const title = $("title").text().trim();
     const h1 = $("h1").first().text().trim();
     const ogTitle = $('meta[property="og:title"]').attr("content")?.trim();
     const siteName = $('meta[property="og:site_name"]').attr("content")?.trim();
     const domainName = companyNameFromDomain(metadata.domain);
 
-    // Homepage: page title may reflect the brand. Inner pages often title a product/article
-    // (e.g. "Clever AdWords" on favseo.com) — use site-wide name or domain instead.
     if (isHomepage) {
       metadata.company_name =
         siteName ||
@@ -164,15 +161,12 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
     } else {
       metadata.company_name = siteName || domainName;
     }
-
-    // Extract company type from meta tags or content
     const keywords =
       $('meta[name="keywords"]').attr("content")?.toLowerCase() || "";
     const description =
       $('meta[name="description"]').attr("content")?.toLowerCase() || "";
     const combinedText = (keywords + " " + description).toLowerCase();
 
-    // Collect schema.org JSON-LD @type values — the strongest self-declared signal
     const schemaTypes = [];
     $('script[type="application/ld+json"]').each((_, el) => {
       try {
@@ -190,20 +184,18 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
         };
         collect(parsed);
       } catch (_) {
-        // Ignore invalid JSON-LD blocks
+       
       }
     });
 
-    // Broader text signal for classification: title + h1 + og:title + meta keywords/description
+   
     const classifyText = [title, h1, ogTitle, keywords, description]
       .filter(Boolean)
       .join(" ")
       .toLowerCase();
 
-    // Detect website type using a weighted scoring system.
-    // Each type lists keyword phrases; schema.org matches score much higher.
+   
     const typeDefinitions = [
-      // ========== SAAS ==========
       {
         type: "SaaS Website",
         schema: ["softwareapplication", "saas", "cloudservice"],
@@ -218,7 +210,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
         ]
       },
 
-      // ========== E-COMMERCE ==========
       {
         type: "E-commerce Website",
         schema: ["product", "offer", "onlinestore", "store", "shopping"],
@@ -231,7 +222,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
         ]
       },
 
-      // ========== JOB PORTAL ==========
       {
         type: "Job Portal",
         schema: ["jobposting", "employeraggregate"],
@@ -242,9 +232,7 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "job listing", "job opening", "candidate", "employer",
           "salary", "work from home", "remote job", "full-time", "part-time"
         ]
-      },
-
-      // ========== REAL ESTATE ==========
+      },      
       {
         type: "Real Estate Website",
         schema: ["realestatelisting", "residence", "apartment", "house", "singlefamilyresidence"],
@@ -256,8 +244,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "home", "bathroom", "garage", "floor plan", "virtual tour"
         ]
       },
-
-      // ========== HEALTHCARE ==========
       {
         type: "Healthcare Website",
         schema: ["hospital", "medicalclinic", "physician", "medicalorganization", "dentist"],
@@ -269,8 +255,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "dental", "pediatric", "cardiology", "neurology", "orthopedic"
         ]
       },
-
-      // ========== BANKING/FINANCE ==========
       {
         type: "Banking/Finance Website",
         schema: ["bankorcreditunion", "financialservice"],
@@ -281,8 +265,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "wealth", "portfolio", "retirement", "mutual fund", "interest"
         ]
       },
-
-      // ========== EDUCATIONAL ==========
       {
         type: "Educational Website",
         schema: ["educationalorganization", "school", "collegeoruniversity", "course"],
@@ -294,8 +276,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "lesson", "class", "teacher", "instructor", "admission"
         ]
       },
-
-      // ========== NEWS ==========
       {
         type: "News Website",
         schema: ["newsarticle", "newsmediaorganization"],
@@ -305,10 +285,7 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "politics", "world news", "local news", "sports", "entertainment",
           "business news", "technology news", "health news", "opinion", "column"
         ]
-      },
-
-      // ========== BLOG ==========
-      {
+      },{
         type: "Blog Website",
         schema: ["blog", "blogposting"],
         keywords: [
@@ -317,10 +294,7 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "comment", "subscribe", "newsletter", "featured", "archive",
           "guest post", "personal blog", "lifestyle", "travel", "food"
         ]
-      },
-
-      // ========== GOVERNMENT ==========
-      {
+      },{
         type: "Government Website",
         schema: ["governmentorganization", "governmentservice"],
         keywords: [
@@ -330,10 +304,7 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "government of", "national", "state", "local government",
           "public health", "education department", "tax", "e-governance"
         ]
-      },
-
-      // ========== NONPROFIT ==========
-      {
+      },{
         type: "Nonprofit Website",
         schema: ["ngo", "nonprofit", "charity"],
         keywords: [
@@ -344,7 +315,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
         ]
       },
 
-      // ========== CROWDFUNDING ==========
       {
         type: "Crowdfunding Website",
         keywords: [
@@ -353,8 +323,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "donation", "project", "invest", "startup", "creator"
         ]
       },
-
-      // ========== BOOKING ==========
       {
         type: "Booking Website",
         schema: ["reservation", "lodgingbusiness", "hotel", "traveleagency"],
@@ -364,8 +332,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "trip", "vacation", "destination", "accommodation", "rental"
         ]
       },
-
-      // ========== STREAMING ==========
       {
         type: "Streaming Website",
         keywords: [
@@ -374,8 +340,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "stream", "watch", "vod", "live tv", "entertainment"
         ]
       },
-
-      // ========== ENTERTAINMENT ==========
       {
         type: "Entertainment Website",
         keywords: [
@@ -384,8 +348,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "film", "actor", "album", "concert", "event"
         ]
       },
-
-      // ========== MEDIA SHARING ==========
       {
         type: "Media Sharing Website",
         keywords: [
@@ -393,10 +355,7 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "gallery", "user uploads", "multimedia", "content sharing",
           "image", "video", "file", "storage", "hosting"
         ]
-      },
-
-      // ========== SOCIAL MEDIA ==========
-      {
+      },{
         type: "Social Media Website",
         schema: ["socialmediaposting"],
         keywords: [
@@ -406,8 +365,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "instagram", "facebook", "twitter", "linkedin", "tiktok"
         ]
       },
-
-      // ========== FORUM/COMMUNITY ==========
       {
         type: "Forum/Community Website",
         schema: ["discussionforumposting"],
@@ -417,8 +374,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "community forum", "discuss", "question", "answer"
         ]
       },
-
-      // ========== WIKI ==========
       {
         type: "Wiki Website",
         keywords: [
@@ -427,8 +382,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "wikipedia", "information", "reference", "article"
         ]
       },
-
-      // ========== SEARCH ENGINE ==========
       {
         type: "Search Engine",
         schema: ["searchaction"],
@@ -438,8 +391,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "search bar", "advanced search", "filter"
         ]
       },
-
-      // ========== DOCUMENTATION ==========
       {
         type: "Documentation Website",
         keywords: [
@@ -448,8 +399,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "reference", "manual", "faq", "examples", "code"
         ]
       },
-
-      // ========== KNOWLEDGE BASE ==========
       {
         type: "Knowledge Base",
         keywords: [
@@ -457,10 +406,7 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "faq", "troubleshooting", "how do i", "support center",
           "knowledge", "solutions", "guides", "articles"
         ]
-      },
-
-      // ========== MEMBERSHIP ==========
-      {
+      },{
         type: "Membership Website",
         keywords: [
           "membership", "members only", "premium content",
@@ -468,8 +414,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "member", "join", "community", "access", "benefits"
         ]
       },
-
-      // ========== DIRECTORY ==========
       {
         type: "Directory Website",
         keywords: [
@@ -479,7 +423,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
         ]
       },
 
-      // ========== PORTFOLIO ==========
       {
         type: "Portfolio Website",
         keywords: [
@@ -487,9 +430,7 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "showcase", "selected works", "hire me",
           "design", "creative", "work", "client", "project"
         ]
-      },
-
-      // ========== PERSONAL ==========
+      },   
       {
         type: "Personal Website",
         keywords: [
@@ -498,8 +439,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "me", "myself", "introduction", "bio", "profile"
         ]
       },
-
-      // ========== LANDING PAGE ==========
       {
         type: "Landing Page",
         keywords: [
@@ -508,8 +447,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "waitlist", "subscribe", "download", "access now"
         ]
       },
-
-      // ========== WEB APPLICATION ==========
       {
         type: "Web Application",
         schema: ["webapplication"],
@@ -519,8 +456,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
           "application", "tool", "productivity", "automation"
         ]
       },
-
-      // ========== BUSINESS/CORPORATE (Last - Fallback) ==========
       {
         type: "Business/Corporate Website",
         keywords: [
