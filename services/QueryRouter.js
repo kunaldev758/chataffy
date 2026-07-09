@@ -106,11 +106,14 @@ const LIVE_AGENT_PHRASES = [
 const FOLLOW_UP_ACCEPTANCE =
   /^(okay\s+)?(tell\s+me|yes|yeah|yep|sure|go\s+ahead|please\s+do|do\s+it|ok|okay|continue|proceed)[\s!.?]*$/i;
 
+// Only these three sources are language-agnostic and unambiguous enough to
+// skip the LLM classifier entirely. Structural sub-intent (pricing, links,
+// contact) and follow-up detection are removed from trusted sources so they
+// always fall through to the LLM for multilingual accuracy.
 const TRUSTED_RULE_SOURCES = new Set([
   "rules_greeting",
   "rules_live_agent",
   "rules_accidental",
-  "rules_follow_up",
 ]);
 
 /**
@@ -382,28 +385,18 @@ function applyRuleEngine(question, { chatMessages } = {}) {
   return { confident: false };
 }
 
+// Always defer to the LLM unless the rule source is one of the three
+// unambiguous cases (greeting / live-agent / gibberish).  Structural
+// sub-intent (IN_PAGE_LIST, PAGE_LINKS, CONTACT_INFO) and follow-up
+// detection must always be confirmed by the LLM because:
+//   1. Regex is English-only; non-English queries need LLM translation.
+//   2. Product-name queries ("Premium Drone Kit pricing") won't match
+//      patterns that require the word "product" or "item".
+//   3. The LLM provides rewrittenQuery so Qdrant keyword search works
+//      across all languages.
 function shouldDeferToLlmRouter(question, ruleOutcome) {
   if (!ruleOutcome.confident) return true;
-
-  const { result } = ruleOutcome;
-  if (TRUSTED_RULE_SOURCES.has(result.source)) return false;
-
-  if (result.source === "rules_catalog_follow_up") {
-    if (result.userLanguage !== "en") return true;
-    if (isContactIntentQuestion(question)) return true;
-    return false;
-  }
-
-  if (
-    result.source === "rules_structural" &&
-    result.route === ROUTES.HYBRID &&
-    result.userLanguage !== "en"
-  ) {
-    const subOnQuestion = classifyStructuralSubIntent(question);
-    if (!subOnQuestion || subOnQuestion !== result.subIntent) return true;
-  }
-
-  return false;
+  return !TRUSTED_RULE_SOURCES.has(ruleOutcome.result.source);
 }
 
 function parseRouterJson(content, question = "") {
@@ -497,21 +490,38 @@ Classify the visitor message into exactly one route:
 - GREETING: simple hello/hi with no real question
 - LIVE_AGENT: wants a human agent, representative, or live support
 - ACCIDENTAL: random characters, keyboard mash, or test input with no real meaning
-- HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), homepage product catalog with prices, or contact/social profiles
+- HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), a product catalog with prices, or contact/social profiles
 - SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
 
-IMPORTANT: Prefer SEMANTIC_RAG for pricing, features, policies, how-to, and general questions even if they contain words like "show" or "list". Only use HYBRID for explicit listing/navigation/contact requests. Real questions in any language (Japanese, Russian, Spanish, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
+IMPORTANT RULES:
+1. Prefer SEMANTIC_RAG for pricing questions about a SPECIFIC named product (e.g. "Premium Drone Kit pricing", "what does the Pro Plan cost?"). Use HYBRID/IN_PAGE_LIST only when the user wants a general product/price LIST.
+2. Real questions in any language (Japanese, Russian, Spanish, Hindi, Arabic, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
+3. Short follow-ups ("yes", "tell me more", "what about pricing?") should use chat history to infer intent — most resolve to SEMANTIC_RAG.
+4. Only use HYBRID for explicit listing/navigation/contact requests.
 
 For HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
-- CONTACT_INFO: phone, email, address, hours, social media profiles — in ANY language (e.g. Japanese 連絡先, お問い合わせ, 電話番号)
-- IN_PAGE_LIST: product catalog with prices/sizes
-- PAGE_LINKS: list of site pages or collection URLs
 
-Detect userLanguage: ISO 639-1 code for the language the visitor wrote in (e.g. en, de, hi, ja).
+- CONTACT_INFO: phone, email, address, hours, social media — ANY language:
+    EN "what's your phone number", ES "¿cuál es su teléfono?",
+    FR "quel est votre numéro?", DE "Telefonnummer bitte",
+    JA "電話番号は？/ 連絡先を教えてください", RU "как с вами связаться?",
+    HI "आपका फ़ोन नंबर क्या है?"
 
-If route is HYBRID and userLanguage differs from website language, provide rewrittenQuery: search keywords/phrases in the website language (${websiteLanguage}) for keyword matching. Otherwise rewrittenQuery can be null.
+- IN_PAGE_LIST: user wants a LIST of products/items WITH prices — ANY language:
+    EN "show me all products with prices", ES "muéstrame los productos con precios",
+    FR "montrez-moi la liste des prix", DE "Preisliste anzeigen",
+    JA "価格一覧を見せてください", RU "покажи все товары с ценами",
+    HI "सभी उत्पादों की कीमतें दिखाओ"
+    NOTE: "Premium Drone Kit pricing" = SEMANTIC_RAG (specific product, not a list)
 
-Use conversation history for short follow-ups like "yes", "tell me", "what about pricing?".
+- PAGE_LINKS: user wants URLs/links to site pages — ANY language:
+    EN "show me all pages / list your collections",
+    DE "alle Seiten zeigen", FR "montrez-moi les pages",
+    JA "全ページのリンクを教えて", ES "muéstrame todos los enlaces"
+
+Detect userLanguage: ISO 639-1 code for the language the visitor wrote in (e.g. en, de, hi, ja, ar, zh).
+
+If route is HYBRID and userLanguage differs from website language (${websiteLanguage}), provide rewrittenQuery: translate the core search keywords into the website language for keyword matching. Otherwise rewrittenQuery can be null.
 
 Respond with JSON only:
 {

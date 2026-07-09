@@ -75,7 +75,7 @@ const CHAT_HISTORY_LIMIT_BRIEF =
   Number(process.env.CHAT_HISTORY_LIMIT_BRIEF) || 5;
 const RAG_MAX_CHUNK_CHARS = Number(process.env.RAG_MAX_CHUNK_CHARS) || 1200;
 const RAG_MAX_CHUNK_CHARS_BRIEF =
-  Number(process.env.RAG_MAX_CHUNK_CHARS_BRIEF) || 1000;
+  Number(process.env.RAG_MAX_CHUNK_CHARS_BRIEF) || 3000;
 const RAG_MAX_CONTEXT_CHARS = Number(process.env.RAG_MAX_CONTEXT_CHARS) || 6000;
 const RAG_MAX_CONTEXT_CHARS_BRIEF =
   Number(process.env.RAG_MAX_CONTEXT_CHARS_BRIEF) || 4000;
@@ -119,10 +119,18 @@ function isBoilerplateChunk(text) {
   // Cookie / newsletter banners
   if (t.includes("we use cookies") || t.includes("subscribe to our newsletter")) return true;
 
-  // Link-heavy chunks (≥4 URLs, few real words)
+  // Link-heavy chunks (≥4 URLs, few real words) — but never discard a chunk
+  // that contains actual product/pricing data.  Product cards on e-commerce
+  // pages frequently have 4+ URLs (image CDN, product page, cart button,
+  // heading link) alongside a real price like "Now: $3,195.00".  Throwing
+  // those away means the AI never sees the price even though it is in Qdrant.
   const linkCount = (text.match(/https?:\/\//g) || []).length;
   const wordCount = text.trim().split(/\s+/).length;
-  if (linkCount >= 4 && wordCount < 25) return true;
+  if (linkCount >= 4 && wordCount < 25) {
+    // Keep the chunk if it carries any product/price signal
+    const hasPriceSignal = /\$[\d,]+|\b(msrp|price|now|was|sale|cost|discount|off)\b/i.test(text);
+    if (!hasPriceSignal) return true;
+  }
 
   // Heading-only chunks — single # line, no body text
   const trimmed = text.trim();
@@ -743,111 +751,64 @@ class QuestionAnsweringSystem {
   }
 
   // Determine appropriate max_tokens based on query type
-  determineMaxTokens(question, responseMode = "brief") {
-    if (responseMode === "list") {
+  // Token budget is driven first by the router's subIntent (already resolved
+  // by the LLM), then by a small set of language-agnostic signals.
+  // This avoids the English-only keyword list that mis-bucketed specific pricing
+  // queries ("give me its pricing" → 400) and gave non-English queries the
+  // bare 300-token default.
+  determineMaxTokens(question, responseMode = "brief", subIntent = null) {
+    // ── Tier 1: structural modes resolved by LLM router ───────────────────
+    if (responseMode === "list" || subIntent === "IN_PAGE_LIST") {
       const count = this.extractRequestedCount(question, 5);
-      return Math.min(2000, 300 + count * 120);
+      return Math.min(2000, 400 + count * 120);
     }
-    if (responseMode === "contact") {
+    if (responseMode === "contact" || subIntent === "CONTACT_INFO") {
       return 800;
     }
-    if (responseMode === "page_links") {
+    if (responseMode === "page_links" || subIntent === "PAGE_LINKS") {
       const count = this.extractRequestedCount(question, 5);
-      return Math.min(1200, 200 + count * 100);
+      return Math.min(1200, 300 + count * 100);
     }
 
-    const normalizedQuestion = question.toLowerCase().trim();
+    // ── Tier 2: SEMANTIC_RAG — language-agnostic secondary signals ─────────
 
-    // Keywords that indicate queries requiring longer responses
-    const longResponseKeywords = [
-      "list",
-      "top",
-      "best",
-      "all",
-      "multiple",
-      "several",
-      "many",
-      "links",
-      "link",
-      "url",
-      "urls",
-      "products",
-      "items",
-      "options",
-      "ways",
-      "steps",
-      "examples",
-      "recommendations",
-      "suggestions",
-      "compare",
-      "difference",
-      "differences",
-      "explain",
-      "detailed",
-      "comprehensive",
-      "complete",
-      "full",
-      "everything",
-      "show me",
-      "give me",
-      "provide me",
-      "send me",
-    ];
+    // Pricing intent: currency symbols + multilingual price words
+    // EN/ES/FR/DE/JA/RU/HI covered so non-English pricing queries get 600 too
+    const hasPricingIntent =
+      /\$|€|£|¥|₹/.test(question) ||
+      /\b(price|pricing|cost|msrp|how\s+much|rate|rates|fee|fees|tariff)\b/i.test(question) ||
+      /\b(precio|precios|coste|costos?|cuánto|tarifa)\b/i.test(question) ||
+      /\b(prix|tarif|coût|combien)\b/i.test(question) ||
+      /\b(preis|preise|kosten|was\s+kostet)\b/i.test(question) ||
+      /価格|値段|料金|いくら/.test(question) ||
+      /цена|стоимость|сколько\s+стоит/.test(question) ||
+      /कीमत|मूल्य|दाम|कितना/.test(question);
 
-    // Check for numeric patterns indicating quantity (e.g., "10 best", "5 ways")
-    const numericPattern =
-      /\b(\d+)\s+(best|top|ways|steps|items|products|links|options|recommendations|suggestions|examples)\b/i;
-    const hasNumericQuantity = numericPattern.test(question);
+    if (hasPricingIntent) return 600;
 
-    // Check if question contains long response keywords
-    const hasLongResponseKeyword = longResponseKeywords.some((keyword) =>
-      normalizedQuestion.includes(keyword),
-    );
-
-    // Check for questions asking for lists or multiple items
-    const isListRequest =
-      /\b(list|lists|listing)\b/i.test(question) ||
-      /\b(all|every|each)\b/i.test(question);
-
-    // Check for questions asking for links/URLs
-    const isLinkRequest =
-      /\b(link|links|url|urls|website|websites|page|pages)\b/i.test(question);
-
-    // Check for questions asking for detailed explanations
+    // Detailed explanation
     const isDetailedRequest =
-      /\b(explain|describe|detail|detailed|comprehensive|complete|full|everything|how\s+does|how\s+do|what\s+are|what\s+is)\b/i.test(
-        question,
-      );
+      /\b(explain|describe|detail|detailed|comprehensive|complete|full|everything|how\s+does|how\s+do|what\s+are|what\s+is)\b/i.test(question);
 
-    // Determine max_tokens based on query characteristics
-    if (
-      hasNumericQuantity ||
-      (hasLongResponseKeyword && (isListRequest || isLinkRequest))
-    ) {
-      // For queries asking for specific quantities (e.g., "10 best t-shirts") or lists with links
-      // Extract the number if present
+    if (isDetailedRequest) return 600;
+
+    // Numbered quantity request  e.g. "give me 10 options"
+    const numericPattern =
+      /\b(\d+)\s+(best|top|ways|steps|items?|products?|options?|examples?|links?|recommendations?)\b/i;
+    if (numericPattern.test(question)) {
       const numberMatch = question.match(/\b(\d+)\b/);
-      const requestedQuantity = numberMatch ? parseInt(numberMatch[1], 10) : 5;
-
-      // Calculate tokens: base 200 + (quantity * 50) + extra for links (100 per link)
-      // For example: "10 best t-shirts links" = 200 + (10 * 50) + (10 * 100) = 1700 tokens
-      if (isLinkRequest) {
-        return Math.min(2000, 200 + requestedQuantity * 150); // 150 tokens per link item
-      }
-      return Math.min(1000, 200 + requestedQuantity * 80); // 80 tokens per list item
-    } else if (isLinkRequest && hasLongResponseKeyword) {
-      // Multiple links requested without specific number
-      return 800;
-    } else if (isListRequest || (hasLongResponseKeyword && isDetailedRequest)) {
-      // List or detailed explanation requested
-      return 600;
-    } else if (hasLongResponseKeyword) {
-      // Has keywords suggesting longer response but not extreme
-      return 400;
+      const qty = numberMatch ? parseInt(numberMatch[1], 10) : 5;
+      const isLinkRequest = /\b(link|links|url|urls|page|pages)\b/i.test(question);
+      if (isLinkRequest) return Math.min(2000, 300 + qty * 150);
+      return Math.min(1200, 300 + qty * 80);
     }
 
-    // Default for simple queries
-    return 200;
+    // General list request
+    const isListRequest = /\b(list|all|every|each)\b/i.test(question);
+    if (isListRequest) return 500;
+
+    // Default for focused single-fact queries
+    return 300;
   }
 
   /**
@@ -1820,6 +1781,7 @@ class QuestionAnsweringSystem {
       retrievalMaxScore,
       wasExpanded = false,
       forcePremium = false,
+      subIntent = null,
     } = answerOptions;
 
     const effectiveMode =
@@ -1878,7 +1840,7 @@ ${answerInstructions}`;
 
     try {
       // Determine dynamic max_tokens based on query type
-      const dynamicMaxTokens = this.determineMaxTokens(question, effectiveMode);
+      const dynamicMaxTokens = this.determineMaxTokens(question, effectiveMode, subIntent);
 
       // Log when dynamic token limit is applied (only if different from default)
       if (dynamicMaxTokens > 200) {
@@ -2483,7 +2445,7 @@ ${answerInstructions}`;
     // Default threshold: 0.4 is reasonable for cosine similarity
     // Lower thresholds (0.2-0.3) may include irrelevant results
     // Higher thresholds (0.5-0.7) may be too strict and miss relevant results
-    const { topK = 5, scoreThreshold = 0.4 } = options;
+    const { topK = 10, scoreThreshold = 0.4 } = options;
     // Coerce to a safe numeric value so downstream logic is consistent
     const requestedTopK = Math.max(1, Number(topK) || 5);
 
@@ -2532,6 +2494,8 @@ ${answerInstructions}`;
         question,
         userIdString,
       );
+
+      console.log("revised from kb response : ",revisedFromKb);
       if (revisedFromKb) {
         return {
           success: true,
@@ -2662,6 +2626,8 @@ ${answerInstructions}`;
         (queryNorm.sizes?.length > 0 || currentSizes?.length > 0) &&
         /\b(lash|lashes|product|style|collection)\b/i.test(normalizedQuestion);
 
+        console.log("effective sub intent check : ",effectiveSubIntent);
+
       if (wantsProductLinks && !effectiveSubIntent) {
         effectiveSubIntent = /\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(retrievalQuery)
           ? "IN_PAGE_LIST"
@@ -2675,6 +2641,8 @@ ${answerInstructions}`;
       } else if (hasSizeFilter && !effectiveSubIntent) {
         effectiveSubIntent = "IN_PAGE_LIST";
       }
+
+      console.log("Effective sub intent check 1  : ",effectiveSubIntent);
 
       const queryAttributes = extractQueryAttributes({
         normalizedQuestion,
@@ -2748,6 +2716,10 @@ ${answerInstructions}`;
         queryAttributes,
       });
 
+      console.log("queryResponse data is : ",queryResponse);
+      
+      console.log("Effective : ",effectiveSubIntent);
+
       if (effectiveSubIntent) {
         const specialized = await this.trySpecializedRetrieval({
           subIntent: effectiveSubIntent,
@@ -2764,6 +2736,7 @@ ${answerInstructions}`;
           queryAttributes,
         });
 
+        console.log("Specialized retrieval result: ", specialized);
         if (specialized) {
           const specializedResult = await this.generateAnswerFromMatches({
             question,
@@ -2801,6 +2774,9 @@ ${answerInstructions}`;
         companyName,
         requestedTopK,
       });
+
+
+      console.log("Forced catalog check: ", forcedCatalog);
 
       if (forcedCatalog) {
         const forcedResult = await this.generateAnswerFromMatches({
@@ -3151,6 +3127,9 @@ ${answerInstructions}`;
             wantsProductUrls: wantsUrls,
             wasExpanded,
             retrievalMaxScore: maxScore,
+            // Pass the LLM router's subIntent so determineMaxTokens uses it
+            // instead of re-running English-only keyword classification.
+            subIntent: effectiveSubIntent || null,
             // Pass Qdrant access params so buildPageMergeContext can expand pages
             collectionName,
             userId: userIdString,

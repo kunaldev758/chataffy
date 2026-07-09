@@ -36,13 +36,44 @@ function extractCollectionHints(text) {
   return Array.from(hints);
 }
 
+// Multilingual signals that a user wants a product/page link rather than
+// a text answer.  Each language block covers "share/send/give/show + link/url".
+// NOTE: This function is intentionally kept narrow — broad product-intent
+// detection now falls through to the LLM router for multilingual accuracy.
+const PRODUCT_LINK_EN_RE =
+  /\b(urls?|links?|link\s+to)\b/i;
+
+const PRODUCT_LINK_EN_VERB_RE =
+  /\b(share|send|give|show)\b[\s\S]{0,40}\b(url|link|options?|styles?|products?|lashes?|collection)\b/i;
+
+// ES: comparte el enlace, dame el link
+const PRODUCT_LINK_ES_RE =
+  /\b(enlace|link|url|comparte|envía|dame\s+el\s+link)\b/i;
+
+// FR: partage le lien, donne-moi le lien
+const PRODUCT_LINK_FR_RE =
+  /\b(lien|url|partage|envoie|donne-moi\s+le\s+lien)\b/i;
+
+// DE: schick mir den Link, teile den Link
+const PRODUCT_LINK_DE_RE =
+  /\b(link|url|schick|sende|teile)\b[\s\S]{0,30}\b(link|url|produkt)\b/i;
+
+// JA: リンクを教えて, URLを送って
+const PRODUCT_LINK_JA_RE = /リンク|ＵＲＬ|url|urlを/i;
+
+// RU: пришли ссылку, дай ссылку
+const PRODUCT_LINK_RU_RE = /ссылку|ссылка|url/i;
+
 function isProductLinkRequest(question) {
-  const q = (question || "").toLowerCase();
+  const q = String(question || "");
   return (
-    /\b(urls?|links?)\b/.test(q) ||
-    /\b(link\s+to)\b/.test(q) ||
-    (/\b(share|send|give|show)\b/.test(q) &&
-      /\b(url|link|options?|styles?|products?|lashes?|collection)\b/.test(q))
+    PRODUCT_LINK_EN_RE.test(q) ||
+    PRODUCT_LINK_EN_VERB_RE.test(q) ||
+    PRODUCT_LINK_ES_RE.test(q) ||
+    PRODUCT_LINK_FR_RE.test(q) ||
+    PRODUCT_LINK_DE_RE.test(q) ||
+    PRODUCT_LINK_JA_RE.test(q) ||
+    PRODUCT_LINK_RU_RE.test(q)
   );
 }
 

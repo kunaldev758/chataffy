@@ -105,42 +105,61 @@ function detectMorphologyHints(text) {
   return Array.from(hints);
 }
 
+// English function words
+const EN_STOP_WORDS = [
+  "the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "with",
+  "all", "show", "list", "give", "me", "how", "your", "our", "my", "what",
+  "when", "where", "have", "get", "can", "could", "would", "will", "that",
+  "this", "from", "about", "only", "just", "its", "is", "are", "was", "be",
+  "do", "does", "did",
+];
+
+// Spanish function words
+const ES_STOP_WORDS = [
+  "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del",
+  "en", "con", "por", "para", "que", "qué", "es", "son", "está", "están",
+  "yo", "me", "mi", "tu", "su", "se", "le", "lo", "quiero", "dame",
+  "muéstrame", "dime",
+];
+
+// French function words
+const FR_STOP_WORDS = [
+  "le", "la", "les", "un", "une", "des", "du", "de", "en", "au", "aux",
+  "et", "ou", "que", "qui", "je", "tu", "il", "elle", "nous", "vous",
+  "me", "mon", "ma", "mes", "son", "sa", "ses", "est", "sont", "avec",
+  "pour", "sur", "dans", "montrez", "dites", "donnez",
+];
+
+// German function words
+const DE_STOP_WORDS = [
+  "der", "die", "das", "ein", "eine", "einen", "dem", "den", "des",
+  "und", "oder", "ist", "sind", "ich", "du", "er", "sie", "wir", "ihr",
+  "mit", "von", "für", "auf", "in", "bei", "nach", "zeige", "zeigen",
+  "gib", "mir", "mein", "meine",
+];
+
+// Portuguese function words
+const PT_STOP_WORDS = [
+  "o", "a", "os", "as", "um", "uma", "de", "do", "da", "dos", "das",
+  "em", "no", "na", "e", "ou", "que", "eu", "me", "meu", "minha",
+  "você", "seu", "sua", "com", "para", "por", "mostre", "me", "diga",
+];
+
+// Italian function words
+const IT_STOP_WORDS = [
+  "il", "lo", "la", "i", "gli", "le", "un", "una", "di", "del", "della",
+  "dei", "degli", "delle", "e", "o", "che", "io", "mi", "mio", "mia",
+  "tu", "lui", "lei", "noi", "voi", "con", "per", "su", "mostra",
+  "dimmi", "dammi",
+];
+
 const RETRIEVAL_STOP_WORDS = new Set([
-  "the",
-  "a",
-  "an",
-  "and",
-  "or",
-  "of",
-  "for",
-  "to",
-  "in",
-  "on",
-  "with",
-  "all",
-  "show",
-  "list",
-  "give",
-  "me",
-  "how",
-  "your",
-  "our",
-  "my",
-  "what",
-  "when",
-  "where",
-  "have",
-  "get",
-  "can",
-  "could",
-  "would",
-  "will",
-  "that",
-  "this",
-  "from",
-  "about",
-  "only",
-  "just",
+  ...EN_STOP_WORDS,
+  ...ES_STOP_WORDS,
+  ...FR_STOP_WORDS,
+  ...DE_STOP_WORDS,
+  ...PT_STOP_WORDS,
+  ...IT_STOP_WORDS,
 ]);
 
 function tokenizeForKeywords(text) {
