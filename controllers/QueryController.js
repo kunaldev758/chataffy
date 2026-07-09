@@ -257,7 +257,7 @@ class QuestionAnsweringSystem {
       const messages = await ChatMessage.find({
         conversation_id: conversationId,
       })
-        .sort({ createdAt: 1 }) // Oldest first to maintain conversation flow
+        .sort({ createdAt: -1 }) // Newest first to maintain conversation flow
         .limit(CHAT_HISTORY_LIMIT)
         .lean();
 
