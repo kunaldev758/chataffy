@@ -100,6 +100,37 @@ function stripHtmlForContext(text) {
     .trim();
 }
 
+/**
+ * Returns true when a chunk is low-value boilerplate that should be excluded
+ * from page-merge context (footers, nav, cookie banners, etc.).
+ */
+function isBoilerplateChunk(text) {
+  if (!text || text.length < 30) return true;
+  const t = text.toLowerCase();
+
+  // Footer label injected at training time by jobService
+  if (t.includes("footer links (from")) return true;
+
+  // Common footer/nav boilerplate phrases
+  if (t.includes("got some questions?") && t.includes("here for you")) return true;
+  if (t.includes("privacy policy") && t.includes("terms and conditions") && text.length < 400) return true;
+  if (t.includes("best price guaranteed") && t.includes("our website")) return true;
+
+  // Cookie / newsletter banners
+  if (t.includes("we use cookies") || t.includes("subscribe to our newsletter")) return true;
+
+  // Link-heavy chunks (≥4 URLs, few real words)
+  const linkCount = (text.match(/https?:\/\//g) || []).length;
+  const wordCount = text.trim().split(/\s+/).length;
+  if (linkCount >= 4 && wordCount < 25) return true;
+
+  // Heading-only chunks — single # line, no body text
+  const trimmed = text.trim();
+  if (/^#{1,4}\s+\S/.test(trimmed) && trimmed.split("\n").length <= 2 && trimmed.length < 100) return true;
+
+  return false;
+}
+
 function keywordFetchLimit(requestedCount, perItemMultiplier, floor) {
   const raw = Math.max(floor, (Number(requestedCount) || 5) * perItemMultiplier);
   return Math.min(raw, RAG_KEYWORD_FETCH_MAX);
@@ -230,7 +261,7 @@ class QuestionAnsweringSystem {
         .limit(CHAT_HISTORY_LIMIT)
         .lean();
 
-      return messages || [];
+      return messages.reverse() || [];
     } catch (error) {
       console.error("Error getting chat history:", error);
       // Return empty array on error to allow processing to continue if possible
@@ -626,7 +657,14 @@ class QuestionAnsweringSystem {
         requestedCount,
       });
     } else {
-      context = this.getRelevantContext(matches, contextLimits);
+      // "brief" and "contact" modes: use page-merge context builder.
+      // Falls back to getRelevantContext automatically when collectionName/userId are absent.
+      context = await this.buildPageMergeContext(matches, {
+        ...contextLimits,
+        collectionName: answerOptions.collectionName,
+        userId:         answerOptions.userId,
+        agentId:        answerOptions.agentId,
+      });
     }
 
     console.log(
@@ -1918,6 +1956,215 @@ ${answerInstructions}`;
     return blocks.join("\n\n");
   }
 
+  /**
+   * Scroll Qdrant for ALL stored chunks belonging to a specific URL.
+   * Filters by user_id + agent_id + url for an exact page fetch.
+   */
+  async fetchAllChunksForUrl(collectionName, url, userId, agentId) {
+    const must = [
+      { key: "url",     match: { value: url } },
+      { key: "user_id", match: { value: userId.toString() } },
+    ];
+    if (agentId) {
+      must.push({ key: "agent_id", match: { value: agentId.toString() } });
+    }
+
+    const points = [];
+    let nextPage = null;
+
+    while (true) {
+      const params = {
+        limit: 256,
+        with_payload: true,
+        filter: { must },
+        ...(nextPage ? { offset: nextPage } : {}),
+      };
+      const res = await this.qdrantClient.scroll(collectionName, params);
+      points.push(...(res.points || []));
+      if (!res.next_page_offset) break;
+      nextPage = res.next_page_offset;
+    }
+
+    return points;
+  }
+
+  /**
+   * Deduplicate chunks from multiple training runs and sort by chunk_index.
+   * When the same URL was trained multiple times, keeps only the latest run
+   * (identified by the group with the most-recent max created_at).
+   */
+  deduplicateAndSortChunks(points) {
+    if (!points || points.length === 0) return [];
+
+    // Group by total_chunks — each unique value likely represents a different training run
+    const byTotalChunks = new Map();
+    for (const p of points) {
+      const tc = p.payload?.total_chunks ?? -1;
+      if (!byTotalChunks.has(tc)) byTotalChunks.set(tc, []);
+      byTotalChunks.get(tc).push(p);
+    }
+
+    // Pick the group whose latest chunk has the most recent created_at
+    let bestGroup = points;
+    let bestTs = "";
+    for (const [, group] of byTotalChunks) {
+      const maxTs = group.reduce(
+        (best, p) => ((p.payload?.created_at || "") > best ? p.payload.created_at : best),
+        "",
+      );
+      if (maxTs > bestTs) {
+        bestTs = maxTs;
+        bestGroup = group;
+      }
+    }
+
+    return bestGroup.sort(
+      (a, b) => (a.payload?.chunk_index ?? 0) - (b.payload?.chunk_index ?? 0),
+    );
+  }
+
+  /**
+   * Page-merge context builder (replaces getRelevantContext for "brief" mode).
+   *
+   * Flow:
+   *  1. Group top-N retrieval matches by URL.
+   *  2. Rank URLs by best-chunk score (+ small hit-count bonus).
+   *  3. For each ranked URL, scroll Qdrant for ALL its chunks.
+   *  4. Deduplicate (latest training run), sort by chunk_index.
+   *  5. Drop boilerplate chunks (footer, nav, cookie, link-only).
+   *  6. Merge remaining chunks into a single page block.
+   *  7. Repeat for next URL until context budget is exhausted.
+   */
+  async buildPageMergeContext(matches, options = {}) {
+    const {
+      collectionName,
+      userId,
+      agentId,
+      maxTotalChars  = RAG_MAX_CONTEXT_CHARS,
+      maxChunkChars  = RAG_MAX_CHUNK_CHARS,
+      maxUrlsToExpand = 3,
+      maxChunksPerUrl = 25,
+    } = options;
+
+    // Require Qdrant access params; fall back gracefully
+    if (!collectionName || !userId) {
+      console.warn("[QueryController] buildPageMergeContext: missing collectionName or userId, falling back to getRelevantContext");
+      return this.getRelevantContext(matches, options);
+    }
+
+    // --- Step 1 & 2: group by URL and rank ---
+    const urlMap = new Map(); // groupKey -> { url, title, maxScore, hitCount }
+
+    for (const match of matches || []) {
+      const payload  = match.payload || {};
+      const url      = payload.url   || "";
+      const title    = payload.title || url || "";
+      const text     = stripHtmlForContext(payload.text || payload.pageContent || "");
+      const groupKey = url || title;
+      if (!groupKey) continue;
+
+      // Exclude boilerplate chunks from URL ranking so footer chunks don't
+      // hijack the best-URL selection
+      if (isBoilerplateChunk(text)) continue;
+
+      const score = match.score ?? 0;
+      if (!urlMap.has(groupKey)) {
+        urlMap.set(groupKey, { url, title, maxScore: score, hitCount: 1 });
+      } else {
+        const entry = urlMap.get(groupKey);
+        if (score > entry.maxScore) entry.maxScore = score;
+        entry.hitCount += 1;
+      }
+    }
+
+    // Rank: weighted score + small hit-count bonus (capped)
+    const rankedUrls = Array.from(urlMap.values())
+      .map((entry) => ({
+        ...entry,
+        rankScore: entry.maxScore * 0.7 + Math.min(entry.hitCount * 0.05, 0.15),
+      }))
+      .sort((a, b) => b.rankScore - a.rankScore)
+      .slice(0, maxUrlsToExpand);
+
+    if (rankedUrls.length === 0) {
+      console.log("[QueryController] buildPageMergeContext: no non-boilerplate URLs found, falling back to getRelevantContext");
+      return this.getRelevantContext(matches, options);
+    }
+
+    console.log(
+      `[QueryController] buildPageMergeContext: expanding ${rankedUrls.length} URL(s) — ` +
+      rankedUrls.map((u) => `${u.url || u.title} (score=${u.rankScore.toFixed(3)})`).join(", "),
+    );
+
+    // --- Steps 3–7: fetch, dedup, filter, merge per URL ---
+    const blocks = [];
+    let totalChars = 0;
+
+    for (const { url, title } of rankedUrls) {
+      if (!url || totalChars >= maxTotalChars) break;
+
+      try {
+        const allPoints = await this.fetchAllChunksForUrl(
+          collectionName, url, userId, agentId,
+        );
+
+        if (allPoints.length === 0) {
+          console.log(`[QueryController] buildPageMergeContext: no Qdrant points found for ${url}`);
+          continue;
+        }
+
+        const sorted = this.deduplicateAndSortChunks(allPoints);
+
+        // Filter boilerplate and cap chunk count
+        const validChunks = sorted
+          .filter((p) => !isBoilerplateChunk(stripHtmlForContext(p.payload?.text || "")))
+          .slice(0, maxChunksPerUrl);
+
+        if (validChunks.length === 0) {
+          console.log(`[QueryController] buildPageMergeContext: all chunks were boilerplate for ${url}`);
+          continue;
+        }
+
+        const pageText = validChunks
+          .map((p) => {
+            let t = stripHtmlForContext(p.payload?.text || "");
+            if (t.length > maxChunkChars) t = `${t.slice(0, maxChunkChars)}…`;
+            return t;
+          })
+          .join("\n\n");
+
+        const block = `Source: ${title} (${url})\n---\n${pageText}\n---`;
+
+        if (totalChars + block.length > maxTotalChars) {
+          const remaining = maxTotalChars - totalChars;
+          if (remaining > 300) {
+            const overhead = `Source: ${title} (${url})\n---\n\n---`.length;
+            const trimmedText = pageText.slice(0, remaining - overhead);
+            const trimmedBlock = `Source: ${title} (${url})\n---\n${trimmedText}…\n---`;
+            blocks.push(trimmedBlock);
+            totalChars += trimmedBlock.length;
+          }
+          break;
+        }
+
+        blocks.push(block);
+        totalChars += block.length;
+        console.log(
+          `[QueryController] buildPageMergeContext: ${url} → ${validChunks.length} chunks merged (${pageText.length} chars)`,
+        );
+      } catch (err) {
+        console.warn(`[QueryController] buildPageMergeContext: fetch failed for ${url}: ${err.message}`);
+      }
+    }
+
+    if (blocks.length === 0) {
+      console.log("[QueryController] buildPageMergeContext: expansion yielded no content, falling back to getRelevantContext");
+      return this.getRelevantContext(matches, options);
+    }
+
+    return blocks.join("\n\n");
+  }
+
   async queryQdrant(
     collectionName,
     queryEmbedding,
@@ -2904,6 +3151,10 @@ ${answerInstructions}`;
             wantsProductUrls: wantsUrls,
             wasExpanded,
             retrievalMaxScore: maxScore,
+            // Pass Qdrant access params so buildPageMergeContext can expand pages
+            collectionName,
+            userId: userIdString,
+            agentId: agentId?.toString(),
             ...langOpts,
           },
         });
