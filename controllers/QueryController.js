@@ -75,7 +75,7 @@ const CHAT_HISTORY_LIMIT_BRIEF =
   Number(process.env.CHAT_HISTORY_LIMIT_BRIEF) || 5;
 const RAG_MAX_CHUNK_CHARS = Number(process.env.RAG_MAX_CHUNK_CHARS) || 1200;
 const RAG_MAX_CHUNK_CHARS_BRIEF =
-  Number(process.env.RAG_MAX_CHUNK_CHARS_BRIEF) || 3000;
+  Number(process.env.RAG_MAX_CHUNK_CHARS_BRIEF) || 6000;
 const RAG_MAX_CONTEXT_CHARS = Number(process.env.RAG_MAX_CONTEXT_CHARS) || 6000;
 const RAG_MAX_CONTEXT_CHARS_BRIEF =
   Number(process.env.RAG_MAX_CONTEXT_CHARS_BRIEF) || 4000;
@@ -112,12 +112,20 @@ function isBoilerplateChunk(text) {
   if (t.includes("footer links (from")) return true;
 
   // Common footer/nav boilerplate phrases
-  if (t.includes("got some questions?") && t.includes("here for you")) return true;
-  if (t.includes("privacy policy") && t.includes("terms and conditions") && text.length < 400) return true;
-  if (t.includes("best price guaranteed") && t.includes("our website")) return true;
+  if (t.includes("got some questions?") && t.includes("here for you"))
+    return true;
+  if (
+    t.includes("privacy policy") &&
+    t.includes("terms and conditions") &&
+    text.length < 400
+  )
+    return true;
+  if (t.includes("best price guaranteed") && t.includes("our website"))
+    return true;
 
   // Cookie / newsletter banners
-  if (t.includes("we use cookies") || t.includes("subscribe to our newsletter")) return true;
+  if (t.includes("we use cookies") || t.includes("subscribe to our newsletter"))
+    return true;
 
   // Link-heavy chunks (≥4 URLs, few real words) — but never discard a chunk
   // that contains actual product/pricing data.  Product cards on e-commerce
@@ -128,19 +136,28 @@ function isBoilerplateChunk(text) {
   const wordCount = text.trim().split(/\s+/).length;
   if (linkCount >= 4 && wordCount < 25) {
     // Keep the chunk if it carries any product/price signal
-    const hasPriceSignal = /\$[\d,]+|\b(msrp|price|now|was|sale|cost|discount|off)\b/i.test(text);
+    const hasPriceSignal =
+      /\$[\d,]+|\b(msrp|price|now|was|sale|cost|discount|off)\b/i.test(text);
     if (!hasPriceSignal) return true;
   }
 
   // Heading-only chunks — single # line, no body text
   const trimmed = text.trim();
-  if (/^#{1,4}\s+\S/.test(trimmed) && trimmed.split("\n").length <= 2 && trimmed.length < 100) return true;
+  if (
+    /^#{1,4}\s+\S/.test(trimmed) &&
+    trimmed.split("\n").length <= 2 &&
+    trimmed.length < 100
+  )
+    return true;
 
   return false;
 }
 
 function keywordFetchLimit(requestedCount, perItemMultiplier, floor) {
-  const raw = Math.max(floor, (Number(requestedCount) || 5) * perItemMultiplier);
+  const raw = Math.max(
+    floor,
+    (Number(requestedCount) || 5) * perItemMultiplier,
+  );
   return Math.min(raw, RAG_KEYWORD_FETCH_MAX);
 }
 
@@ -159,7 +176,8 @@ function pickBestChunkForUrl(chunks) {
 
     const curProduct = hasProductSignals(cur.text) ? 1 : 0;
     const bestProduct = hasProductSignals(best.text) ? 1 : 0;
-    if (curProduct !== bestProduct) return curProduct > bestProduct ? cur : best;
+    if (curProduct !== bestProduct)
+      return curProduct > bestProduct ? cur : best;
 
     return cur.text.length > best.text.length ? cur : best;
   });
@@ -223,6 +241,11 @@ function getContextLimitsForMode(responseMode) {
       maxTotalChars: RAG_MAX_CONTEXT_CHARS,
     };
   }
+
+  console.log("no conditon match then finally return to the default context limits",{
+
+    
+  });
   return {
     maxChunkChars: RAG_MAX_CHUNK_CHARS_BRIEF,
     maxTotalChars: RAG_MAX_CONTEXT_CHARS_BRIEF,
@@ -625,8 +648,12 @@ class QuestionAnsweringSystem {
       wantsProductUrls = false,
     } = answerOptions;
 
+    console.log("generate answer from matches : ", matches);
+
     const effectiveMode =
       wantsProductUrls && responseMode === "brief" ? "list" : responseMode;
+
+    console.log("effectiveMode : ", effectiveMode);
 
     if (effectiveMode === "contact" && USE_LIGHTWEIGHT_RESPONSES) {
       const contactResult = await generateContactResponse({
@@ -650,6 +677,8 @@ class QuestionAnsweringSystem {
     }
 
     const contextLimits = getContextLimitsForMode(effectiveMode);
+
+    console.log("context limits : ",contextLimits);
     let context;
 
     if (answerOptions.prebuiltContext) {
@@ -670,8 +699,8 @@ class QuestionAnsweringSystem {
       context = await this.buildPageMergeContext(matches, {
         ...contextLimits,
         collectionName: answerOptions.collectionName,
-        userId:         answerOptions.userId,
-        agentId:        answerOptions.agentId,
+        userId: answerOptions.userId,
+        agentId: answerOptions.agentId,
       });
     }
 
@@ -776,7 +805,9 @@ class QuestionAnsweringSystem {
     // EN/ES/FR/DE/JA/RU/HI covered so non-English pricing queries get 600 too
     const hasPricingIntent =
       /\$|€|£|¥|₹/.test(question) ||
-      /\b(price|pricing|cost|msrp|how\s+much|rate|rates|fee|fees|tariff)\b/i.test(question) ||
+      /\b(price|pricing|cost|msrp|how\s+much|rate|rates|fee|fees|tariff)\b/i.test(
+        question,
+      ) ||
       /\b(precio|precios|coste|costos?|cuánto|tarifa)\b/i.test(question) ||
       /\b(prix|tarif|coût|combien)\b/i.test(question) ||
       /\b(preis|preise|kosten|was\s+kostet)\b/i.test(question) ||
@@ -788,7 +819,9 @@ class QuestionAnsweringSystem {
 
     // Detailed explanation
     const isDetailedRequest =
-      /\b(explain|describe|detail|detailed|comprehensive|complete|full|everything|how\s+does|how\s+do|what\s+are|what\s+is)\b/i.test(question);
+      /\b(explain|describe|detail|detailed|comprehensive|complete|full|everything|how\s+does|how\s+do|what\s+are|what\s+is)\b/i.test(
+        question,
+      );
 
     if (isDetailedRequest) return 600;
 
@@ -798,7 +831,9 @@ class QuestionAnsweringSystem {
     if (numericPattern.test(question)) {
       const numberMatch = question.match(/\b(\d+)\b/);
       const qty = numberMatch ? parseInt(numberMatch[1], 10) : 5;
-      const isLinkRequest = /\b(link|links|url|urls|page|pages)\b/i.test(question);
+      const isLinkRequest = /\b(link|links|url|urls|page|pages)\b/i.test(
+        question,
+      );
       if (isLinkRequest) return Math.min(2000, 300 + qty * 150);
       return Math.min(1200, 300 + qty * 80);
     }
@@ -1318,7 +1353,10 @@ class QuestionAnsweringSystem {
       if (mergedMatches.length === 0) return null;
 
       const contactLimits = getContextLimitsForMode("contact");
-      const contextBlocks = this.getRelevantContext(mergedMatches, contactLimits);
+      const contextBlocks = this.getRelevantContext(
+        mergedMatches,
+        contactLimits,
+      );
       return {
         context: `The user is asking about contact information, social media profiles, phone, email, address, or business hours for ${companyName}. Use ONLY the content below. Include every social media URL and relevant contact detail found. Do not say information is missing if it appears below.\n\n${contextBlocks}`,
         matches: mergedMatches,
@@ -1473,7 +1511,9 @@ class QuestionAnsweringSystem {
       const payload = match.payload || {};
       const url = payload.url || "unknown";
       const title = payload.title || url;
-      const text = stripHtmlForContext(payload.text || payload.pageContent || "");
+      const text = stripHtmlForContext(
+        payload.text || payload.pageContent || "",
+      );
       if (!text) continue;
 
       const score = match.score ?? 0;
@@ -1840,7 +1880,11 @@ ${answerInstructions}`;
 
     try {
       // Determine dynamic max_tokens based on query type
-      const dynamicMaxTokens = this.determineMaxTokens(question, effectiveMode, subIntent);
+      const dynamicMaxTokens = this.determineMaxTokens(
+        question,
+        effectiveMode,
+        subIntent,
+      );
 
       // Log when dynamic token limit is applied (only if different from default)
       if (dynamicMaxTokens > 200) {
@@ -1924,7 +1968,7 @@ ${answerInstructions}`;
    */
   async fetchAllChunksForUrl(collectionName, url, userId, agentId) {
     const must = [
-      { key: "url",     match: { value: url } },
+      { key: "url", match: { value: url } },
       { key: "user_id", match: { value: userId.toString() } },
     ];
     if (agentId) {
@@ -1971,7 +2015,8 @@ ${answerInstructions}`;
     let bestTs = "";
     for (const [, group] of byTotalChunks) {
       const maxTs = group.reduce(
-        (best, p) => ((p.payload?.created_at || "") > best ? p.payload.created_at : best),
+        (best, p) =>
+          (p.payload?.created_at || "") > best ? p.payload.created_at : best,
         "",
       );
       if (maxTs > bestTs) {
@@ -2002,15 +2047,17 @@ ${answerInstructions}`;
       collectionName,
       userId,
       agentId,
-      maxTotalChars  = RAG_MAX_CONTEXT_CHARS,
-      maxChunkChars  = RAG_MAX_CHUNK_CHARS,
+      maxTotalChars = RAG_MAX_CONTEXT_CHARS,
+      maxChunkChars = RAG_MAX_CHUNK_CHARS,
       maxUrlsToExpand = 3,
       maxChunksPerUrl = 25,
     } = options;
 
     // Require Qdrant access params; fall back gracefully
     if (!collectionName || !userId) {
-      console.warn("[QueryController] buildPageMergeContext: missing collectionName or userId, falling back to getRelevantContext");
+      console.warn(
+        "[QueryController] buildPageMergeContext: missing collectionName or userId, falling back to getRelevantContext",
+      );
       return this.getRelevantContext(matches, options);
     }
 
@@ -2018,10 +2065,12 @@ ${answerInstructions}`;
     const urlMap = new Map(); // groupKey -> { url, title, maxScore, hitCount }
 
     for (const match of matches || []) {
-      const payload  = match.payload || {};
-      const url      = payload.url   || "";
-      const title    = payload.title || url || "";
-      const text     = stripHtmlForContext(payload.text || payload.pageContent || "");
+      const payload = match.payload || {};
+      const url = payload.url || "";
+      const title = payload.title || url || "";
+      const text = stripHtmlForContext(
+        payload.text || payload.pageContent || "",
+      );
       const groupKey = url || title;
       if (!groupKey) continue;
 
@@ -2049,13 +2098,17 @@ ${answerInstructions}`;
       .slice(0, maxUrlsToExpand);
 
     if (rankedUrls.length === 0) {
-      console.log("[QueryController] buildPageMergeContext: no non-boilerplate URLs found, falling back to getRelevantContext");
+      console.log(
+        "[QueryController] buildPageMergeContext: no non-boilerplate URLs found, falling back to getRelevantContext",
+      );
       return this.getRelevantContext(matches, options);
     }
 
     console.log(
       `[QueryController] buildPageMergeContext: expanding ${rankedUrls.length} URL(s) — ` +
-      rankedUrls.map((u) => `${u.url || u.title} (score=${u.rankScore.toFixed(3)})`).join(", "),
+        rankedUrls
+          .map((u) => `${u.url || u.title} (score=${u.rankScore.toFixed(3)})`)
+          .join(", "),
     );
 
     // --- Steps 3–7: fetch, dedup, filter, merge per URL ---
@@ -2067,11 +2120,16 @@ ${answerInstructions}`;
 
       try {
         const allPoints = await this.fetchAllChunksForUrl(
-          collectionName, url, userId, agentId,
+          collectionName,
+          url,
+          userId,
+          agentId,
         );
 
         if (allPoints.length === 0) {
-          console.log(`[QueryController] buildPageMergeContext: no Qdrant points found for ${url}`);
+          console.log(
+            `[QueryController] buildPageMergeContext: no Qdrant points found for ${url}`,
+          );
           continue;
         }
 
@@ -2079,11 +2137,16 @@ ${answerInstructions}`;
 
         // Filter boilerplate and cap chunk count
         const validChunks = sorted
-          .filter((p) => !isBoilerplateChunk(stripHtmlForContext(p.payload?.text || "")))
+          .filter(
+            (p) =>
+              !isBoilerplateChunk(stripHtmlForContext(p.payload?.text || "")),
+          )
           .slice(0, maxChunksPerUrl);
 
         if (validChunks.length === 0) {
-          console.log(`[QueryController] buildPageMergeContext: all chunks were boilerplate for ${url}`);
+          console.log(
+            `[QueryController] buildPageMergeContext: all chunks were boilerplate for ${url}`,
+          );
           continue;
         }
 
@@ -2115,12 +2178,16 @@ ${answerInstructions}`;
           `[QueryController] buildPageMergeContext: ${url} → ${validChunks.length} chunks merged (${pageText.length} chars)`,
         );
       } catch (err) {
-        console.warn(`[QueryController] buildPageMergeContext: fetch failed for ${url}: ${err.message}`);
+        console.warn(
+          `[QueryController] buildPageMergeContext: fetch failed for ${url}: ${err.message}`,
+        );
       }
     }
 
     if (blocks.length === 0) {
-      console.log("[QueryController] buildPageMergeContext: expansion yielded no content, falling back to getRelevantContext");
+      console.log(
+        "[QueryController] buildPageMergeContext: expansion yielded no content, falling back to getRelevantContext",
+      );
       return this.getRelevantContext(matches, options);
     }
 
@@ -2495,7 +2562,7 @@ ${answerInstructions}`;
         userIdString,
       );
 
-      console.log("revised from kb response : ",revisedFromKb);
+      console.log("revised from kb response : ", revisedFromKb);
       if (revisedFromKb) {
         return {
           success: true,
@@ -2626,7 +2693,7 @@ ${answerInstructions}`;
         (queryNorm.sizes?.length > 0 || currentSizes?.length > 0) &&
         /\b(lash|lashes|product|style|collection)\b/i.test(normalizedQuestion);
 
-        console.log("effective sub intent check : ",effectiveSubIntent);
+      console.log("effective sub intent check : ", effectiveSubIntent);
 
       if (wantsProductLinks && !effectiveSubIntent) {
         effectiveSubIntent = /\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(retrievalQuery)
@@ -2642,7 +2709,7 @@ ${answerInstructions}`;
         effectiveSubIntent = "IN_PAGE_LIST";
       }
 
-      console.log("Effective sub intent check 1  : ",effectiveSubIntent);
+      console.log("Effective sub intent check 1  : ", effectiveSubIntent);
 
       const queryAttributes = extractQueryAttributes({
         normalizedQuestion,
@@ -2716,9 +2783,9 @@ ${answerInstructions}`;
         queryAttributes,
       });
 
-      console.log("queryResponse data is : ",queryResponse);
-      
-      console.log("Effective : ",effectiveSubIntent);
+      console.log("queryResponse data is : ", queryResponse);
+
+      console.log("Effective : ", effectiveSubIntent);
 
       if (effectiveSubIntent) {
         const specialized = await this.trySpecializedRetrieval({
@@ -2774,7 +2841,6 @@ ${answerInstructions}`;
         companyName,
         requestedTopK,
       });
-
 
       console.log("Forced catalog check: ", forcedCatalog);
 
