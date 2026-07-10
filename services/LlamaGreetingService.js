@@ -26,6 +26,8 @@ async function generateGreeting({
   userLanguage,
   websiteLanguage,
   visitorLocale,
+  userId = null,
+  agentId = null,
 }) {
   const safeCompany = escapeHtml(companyName || "our team");
   const lang = userLanguage || "en";
@@ -44,7 +46,7 @@ async function generateGreeting({
     `Write the greeting in ${lang}.`,
   ].join("\n");
 
-  const raw = await completeLlama({ system, prompt });
+  const raw = await completeLlama({ system, prompt, userId, agentId });
   const answer = wrapAsHtml(raw);
 
   if (answer) {

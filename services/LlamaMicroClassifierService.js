@@ -1,5 +1,6 @@
 const axios = require("axios");
 const { normalizeLanguageCode } = require("../utils/websiteLanguage");
+const { logOpenAIUsage } = require("./UsageTrackingService");
 
 function safeJsonParse(text) {
   try {
@@ -53,7 +54,15 @@ async function callOllama({ model, prompt, baseUrl, timeoutMs }) {
     },
     { timeout: timeoutMs }
   );
-  return String(res.data?.response || "").trim();
+  const text = String(res.data?.response || "").trim();
+  const usage = res.data?.eval_count != null
+    ? {
+        prompt_tokens: res.data.prompt_eval_count || 0,
+        completion_tokens: res.data.eval_count || 0,
+        total_tokens: (res.data.prompt_eval_count || 0) + (res.data.eval_count || 0),
+      }
+    : null;
+  return { text, usage };
 }
 
 async function callGroq({ model, prompt, apiKey, timeoutMs }) {
@@ -73,7 +82,9 @@ async function callGroq({ model, prompt, apiKey, timeoutMs }) {
       headers: { Authorization: `Bearer ${apiKey}` },
     }
   );
-  return String(res.data?.choices?.[0]?.message?.content || "").trim();
+  const text = String(res.data?.choices?.[0]?.message?.content || "").trim();
+  const usage = res.data?.usage || null;
+  return { text, usage };
 }
 
 /**
@@ -93,6 +104,8 @@ async function classifyShortText({
   message,
   websiteLanguage,
   visitorLocale,
+  userId = null,
+  agentId = null,
 }) {
   const enabled = String(process.env.LLAMA_MICRO_ENABLED || "false") === "true";
   if (!enabled) return null;
@@ -107,19 +120,44 @@ async function classifyShortText({
   });
 
   let raw = "";
+  let callUsage = null;
+  let callModel = null;
   try {
     if (provider === "groq") {
       const apiKey = process.env.GROQ_API_KEY;
       if (!apiKey) return null;
-      const model = process.env.LLAMA_MICRO_MODEL || "llama-3.1-8b-instant";
-      raw = await callGroq({ model, prompt, apiKey, timeoutMs });
+      callModel = process.env.LLAMA_MICRO_MODEL || "llama-3.1-8b-instant";
+      const result = await callGroq({ model: callModel, prompt, apiKey, timeoutMs });
+      raw = result.text;
+      callUsage = result.usage;
     } else {
+      callModel = process.env.LLAMA_MICRO_MODEL || "llama3.1:8b";
       const baseUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
-      const model = process.env.LLAMA_MICRO_MODEL || "llama3.1:8b";
-      raw = await callOllama({ model, prompt, baseUrl, timeoutMs });
+      const result = await callOllama({ model: callModel, prompt, baseUrl, timeoutMs });
+      raw = result.text;
+      callUsage = result.usage;
     }
   } catch {
     return null;
+  }
+
+  if (callUsage && userId) {
+    logOpenAIUsage({
+      userId,
+      agentId,
+      model: callModel,
+      type: "open-source",
+      inputTokens: callUsage.prompt_tokens || 0,
+      outputTokens: callUsage.completion_tokens || 0,
+      cacheTokens: 0,
+      totalTokens: callUsage.total_tokens || 0,
+      inputCost: 0,
+      outputCost: 0,
+      cacheCost: 0,
+      totalCost: 0,
+    }).catch((err) =>
+      console.warn(`[LlamaMicroClassifier] Error logging usage: ${err.message}`)
+    );
   }
 
   const parsed = safeJsonParse(raw);

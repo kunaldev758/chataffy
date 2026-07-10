@@ -494,6 +494,8 @@ class QuestionAnsweringSystem {
     websiteLanguage,
     options,
     conversationId,
+    userId,
+    agentId,
   }) {
     const { answer, language, source } = await generateGreeting({
       companyName,
@@ -501,6 +503,8 @@ class QuestionAnsweringSystem {
       userLanguage: routing.userLanguage,
       websiteLanguage,
       visitorLocale: options.visitorLocale,
+      userId,
+      agentId,
     });
 
     console.log(
@@ -719,15 +723,18 @@ class QuestionAnsweringSystem {
     return { answer: result.answer, matches: [] };
   }
 
-  logAnswerUsage(userId, agentId, { usage, model } = {}) {
+  logAnswerUsage(userId, agentId, { usage, model } = {}, conversationId = null) {
     if (!usage) return;
-    logOpenAIUsage({
+    this.logOpenAIChatUsage({
       userId,
       agentId,
-      tokens: usage.total_tokens,
-      requests: 1,
-      model: model || CHAT_MODEL_BRIEF,
-    });
+      conversationId,
+      usage,
+      modelName: model || CHAT_MODEL_BRIEF,
+      type: "chat",
+    }).catch((err) =>
+      console.warn(`[QueryController] Error logging chat usage: ${err.message}`)
+    );
   }
 
   async generateAnswerFromMatches({
@@ -742,6 +749,8 @@ class QuestionAnsweringSystem {
       responseMode = "brief",
       requestedCount = 5,
       wantsProductUrls = false,
+      userId: answerUserId = null,
+      agentId: answerAgentId = null,
     } = answerOptions;
 
     console.log("generate answer from matches : ", matches);
@@ -757,6 +766,8 @@ class QuestionAnsweringSystem {
         userMessage: question,
         userLanguage: answerOptions.userLanguage,
         matches,
+        userId: answerUserId,
+        agentId: answerAgentId,
       });
 
       if (contactResult?.answer) {
@@ -2696,6 +2707,15 @@ ${answerInstructions}`;
         chatMessages: chatSession,
         websiteLanguage,
         openaiClient: openai,
+        logOpenAIUsage: ({ usage, modelName, type }) =>
+          this.logOpenAIChatUsage({
+            userId,
+            agentId,
+            conversationId,
+            usage,
+            modelName,
+            type: type || "intent",
+          }),
       });
 
       console.log(
@@ -2803,7 +2823,7 @@ ${answerInstructions}`;
           websiteData,
           { ...langOpts, forcePremium: false },
         );
-        this.logAnswerUsage(userId, agentId, ackResult);
+        this.logAnswerUsage(userId, agentId, ackResult, conversationId);
         return {
           success: true,
           answer: ackResult.answer,
@@ -2994,11 +3014,13 @@ ${answerInstructions}`;
               prebuiltContext: specialized.context,
               wasExpanded,
               retrievalMaxScore: this.getMaxSemanticScore(specialized.matches),
+              userId: userIdString,
+              agentId: agentId?.toString(),
               ...langOpts,
             },
           });
 
-          this.logAnswerUsage(userId, agentId, specializedResult);
+          this.logAnswerUsage(userId, agentId, specializedResult, conversationId);
 
           return {
             success: true,
@@ -3034,11 +3056,13 @@ ${answerInstructions}`;
             prebuiltContext: forcedCatalog.context,
             wasExpanded,
             retrievalMaxScore: this.getMaxSemanticScore(forcedCatalog.matches),
+            userId: userIdString,
+            agentId: agentId?.toString(),
             ...langOpts,
           },
         });
 
-        this.logAnswerUsage(userId, agentId, forcedResult);
+        this.logAnswerUsage(userId, agentId, forcedResult, conversationId);
 
         return {
           success: true,
@@ -3328,7 +3352,7 @@ ${answerInstructions}`;
             { ...langOpts, forcePremium: false },
           );
           finalAnswer = offTopicResult.answer;
-          this.logAnswerUsage(userId, agentId, offTopicResult);
+          this.logAnswerUsage(userId, agentId, offTopicResult, conversationId);
         }
       } else {
         const wantsUrls = wantsProductLinks || isProductLinkRequest(question);
@@ -3376,7 +3400,7 @@ ${answerInstructions}`;
           },
         });
         finalAnswer = answerResult.answer;
-        this.logAnswerUsage(userId, agentId, answerResult);
+        this.logAnswerUsage(userId, agentId, answerResult, conversationId);
       }
 
       // 10. Prepare Sources from Qdrant matched payloads
