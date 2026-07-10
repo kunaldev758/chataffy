@@ -387,11 +387,48 @@ function buildOffTopicResponse({
   };
 }
 
+const ACKNOWLEDGEMENT_TEMPLATES = {
+  en: (company) =>
+    `<p>You're welcome! Feel free to ask if you have any other questions about <strong>${company}</strong>.</p>`,
+  es: (company) =>
+    `<p>¡De nada! No dudes en preguntar si tienes más dudas sobre <strong>${company}</strong>.</p>`,
+  fr: (company) =>
+    `<p>De rien ! N'hésitez pas à poser d'autres questions sur <strong>${company}</strong>.</p>`,
+  de: (company) =>
+    `<p>Gern geschehen! Fragen Sie gerne, wenn Sie weitere Fragen zu <strong>${company}</strong> haben.</p>`,
+  it: (company) =>
+    `<p>Prego! Non esitare a chiedere se hai altre domande su <strong>${company}</strong>.</p>`,
+  pt: (company) =>
+    `<p>De nada! Sinta-se à vontade para perguntar sobre <strong>${company}</strong>.</p>`,
+  ru: (company) =>
+    `<p>Пожалуйста! Если у вас появятся другие вопросы о <strong>${company}</strong>, я здесь.</p>`,
+  ja: (company) =>
+    `<p>どういたしまして！<strong>${company}</strong>について他にご質問があればお気軽にどうぞ。</p>`,
+  hi: (company) =>
+    `<p>कोई बात नहीं! अगर <strong>${company}</strong> के बारे में और कोई सवाल हो तो पूछें।</p>`,
+};
+
+/**
+ * Returns a template response for acknowledgement messages if the user's language
+ * has a template. Returns null if no template exists (caller should fall back to LLM).
+ */
+function buildAcknowledgementResponse({ companyName, userLanguage }) {
+  const lang = normalizeLanguageCode(userLanguage);
+  if (!lang || !ACKNOWLEDGEMENT_TEMPLATES[lang]) return null;
+  const safeCompany = escapeHtml(companyName || "our team");
+  return {
+    answer: ACKNOWLEDGEMENT_TEMPLATES[lang](safeCompany),
+    language: lang,
+    source: "template_acknowledgement",
+  };
+}
+
 module.exports = {
   buildGreetingResponse,
   buildLiveAgentResponse,
   buildAccidentalResponse,
   buildOffTopicResponse,
+  buildAcknowledgementResponse,
   isGibberishOrAccidentalMessage,
   hasMeaningfulUnicodeScript,
   isKnownGreetingPhrase,

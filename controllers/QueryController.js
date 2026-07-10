@@ -21,6 +21,7 @@ const {
   buildLiveAgentResponse,
   buildAccidentalResponse,
   buildOffTopicResponse,
+  buildAcknowledgementResponse,
   isGibberishOrAccidentalMessage,
 } = require("../services/LightweightResponseService");
 const { generateContactResponse } = require("../services/LlamaContactService");
@@ -2668,6 +2669,45 @@ ${answerInstructions}`;
           options,
           conversationId,
         });
+      }
+
+      if (routing.route === ROUTES.ACKNOWLEDGEMENT) {
+        const templateResult = buildAcknowledgementResponse({
+          companyName,
+          userLanguage: routing.userLanguage,
+        });
+
+        if (templateResult) {
+          console.log(
+            `[QueryController] Acknowledgement template (${routing.userLanguage}) — skipping retrieval`,
+          );
+          return {
+            success: true,
+            answer: templateResult.answer,
+            conversationId,
+            isAgentRequest: false,
+          };
+        }
+
+        // No template for this language — cheap LLM, no context, no history
+        console.log(
+          `[QueryController] Acknowledgement LLM fallback (${routing.userLanguage}) — skipping retrieval`,
+        );
+        const ackResult = await this.generateAnswer(
+          question,
+          `The user sent a short acknowledgement in their language. Reply warmly in the same language, invite them to ask more questions about ${companyName}. One sentence only. Use HTML <p> tag.`,
+          [],
+          companyName,
+          websiteData,
+          { ...langOpts, forcePremium: false },
+        );
+        this.logAnswerUsage(userId, agentId, ackResult);
+        return {
+          success: true,
+          answer: ackResult.answer,
+          conversationId,
+          isAgentRequest: false,
+        };
       }
 
       const queryExpansion = expandQueryForRetrieval(

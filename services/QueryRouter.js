@@ -20,6 +20,7 @@ const ROUTES = {
   GREETING: "GREETING",
   LIVE_AGENT: "LIVE_AGENT",
   ACCIDENTAL: "ACCIDENTAL",
+  ACKNOWLEDGEMENT: "ACKNOWLEDGEMENT",
   STRUCTURAL: "STRUCTURAL",
   SEMANTIC_RAG: "SEMANTIC_RAG",
   HYBRID: "HYBRID",
@@ -540,6 +541,7 @@ Classify the visitor message into exactly one route:
 - GREETING: simple hello/hi with no real question
 - LIVE_AGENT: wants a human agent, representative, or live support
 - ACCIDENTAL: random characters, keyboard mash, or test input with no real meaning
+- ACKNOWLEDGEMENT: pure social acknowledgement with NO new question or intent (e.g. "ok", "thanks", "got it", "understood", "great", "merci", "ありがとう", "धन्यवाद", "gracias"). Use chat history to resolve ambiguity — "ok" after a bot offer/question = SEMANTIC_RAG (follow-up acceptance), "ok"/"thanks" after a bot answer = ACKNOWLEDGEMENT. ANY new question, request, or new topic = SEMANTIC_RAG, not ACKNOWLEDGEMENT.
 - HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), homepage product catalog with prices, or contact/social profiles
 - SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
 
