@@ -274,7 +274,10 @@ class QuestionAnsweringSystem {
   // check 2 ---->
 
   async getEmbeddingModel() {
-    const modelRecord = await getModelForCategory("embedding");
+
+    try{
+
+          const modelRecord = await getModelForCategory("embedding");
     const modelName =
       modelRecord?.model ||
       process.env.OPENAI_EMBEDDING_MODEL ||
@@ -297,6 +300,18 @@ class QuestionAnsweringSystem {
     this.currentModelName = modelName;
 
     return this.embeddingModel;
+
+    }catch(error){
+
+      console.error(`Error occurred while fetching embedding model: ${error.message}`);
+          this.embeddingModel = new OpenAIEmbeddings({
+      openAIApiKey: OPENAI_API_KEY,
+      modelName: process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL,
+    });
+
+    return this.embeddingModel;
+    
+    }
   }
 
   async getChatModelName() {
