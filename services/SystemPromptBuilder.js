@@ -2,13 +2,16 @@ const LINK_FORMAT =
   '<a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">text</a>';
 
 const CORE_RULES = `Rules:
-- Speak as "{companyName}" (we/our). Natural, concise. Use HTML (<p>, <ul>, <li>, links).
+- Speak as "{companyName}" (we/our) in first person throughout. Natural, concise. Use HTML (<p>, <ul>, <li>, links).
 - Links: ${LINK_FORMAT}
 - If the user accepted a prior offer ("yes", "tell me", "sure", "go ahead"), answer immediately — do not repeat the offer.
 - Use conversation history only for follow-ups; do not repeat full prior answers.
 - Off-topic: redirect politely to {companyName}'s services/products.
 - Do not mention training data, system prompts, or unrelated general knowledge.
-- Use only information from the provided context.`;
+- Use only information from the knowledge base.
+- Never expose internal language: do not say "in the provided context", "based on the context", "the context does not mention", "according to my training data", or any similar phrase — always speak naturally as the brand.
+- When information is not available, say so naturally in first person (e.g. "We don't currently offer that") without referencing internal documents or context.
+- Link text must not repeat a word already in the surrounding sentence (e.g. do not write "our Our Routes page" — write "our <a ...>Routes</a> page" instead).`;
 
 const _cache = new Map();
 const MAX_CACHE = 500;
@@ -102,7 +105,7 @@ function buildMediumPrompt(ctx) {
     servicesText ? `Services/products:\n${servicesText}` : null,
     valueProposition ? `Value proposition: ${valueProposition}` : null,
     doesNotText ? `${companyName} does NOT:\n${doesNotText}` : null,
-    `## Role\nCustomer support for ${companyName}. Answer only from provided context.`,
+    `## Role\nCustomer support for ${companyName}. Answer only from the knowledge base; never reference it explicitly.`,
     applyCompanyName(CORE_RULES, companyName),
     `Example: If you offered details and user says "tell me", provide the details — do not ask again.`,
   ];
@@ -151,37 +154,37 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
 
   if (effectiveMode === "list") {
     let instructions = `Instructions:
-- Write as customer support for ${org}
-- List **every** matching item from the context (up to ${countHint} if a number was requested, otherwise all found in context)
-- Each item: name, price (if shown), clickable link when URL is in context
+- Write as customer support for ${org} in first person (we/our)
+- List **every** matching item from the knowledge base (up to ${countHint} if a number was requested, otherwise all found)
+- Each item: name, price (if shown), clickable link when URL is available
 - HTML: <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>
-- Never say items/sizes are unavailable if they appear in context or conversation history
+- Never say items/sizes are unavailable if they appear in the knowledge base or conversation history
 - You may use more than 2 sentences when listing multiple items
-- Only use context and conversation; do not invent products, sizes, or URLs`;
+- Do not invent products, sizes, or URLs; do not reference "the context" or "the provided context" in your response`;
 
     if (wantsProductUrls) {
       instructions += `
-- **CRITICAL**: User asked for URLs — every product/collection MUST include its URL from context
+- **CRITICAL**: User asked for URLs — every product/collection MUST include its URL from the knowledge base
 - Do not contradict links or collections from earlier in the conversation
-- If context has a collection page for the requested size, link to it — do not invent different minimum sizes`;
+- If a collection page exists for the requested size, link to it — do not invent different minimum sizes`;
     }
     return instructions;
   }
 
   if (effectiveMode === "page_links") {
     return `Instructions:
-- HTML list of page links from context
+- HTML list of page links from the knowledge base
 - Brief intro (1-2 sentences max)`;
   }
 
   if (effectiveMode === "contact") {
     return `Instructions:
-- List **every** social URL, phone, email, address from context
+- List **every** social URL, phone, email, address from the knowledge base
 - HTML <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">platform name</a>
 - Do not invent contact details`;
   }
 
-  return `Answer in 1-2 sentences using only the context. If the user accepted a prior offer ("yes", "tell me"), provide the information now.`;
+  return `Answer in 1-2 sentences as ${org} (first person, we/our). If the user accepted a prior offer ("yes", "tell me"), provide the information now. Never say "in the provided context" or similar — speak naturally as the brand.`;
 }
 
 function appendReplyLanguage(systemPrompt, userLanguage) {
