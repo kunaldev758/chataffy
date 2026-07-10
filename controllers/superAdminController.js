@@ -857,12 +857,22 @@ module.exports.updateAiModel = async (req, res) => {
       { new: true }
     );
 
-    if (categories?.length && updated) {
-      // For each category this model just claimed as default,
-      // pull it out of defaultFor on every other model
+   if (categories?.length && updated) {
+     // Remove the categories from all other models
       await AiModel.updateMany(
         { _id: { $ne: updated._id } },
         { $pull: { categories: { $in: categories } } }
+      );
+
+      // Mark inactive only if no categories remain
+      await AiModel.updateMany(
+        {
+          _id: { $ne: updated._id },
+          categories: { $size: 0 },
+        },
+        {
+          $set: { status: "inactive" },
+        }
       );
     }
 
