@@ -6,8 +6,8 @@ const ContentValidationService = require("../services/ContentValidationService.j
 const batchTrainingService = require("../services/BatchTrainingService.js");
 const { readFileContent } = require("../utils/fileReader.js");
 const appEvents = require("../events.js");
-const axios = require("axios");
 const xml2js = require("xml2js");
+const webScraper = require("../services/WebScraper.js");
 const cheerio = require("cheerio");
 const { urlProcessingQueue, deleteTrainingDataQueue, retrainTrainingDataQueue } = require("../services/jobService.js");
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
@@ -108,9 +108,8 @@ async bulkInsertUrls(userId,agentId, urls) {
 
         // 1) robots.txt -> look for Sitemap: entries
         try {
-          const robotsResponse = await axios.get(`${origin}/robots.txt`, {
+          const robotsResponse = await webScraper.fetchUrl(`${origin}/robots.txt`, {
             timeout: 15000,
-            headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
             validateStatus: (status) => status < 500,
           });
           if (robotsResponse.status === 200 && typeof robotsResponse.data === "string") {
@@ -165,9 +164,8 @@ async bulkInsertUrls(userId,agentId, urls) {
 
         // 3) Fallback: extract links from homepage HTML (same-origin, limited)
         try {
-          const htmlResponse = await axios.get(sitemapUrl, {
+          const htmlResponse = await webScraper.fetchUrl(sitemapUrl, {
             timeout: 20000,
-            headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
             validateStatus: (status) => status < 500,
           });
           if (htmlResponse.status === 200 && typeof htmlResponse.data === "string") {
@@ -200,15 +198,9 @@ async bulkInsertUrls(userId,agentId, urls) {
 
       console.log(`Fetching sitemap: ${sitemapUrl}`);
       
-      const response = await axios.get(sitemapUrl, {
+      const response = await webScraper.fetchUrl(sitemapUrl, {
         timeout: 30000,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
-        },
-        // Add validateStatus to handle 404s gracefully
-        validateStatus: function (status) {
-          return status < 500; // Accept any status code less than 500
-        }
+        validateStatus: (status) => status < 500,
       });
   
       // Handle non-200 status codes
@@ -309,9 +301,8 @@ async bulkInsertUrls(userId,agentId, urls) {
       const parsed = new URL(normalizedUrl);
       const origin = parsed.origin;
 
-      const response = await axios.get(origin, {
+      const response = await webScraper.fetchUrl(origin, {
         timeout: 15000,
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
       });
 
       if (response.status !== 200 || typeof response.data !== "string") {
@@ -428,9 +419,10 @@ async bulkInsertUrls(userId,agentId, urls) {
       await Promise.all(
         cssUrls.slice(0, 3).map(async (url) => {
           try {
-            const r = await axios.get(url, {
+            const r = await webScraper.fetchUrl(url, {
               timeout: 8000,
               responseType: "text",
+              useBrowserHeaders: false,
               headers: { "User-Agent": "Mozilla/5.0" },
             });
             if (typeof r.data === "string") cssText += r.data + "\n";
@@ -480,11 +472,8 @@ async bulkInsertUrls(userId,agentId, urls) {
       const parsed = new URL(normalizedUrl);
       const origin = parsed.origin;
 
-      const response = await axios.get(origin, {
+      const response = await webScraper.fetchUrl(origin, {
         timeout: 15000,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)",
-        },
       });
 
       if (response.status !== 200 || typeof response.data !== "string") {
@@ -523,10 +512,10 @@ async bulkInsertUrls(userId,agentId, urls) {
   // stored directly in the Widget collection.  Returns null on any failure.
   async downloadAndSaveLogo(logoUrl, agentId) {
     try {
-      const response = await axios.get(logoUrl, {
+      const response = await webScraper.fetchUrl(logoUrl, {
         responseType: "arraybuffer",
         timeout: 15000,
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; WebScraper/1.0)" },
+        useBrowserHeaders: false,
       });
 
       // Derive extension from URL path first, then fall back to Content-Type
