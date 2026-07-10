@@ -56,7 +56,7 @@ const GREETINGS = [
   "namaste",
   "salut",
   "ola",
-  "привет",
+  // "привет",
   "здравствуйте",
   "こんにちは",
   "こんばんは",
@@ -474,6 +474,9 @@ function parseRouterJson(content, question = "") {
 }
 
 async function llmRoute(question, options = {}) {
+
+
+  console.log("llm route get called : ",question)
   const {
     chatHistorySnippet = "",
     websiteLanguage = "en",
@@ -484,44 +487,81 @@ async function llmRoute(question, options = {}) {
     openaiClient ||
     new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+//   const systemPrompt = `You are a query router for a multilingual customer-support chatbot.
+
+// Classify the visitor message into exactly one route:
+// - GREETING: simple hello/hi with no real question
+// - LIVE_AGENT: wants a human agent, representative, or live support
+// - ACCIDENTAL: random characters, keyboard mash, or test input with no real meaning
+// - HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), a product catalog with prices, or contact/social profiles
+// - SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
+
+// IMPORTANT RULES:
+// 1. Prefer SEMANTIC_RAG for pricing questions about a SPECIFIC named product (e.g. "Premium Drone Kit pricing", "what does the Pro Plan cost?"). Use HYBRID/IN_PAGE_LIST only when the user wants a general product/price LIST.
+// 2. Real questions in any language (Japanese, Russian, Spanish, Hindi, Arabic, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
+// 3. Short follow-ups ("yes", "tell me more", "what about pricing?") should use chat history to infer intent — most resolve to SEMANTIC_RAG.
+// 4. Only use HYBRID for explicit listing/navigation/contact requests.
+
+// For HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
+
+// - CONTACT_INFO: phone, email, address, hours, social media — ANY language:
+//     EN "what's your phone number", ES "¿cuál es su teléfono?",
+//     FR "quel est votre numéro?", DE "Telefonnummer bitte",
+//     JA "電話番号は？/ 連絡先を教えてください", RU "как с вами связаться?",
+//     HI "आपका फ़ोन नंबर क्या है?"
+
+// - IN_PAGE_LIST: user wants a LIST of products/items WITH prices — ANY language:
+//     EN "show me all products with prices", ES "muéstrame los productos con precios",
+//     FR "montrez-moi la liste des prix", DE "Preisliste anzeigen",
+//     JA "価格一覧を見せてください", RU "покажи все товары с ценами",
+//     HI "सभी उत्पादों की कीमतें दिखाओ"
+//     NOTE: "Premium Drone Kit pricing" = SEMANTIC_RAG (specific product, not a list)
+
+// - PAGE_LINKS: user wants URLs/links to site pages — ANY language:
+//     EN "show me all pages / list your collections",
+//     DE "alle Seiten zeigen", FR "montrez-moi les pages",
+//     JA "全ページのリンクを教えて", ES "muéstrame todos los enlaces"
+
+// Detect userLanguage: ISO 639-1 code for the language the visitor wrote in (e.g. en, de, hi, ja, ar, zh).
+
+// If route is HYBRID and userLanguage differs from website language (${websiteLanguage}), provide rewrittenQuery: translate the core search keywords into the website language for keyword matching. Otherwise rewrittenQuery can be null.
+
+// Respond with JSON only:
+// {
+//   "route": "SEMANTIC_RAG",
+//   "subIntent": null,
+//   "userLanguage": "en",
+//   "confidence": 0.85,
+//   "rewrittenQuery": null
+// }`;
   const systemPrompt = `You are a query router for a multilingual customer-support chatbot.
 
 Classify the visitor message into exactly one route:
 - GREETING: simple hello/hi with no real question
 - LIVE_AGENT: wants a human agent, representative, or live support
 - ACCIDENTAL: random characters, keyboard mash, or test input with no real meaning
-- HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), a product catalog with prices, or contact/social profiles
+- HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), homepage product catalog with prices, or contact/social profiles
 - SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
 
-IMPORTANT RULES:
-1. Prefer SEMANTIC_RAG for pricing questions about a SPECIFIC named product (e.g. "Premium Drone Kit pricing", "what does the Pro Plan cost?"). Use HYBRID/IN_PAGE_LIST only when the user wants a general product/price LIST.
-2. Real questions in any language (Japanese, Russian, Spanish, Hindi, Arabic, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
-3. Short follow-ups ("yes", "tell me more", "what about pricing?") should use chat history to infer intent — most resolve to SEMANTIC_RAG.
-4. Only use HYBRID for explicit listing/navigation/contact requests.
+IMPORTANT: Prefer SEMANTIC_RAG for pricing, features, policies, how-to, and general questions even if they contain words like "show" or "list". Only use HYBRID for explicit listing/navigation/contact requests. Real questions in any language (Japanese, Chinese, Russian, Spanish, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
 
 For HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
+- CONTACT_INFO: phone, email, address, hours, social media profiles — in ANY language (e.g. Japanese 連絡先, お問い合わせ, 電話番号)
+- IN_PAGE_LIST: product catalog with prices/sizes
+- PAGE_LINKS: list of site pages or collection URLs
 
-- CONTACT_INFO: phone, email, address, hours, social media — ANY language:
-    EN "what's your phone number", ES "¿cuál es su teléfono?",
-    FR "quel est votre numéro?", DE "Telefonnummer bitte",
-    JA "電話番号は？/ 連絡先を教えてください", RU "как с вами связаться?",
-    HI "आपका फ़ोन नंबर क्या है?"
+Also classify business intent in ANY language:
+- isIdentityQuestion: true when the user asks who you are or to introduce yourself/the company (e.g. "who are you", "describe yourself", "介绍一下你自己", "自己紹介してください", "qui êtes-vous")
+- isBusinessQuestion: true for products, services, pricing, policies, company info, or any support question about the business
+- isTrulyOffTopic: true ONLY for unrelated general knowledge (weather, jokes, sports, recipes, crypto prices, politics) — NOT for business questions even in non-English
 
-- IN_PAGE_LIST: user wants a LIST of products/items WITH prices — ANY language:
-    EN "show me all products with prices", ES "muéstrame los productos con precios",
-    FR "montrez-moi la liste des prix", DE "Preisliste anzeigen",
-    JA "価格一覧を見せてください", RU "покажи все товары с ценами",
-    HI "सभी उत्पादों की कीमतें दिखाओ"
-    NOTE: "Premium Drone Kit pricing" = SEMANTIC_RAG (specific product, not a list)
+If isIdentityQuestion or isBusinessQuestion is true, route MUST be SEMANTIC_RAG and isTrulyOffTopic MUST be false.
 
-- PAGE_LINKS: user wants URLs/links to site pages — ANY language:
-    EN "show me all pages / list your collections",
-    DE "alle Seiten zeigen", FR "montrez-moi les pages",
-    JA "全ページのリンクを教えて", ES "muéstrame todos los enlaces"
+Detect userLanguage: ISO 639-1 code for the language the visitor WROTE IN (e.g. en, es, fr, de, zh, ja, ko, ar, hi, ru, pt, th, vi, tr). Do NOT guess language from script alone.
 
-Detect userLanguage: ISO 639-1 code for the language the visitor wrote in (e.g. en, de, hi, ja, ar, zh).
+If userLanguage differs from the website language (${websiteLanguage}), provide rewrittenQuery: translate the user's core search intent into the website language (${websiteLanguage}) so it can be used for both embedding similarity search and keyword matching. Preserve product names, brand names, numbers, and measurements as-is. If the languages already match, rewrittenQuery can be null.
 
-If route is HYBRID and userLanguage differs from website language (${websiteLanguage}), provide rewrittenQuery: translate the core search keywords into the website language for keyword matching. Otherwise rewrittenQuery can be null.
+Use conversation history for short follow-ups like "yes", "tell me", "what about pricing?".
 
 Respond with JSON only:
 {
@@ -529,14 +569,20 @@ Respond with JSON only:
   "subIntent": null,
   "userLanguage": "en",
   "confidence": 0.85,
-  "rewrittenQuery": null
+  "rewrittenQuery": null,
+  "isTrulyOffTopic": false
 }`;
 
-  const userContent = [
+  // const userContent = [
+  //   `Website language: ${websiteLanguage}`,
+  //   chatHistorySnippet
+  //     ? `Recent conversation:\n${chatHistorySnippet}`
+  //     : "Recent conversation: (none)",
+  //   `User message: ${question}`,
+  // ].join("\n\n");
+
+    const userContent = [
     `Website language: ${websiteLanguage}`,
-    chatHistorySnippet
-      ? `Recent conversation:\n${chatHistorySnippet}`
-      : "Recent conversation: (none)",
     `User message: ${question}`,
   ].join("\n\n");
 
@@ -549,6 +595,11 @@ Respond with JSON only:
       ],
       temperature: 0,
       response_format: { type: "json_object" },
+    });
+
+    console.log("[QueryRouter] LLM routing response:", {
+      question: question.substring(0, 80),
+      content: response.choices[0]?.message?.content,
     });
 
     return parseRouterJson(response.choices[0]?.message?.content, question);
@@ -577,18 +628,29 @@ async function routeQuery(question, options = {}) {
     websiteLanguage,
   });
 
+  console.log("[QueryRouter] Rule engine outcome:", {
+    question: question.substring(0, 80),
+    route: ruleOutcome.result?.route || null, 
+
+  })
+
+  console.log("shouldDeferToLlmRouter:", shouldDeferToLlmRouter(question, ruleOutcome));
+
   if (!shouldDeferToLlmRouter(question, ruleOutcome)) {
     return ruleOutcome.result;
   }
 
   const chatHistorySnippet = formatRecentChatForRouter(chatMessages);
 
+
+  console.log("chat history snippet for LLM routing:", chatHistorySnippet);
+
   console.log(
     `[QueryRouter] LLM routing (rules deferred: ${ruleOutcome.confident ? ruleOutcome.result?.source : "no_match"}) for: ${question.substring(0, 80)}`
   );
 
   return llmRoute(question, {
-    chatHistorySnippet,
+    // chatHistorySnippet,
     websiteLanguage,
     openaiClient,
   });

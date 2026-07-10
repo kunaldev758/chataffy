@@ -80,7 +80,7 @@ const RAG_MAX_CONTEXT_CHARS = Number(process.env.RAG_MAX_CONTEXT_CHARS) || 6000;
 const RAG_MAX_CONTEXT_CHARS_BRIEF =
   Number(process.env.RAG_MAX_CONTEXT_CHARS_BRIEF) || 4000;
 const RAG_MAX_CONTEXT_CHARS_LIST =
-  Number(process.env.RAG_MAX_CONTEXT_CHARS_LIST) || 12000;
+  Number(process.env.RAG_MAX_CONTEXT_CHARS_LIST) || 3000;
 const RAG_MAX_CONTEXT_CHARS_LINKS =
   Number(process.env.RAG_MAX_CONTEXT_CHARS_LINKS) || 3000;
 const RAG_MAX_CHUNK_CHARS_LIST =
@@ -242,10 +242,10 @@ function getContextLimitsForMode(responseMode) {
     };
   }
 
-  console.log("no conditon match then finally return to the default context limits",{
-
-    
-  });
+  console.log(
+    "no conditon match then finally return to the default context limits",
+    {},
+  );
   return {
     maxChunkChars: RAG_MAX_CHUNK_CHARS_BRIEF,
     maxTotalChars: RAG_MAX_CONTEXT_CHARS_BRIEF,
@@ -678,7 +678,7 @@ class QuestionAnsweringSystem {
 
     const contextLimits = getContextLimitsForMode(effectiveMode);
 
-    console.log("context limits : ",contextLimits);
+    console.log("context limits : ", contextLimits);
     let context;
 
     if (answerOptions.prebuiltContext) {
@@ -2602,41 +2602,50 @@ ${answerInstructions}`;
       const langOpts = { userLanguage: routing.userLanguage };
 
       if (routing.route === ROUTES.GREETING) {
-        if (!isPureGreeting(question)) {
-          console.log(
-            `[QueryController] GREETING route overridden for compound message: "${question.substring(0, 60)}..."`,
-          );
-          routing.route = ROUTES.SEMANTIC_RAG;
-          routing.subIntent = null;
-        } else if (USE_LIGHTWEIGHT_RESPONSES) {
-          return await this.respondToGreeting({
-            question,
-            companyName,
-            routing,
-            websiteLanguage,
-            options,
-            conversationId,
-          });
-        } else {
-          const greetingHistory = getChatHistoryFormatted(
-            CHAT_HISTORY_LIMIT_BRIEF,
-          );
-          const greetingResult = await this.generateAnswer(
-            question,
-            `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
-            greetingHistory,
-            companyName,
-            websiteData,
-            langOpts,
-          );
-          this.logAnswerUsage(userId, agentId, greetingResult);
-          return {
-            success: true,
-            answer: greetingResult.answer,
-            conversationId,
-            isAgentRequest: false,
-          };
-        }
+        // if (!isPureGreeting(question)) {
+        //   console.log(
+        //     `[QueryController] GREETING route overridden for compound message: "${question.substring(0, 60)}..."`,
+        //   );
+        //   routing.route = ROUTES.SEMANTIC_RAG;
+        //   routing.subIntent = null;
+        // } else if (USE_LIGHTWEIGHT_RESPONSES) {
+        //   return await this.respondToGreeting({
+        //     question,
+        //     companyName,
+        //     routing,
+        //     websiteLanguage,
+        //     options,
+        //     conversationId,
+        //   });
+        // } else {
+        //   const greetingHistory = getChatHistoryFormatted(
+        //     CHAT_HISTORY_LIMIT_BRIEF,
+        //   );
+        //   const greetingResult = await this.generateAnswer(
+        //     question,
+        //     `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
+        //     greetingHistory,
+        //     companyName,
+        //     websiteData,
+        //     langOpts,
+        //   );
+        //   this.logAnswerUsage(userId, agentId, greetingResult);
+        //   return {
+        //     success: true,
+        //     answer: greetingResult.answer,
+        //     conversationId,
+        //     isAgentRequest: false,
+        //   };
+        // }
+
+        return await this.respondToGreeting({
+          question,
+          companyName,
+          routing,
+          websiteLanguage,
+          options,
+          conversationId,
+        });
       }
 
       if (routing.route === ROUTES.ACCIDENTAL && USE_LIGHTWEIGHT_RESPONSES) {
@@ -2674,14 +2683,21 @@ ${answerInstructions}`;
         currentSizes,
       } = queryExpansion;
 
-      const embeddingQuery = queryNorm.enrichForEmbedding(retrievalQuery);
+      // If the router translated the query to the website language, use that as
+      // the base for embedding so query and stored vectors are in the same language.
+      const baseForEmbedding = routing.rewrittenQuery || retrievalQuery;
+      const embeddingQuery = queryNorm.enrichForEmbedding(baseForEmbedding);
 
       if (wasExpanded) {
         console.log(
           `[QueryController] Expanded retrieval query: "${retrievalQuery}"`,
         );
       }
-      if (embeddingQuery !== retrievalQuery) {
+      if (routing.rewrittenQuery) {
+        console.log(
+          `[QueryController] Translated embedding query (${routing.userLanguage} → ${websiteLanguage}): "${baseForEmbedding}"`,
+        );
+      } else if (embeddingQuery !== retrievalQuery) {
         console.log(
           `[QueryController] Enriched embedding query: "${embeddingQuery}"`,
         );
@@ -2926,20 +2942,20 @@ ${answerInstructions}`;
           ? Math.max(...queryResponse.map((m) => m.score))
           : 0;
 
-      const clearlyOnTopic = this.isClearlyOnTopicCompanyQuestion(
-        normalizedQuestion,
-        companyName,
-      );
-      if (clearlyOnTopic) {
-        console.log(
-          `[QueryController] On-topic company question detected: "${question.substring(0, 60)}..."`,
-        );
-      }
+      // const clearlyOnTopic = this.isClearlyOnTopicCompanyQuestion(
+      //   normalizedQuestion,
+      //   companyName,
+      // );
+      // if (clearlyOnTopic) {
+      //   console.log(
+      //     `[QueryController] On-topic company question detected: "${question.substring(0, 60)}..."`,
+      //   );
+      // }
 
       const IRRELEVANT_THRESHOLD = 0.3;
       const isIrrelevant =
         !catalogListQuery &&
-        !clearlyOnTopic &&
+        // !clearlyOnTopic &&
         queryResponse.length > 0 &&
         maxScore < IRRELEVANT_THRESHOLD;
 
@@ -2953,7 +2969,7 @@ ${answerInstructions}`;
       if (
         relevantMatches.length === 0 &&
         queryResponse.length > 0 &&
-        (!isIrrelevant || clearlyOnTopic)
+        !isIrrelevant
       ) {
         const fallbackThreshold = Math.max(0.2, effectiveThreshold - 0.15); // Lower by 0.15 but not below 0.2
         console.warn(
@@ -2977,7 +2993,7 @@ ${answerInstructions}`;
       // bringing back the highest-scoring remaining results (but keep
       // ordering and avoid irrelevant queries).
       if (
-        (!isIrrelevant || clearlyOnTopic) &&
+        !isIrrelevant &&
         queryResponse.length > 0 &&
         relevantMatches.length < requestedTopK
       ) {
@@ -3029,80 +3045,79 @@ ${answerInstructions}`;
           }]`,
         );
       }
-      if (queryResponse.length > 0 && relevantMatches.length === 0) {
-        console.warn(
-          `[QueryController] WARNING: Found ${queryResponse.length} matches but ALL were below threshold ${effectiveThreshold}. Consider lowering threshold or checking data quality.`,
-        );
-      }
+      // if (queryResponse.length > 0 && relevantMatches.length === 0) {
+      //   console.warn(
+      //     `[QueryController] WARNING: Found ${queryResponse.length} matches but ALL were below threshold ${effectiveThreshold}. Consider lowering threshold or checking data quality.`,
+      //   );
+      // }
 
       let finalAnswer;
       // let completionUsage = null;
 
-      // Check if message looks accidental or like test input
-      const isAccidental = this.isAccidentalOrTestMessage(question);
+      // // Check if message looks accidental or like test input
+      // const isAccidental = this.isAccidentalOrTestMessage(question);
 
-      // Check if visitor is requesting to connect to an agent
-      const isAgentRequest = isLiveAgentRequest(question);
+      // // Check if visitor is requesting to connect to an agent
+      // const isAgentRequest = isLiveAgentRequest(question);
 
       // Handle simple greetings even without context
-      if (relevantMatches.length === 0 && this.isSimpleGreeting(question)) {
-        if (USE_LIGHTWEIGHT_RESPONSES) {
-          const greetingResult = await this.respondToGreeting({
-            question,
-            companyName,
-            routing,
-            websiteLanguage,
-            options,
-            conversationId,
-          });
-          finalAnswer = greetingResult.answer;
-        } else {
-          const greetingHistory = getChatHistoryFormatted(
-            CHAT_HISTORY_LIMIT_BRIEF,
-          );
-          const greetingResult = await this.generateAnswer(
-            question,
-            `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
-            greetingHistory,
-            companyName,
-            websiteData,
-            langOpts,
-          );
-          finalAnswer = greetingResult.answer;
-          this.logAnswerUsage(userId, agentId, greetingResult);
-        }
-      } else if (isAccidental && !this.isSimpleGreeting(question)) {
-        if (USE_LIGHTWEIGHT_RESPONSES) {
-          const accidentalResult = this.respondToAccidental({
-            question,
-            companyName,
-            routing,
-            websiteLanguage,
-            options,
-            conversationId,
-          });
-          finalAnswer = accidentalResult.answer;
-        } else {
-          const accidentalHistory = getChatHistoryFormatted(
-            CHAT_HISTORY_LIMIT_BRIEF,
-          );
-          const accidentalResult = await this.generateAnswer(
-            question,
-            `The user sent a message that looks accidental or like test input: "${question}". This appears to be random characters or accidental typing. Acknowledge it might have been sent by accident, be friendly and understanding, and offer help with ${companyName}'s services. Respond naturally as a human would, not robotically.`,
-            accidentalHistory,
-            companyName,
-            websiteData,
-            langOpts,
-          );
-          finalAnswer = accidentalResult.answer;
-          this.logAnswerUsage(userId, agentId, accidentalResult);
-        }
-      } else if (
-        clearlyOnTopic &&
-        (relevantMatches.length === 0 || maxScore < IRRELEVANT_THRESHOLD) &&
-        !this.isSimpleGreeting(question) &&
-        !isAccidental
-      ) {
+      // if (relevantMatches.length === 0 && this.isSimpleGreeting(question)) {
+      //   if (USE_LIGHTWEIGHT_RESPONSES) {
+      //     const greetingResult = await this.respondToGreeting({
+      //       question,
+      //       companyName,
+      //       routing,
+      //       websiteLanguage,
+      //       options,
+      //       conversationId,
+      //     });
+      //     finalAnswer = greetingResult.answer;
+      //   } else {
+      //     const greetingHistory = getChatHistoryFormatted(
+      //       CHAT_HISTORY_LIMIT_BRIEF,
+      //     );
+      //     const greetingResult = await this.generateAnswer(
+      //       question,
+      //       `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
+      //       greetingHistory,
+      //       companyName,
+      //       websiteData,
+      //       langOpts,
+      //     );
+      //     finalAnswer = greetingResult.answer;
+      //     this.logAnswerUsage(userId, agentId, greetingResult);
+      //   }
+      // } else if (isAccidental && !this.isSimpleGreeting(question)) {
+      //   if (USE_LIGHTWEIGHT_RESPONSES) {
+      //     const accidentalResult = this.respondToAccidental({
+      //       question,
+      //       companyName,
+      //       routing,
+      //       websiteLanguage,
+      //       options,
+      //       conversationId,
+      //     });
+      //     finalAnswer = accidentalResult.answer;
+      //   } else {
+      //     const accidentalHistory = getChatHistoryFormatted(
+      //       CHAT_HISTORY_LIMIT_BRIEF,
+      //     );
+      //     const accidentalResult = await this.generateAnswer(
+      //       question,
+      //       `The user sent a message that looks accidental or like test input: "${question}". This appears to be random characters or accidental typing. Acknowledge it might have been sent by accident, be friendly and understanding, and offer help with ${companyName}'s services. Respond naturally as a human would, not robotically.`,
+      //       accidentalHistory,
+      //       companyName,
+      //       websiteData,
+      //       langOpts,
+      //     );
+      //     finalAnswer = accidentalResult.answer;
+      //     this.logAnswerUsage(userId, agentId, accidentalResult);
+      //   }
+      // } else
+
+      if (relevantMatches.length === 0 || maxScore < IRRELEVANT_THRESHOLD) {
+
+        console.log("check 1 : ",)
         const onTopicResult = await this.answerOnTopicWithFallback({
           question,
           relevantMatches,
@@ -3118,15 +3133,10 @@ ${answerInstructions}`;
           agentId,
         });
         finalAnswer = onTopicResult.answer;
-      } else if (
-        (relevantMatches.length === 0 || isIrrelevant) &&
-        !clearlyOnTopic &&
-        !this.isSimpleGreeting(question) &&
-        !isAccidental
-      ) {
-        const useLightTemplate =
-          USE_LIGHTWEIGHT_RESPONSES &&
-          (isIrrelevant || isTrulyOffTopicQuestion(normalizedQuestion));
+      } else if (relevantMatches.length === 0 || isIrrelevant) {
+
+        console.log("check 2 : ",)
+        const useLightTemplate = USE_LIGHTWEIGHT_RESPONSES && isIrrelevant;
 
         if (useLightTemplate) {
           const offTopicResult = this.respondToOffTopic({
@@ -3140,6 +3150,8 @@ ${answerInstructions}`;
           });
           finalAnswer = offTopicResult.answer;
         } else {
+
+          console.log("check 3 : ");
           const contextMessage = isIrrelevant
             ? `The user asked: "${question}". This question is completely unrelated to ${companyName} (similarity score: ${maxScore.toFixed(3)}). Redirect politely and offer help with ${companyName}'s services.`
             : `The user asked: "${question}". This question may not be directly related to ${companyName}. Redirect politely and offer help with relevant topics.`;
@@ -3238,7 +3250,7 @@ ${answerInstructions}`;
         answer: finalAnswer,
         sources: sources.length > 0 ? sources : undefined,
         conversationId,
-        isAgentRequest: isAgentRequest || false,
+        isAgentRequest: false,
       };
     } catch (error) {
       console.error(

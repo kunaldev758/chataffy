@@ -103,8 +103,8 @@ function extractQueryAttributes({
     retrievalQuery,
     keywordSource,
     embeddingQuery: queryNorm?.enrichForEmbedding
-      ? queryNorm.enrichForEmbedding(retrievalQuery)
-      : retrievalQuery,
+      ? queryNorm.enrichForEmbedding(keywordSource)
+      : keywordSource,
     sizes,
     collections,
     keywords,
