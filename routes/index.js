@@ -142,6 +142,18 @@ router.delete('/superadmin/plan/:planId',verifySuperAdminToken, PlanAdminControl
 router.post('/superadmin/plan/:planId/set-default',verifySuperAdminToken, PlanAdminController.setDefaultPlan);
 router.post('/superadmin/migrate-users',verifySuperAdminToken, PlanAdminController.migrateUsers);
 
+// AI Model management
+router.get('/superadmin/ai-models',verifySuperAdminToken, superAdminController.getAllAiModels);
+router.post('/superadmin/ai-models/create',verifySuperAdminToken, superAdminController.createAiModel);
+router.put('/superadmin/ai-models/update',verifySuperAdminToken, superAdminController.updateAiModel);
+router.delete('/superadmin/ai-models/delete/:modelId',verifySuperAdminToken, superAdminController.deleteAiModel);
+
+
+// AI Model Categories management
+router.get('/superadmin/ai-model-categories',verifySuperAdminToken, superAdminController.getAllAiModelCategories);
+router.post('/superadmin/ai-model-categories/create',verifySuperAdminToken, superAdminController.createAiModelCategory);
+router.put('/superadmin/ai-model-categories/update',verifySuperAdminToken, superAdminController.updateAiModelCategory);
+router.delete('/superadmin/ai-model-categories/delete/:categoryId',verifySuperAdminToken, superAdminController.deleteAiModelCategory);
 
 router.get('/available', PlanController.getAvailablePlans);
 

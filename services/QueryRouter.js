@@ -405,7 +405,7 @@ function parseRouterJson(content, question = "") {
     const parsed = JSON.parse(content || "{}");
     const route = String(parsed.route || "").toUpperCase();
     const validRoutes = Object.values(ROUTES);
-    const resolvedRoute = validRoutes.includes(route)
+    let resolvedRoute = validRoutes.includes(route)
       ? route
       : ROUTES.SEMANTIC_RAG;
 
@@ -434,9 +434,7 @@ function parseRouterJson(content, question = "") {
       resolvedRoute === ROUTES.HYBRID
     ) {
       if (!subIntent) {
-        subIntent = classifyStructuralSubIntent(
-          rewrittenQuery || question
-        );
+        subIntent = classifyStructuralSubIntent(rewrittenQuery || "");
       }
       if (resolvedRoute === ROUTES.STRUCTURAL) {
         resolvedRoute = ROUTES.HYBRID;
@@ -482,11 +480,14 @@ async function llmRoute(question, options = {}) {
     chatHistorySnippet = "",
     websiteLanguage = "en",
     openaiClient = null,
+    logOpenAIUsage = null,
+    routerModel = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano",
   } = options;
 
   const client =
     openaiClient ||
     new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const modelName = routerModel || process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano";
 
 //   const systemPrompt = `You are a query router for a multilingual customer-support chatbot.
 
@@ -590,7 +591,7 @@ Respond with JSON only:
 
   try {
     const response = await client.chat.completions.create({
-      model: ROUTER_MODEL,
+      model: modelName,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent },
@@ -603,8 +604,21 @@ Respond with JSON only:
       question: question.substring(0, 80),
       content: response.choices[0]?.message?.content,
     });
+    if (logOpenAIUsage && response?.usage) {
+      try {
+        await logOpenAIUsage({
+          usage: response.usage,
+          modelName,
+          type: "intent",
+        });
+      } catch (logError) {
+        console.warn(
+          `[QueryRouter] Error logging routing usage: ${logError.message}`
+        );
+      }
+    }
 
-    return parseRouterJson(response.choices[0]?.message?.content, question);
+    return parseRouterJson(response.choices[0]?.message?.content);
   } catch (error) {
     console.error("[QueryRouter] LLM routing failed:", error.message);
     return buildRouteResult({
@@ -623,6 +637,8 @@ async function routeQuery(question, options = {}) {
     chatMessages = [],
     websiteLanguage = "en",
     openaiClient = null,
+    logOpenAIUsage,
+    routerModel = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano",
   } = options;
 
   const ruleOutcome = applyRuleEngine(question, {
@@ -655,6 +671,8 @@ async function routeQuery(question, options = {}) {
     // chatHistorySnippet,
     websiteLanguage,
     openaiClient,
+    logOpenAIUsage,
+    routerModel,
   });
 }
 

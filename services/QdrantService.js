@@ -3,9 +3,11 @@ const { OpenAIEmbeddings } = require("@langchain/openai");
 const { QdrantClient } = require("@qdrant/js-client-rest");
 // const UsageTrackingService = require("./UsageTrackingService")
 const {logOpenAIUsage , logQdrantUsage} = require('../services/UsageTrackingService');
+const { getModelForCategory } = require("./aiModelService");
 const { v4: uuidv4 } = require("uuid");
+const { encoding_for_model } = require("tiktoken");
 
-const EMBEDDING_MODEL =
+const DEFAULT_EMBEDDING_MODEL =
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
 const EMBEDDING_DIMENSION = parseInt(
   process.env.OPENAI_EMBEDDING_DIMENSION || "1536",
@@ -38,14 +40,81 @@ class QdrantVectorStoreManager {
       apiKey: process.env.QDRANT_API_KEY,
     });
 
-    this.embeddings = new OpenAIEmbeddings({
-      openAIApiKey: process.env.OPENAI_API_KEY,
-      modelName: EMBEDDING_MODEL,
-    });
+    this.embeddingModelName = DEFAULT_EMBEDDING_MODEL;
+    this.embeddings = null;
+    this.embeddingInitPromise = null;
 
-    console.log(
-      `QdrantVectorStoreManager initialized for collection "${this.collectionName}" using embedding model "${EMBEDDING_MODEL}"`
-    );
+    this.embeddingInitPromise = this.initializeEmbeddings();
+  }
+
+  async initializeEmbeddings(forceRefresh = false) {
+    try {
+      const modelRecord = await getModelForCategory("embedding").catch((error) => {
+        console.warn(
+          `Unable to fetch embedding model from aiModelService, using fallback: ${error.message}`
+        );
+        return null;
+      });
+
+      const modelName =
+        modelRecord?.model || process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+
+      if (!forceRefresh && this.embeddings && this.embeddingModelName === modelName) {
+        return;
+      }
+
+      this.embeddingModelName = modelName;
+      this.embeddings = new OpenAIEmbeddings({
+        openAIApiKey: process.env.OPENAI_API_KEY,
+        modelName: this.embeddingModelName,
+      });
+
+      console.log(
+        `QdrantVectorStoreManager initialized for collection "${this.collectionName}" using embedding model "${this.embeddingModelName}"`
+      );
+    } catch (error) {
+      console.warn(
+        `Failed to initialize embedding model, falling back to default: ${error.message}`
+      );
+      if (!forceRefresh && this.embeddings) {
+        return;
+      }
+      this.embeddingModelName = DEFAULT_EMBEDDING_MODEL;
+      this.embeddings = new OpenAIEmbeddings({
+        openAIApiKey: process.env.OPENAI_API_KEY,
+        modelName: this.embeddingModelName,
+      });
+    }
+  }
+
+  async ensureEmbeddingsReady() {
+    try {
+      const modelRecord = await getModelForCategory("embedding").catch((error) => {
+        console.warn(
+          `Unable to fetch embedding model from aiModelService while ensuring readiness: ${error.message}`
+        );
+        return null;
+      });
+
+      const modelName =
+        modelRecord?.model || process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+
+      if (this.embeddings && this.embeddingModelName === modelName) {
+        return;
+      }
+
+      if (!this.embeddingInitPromise || this.embeddingModelName !== modelName) {
+        this.embeddingInitPromise = this.initializeEmbeddings(true);
+      }
+
+      await this.embeddingInitPromise;
+    } catch (error) {
+      console.warn(
+        `Failed to ensure embedding model readiness, falling back to default: ${error.message}`
+      );
+      this.embeddingInitPromise = this.initializeEmbeddings(true);
+      await this.embeddingInitPromise;
+    }
   }
 
   // generateVectorId(textContent, index = 0) {
@@ -55,44 +124,95 @@ class QdrantVectorStoreManager {
   // }
 
   async upsertDocuments(documents, userId, options = {}) {
-    const { onProgress } = options;
+    const { onProgress, agentId } = options;
     if (!documents || documents.length === 0) {
       console.log("No documents provided to upsert.");
       return { success: true, vectorCount: 0 };
     }
 
     try {
-      const contents = documents.map((doc) => doc.pageContent);
-      // console.log(`Generating embeddings for ${contents.length} documents...`);
+      await this.ensureEmbeddingsReady();
 
-      // Batch embedding requests for efficiency
-      const batchSize = 100; // OpenAI embedding batch limit
+      const modelRecord = await getModelForCategory("embedding").catch(() => null);
+      const embeddingModelName =
+          modelRecord?.model || this.embeddingModelName;
+      const inputCostPerMillion =
+          modelRecord?.inputCost || 0;
+
+      let enc;
       const embeddings = [];
-      // Removed redeclaration of totalUpserted to fix lint error
-
-      for (let i = 0; i < contents.length; i += batchSize) {
-        const batch = contents.slice(i, i + batchSize);
-        // console.log(`Processing embedding batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(contents.length / batchSize)}`);
-        const batchEmbeddings = await this.embeddings.embedDocuments(batch);
-        // const tokens = batchEmbeddings.reduce((sum, embedding) => sum + embedding.tokens, 0);
-        const tokens = batch.reduce((sum, text) => {
-          if (typeof text === 'string' && text.length > 0) {
-            return sum + Math.ceil(text.length / 4);
-          }
-          return sum;
-        }, 0);
-        if (tokens > 0) {
-          logOpenAIUsage({userId, tokens, requests:1});
+      try {
+        try {
+          enc = encoding_for_model(embeddingModelName || "text-embedding-3-small");
+        } catch (encInitError) {
+          console.warn(`[QdrantService] Failed to init tokenizer, will fall back to char estimate: ${encInitError.message}`);
+          enc = null;
         }
-        
-        embeddings.push(...batchEmbeddings);
 
-        if (onProgress) {
-          await onProgress({
-            step: "embedding",
-            embedded: Math.min(i + batch.length, contents.length),
-            total: contents.length,
-          });
+        const contents = documents.map((doc) => doc.pageContent);
+        // console.log(`Generating embeddings for ${contents.length} documents...`);
+
+        // Batch embedding requests for efficiency
+        const batchSize = 100; // OpenAI embedding batch limit
+        // const embeddings = [];
+        // Removed redeclaration of totalUpserted to fix lint error
+
+        for (let i = 0; i < contents.length; i += batchSize) {
+          const batch = contents.slice(i, i + batchSize);
+          // console.log(`Processing embedding batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(contents.length / batchSize)}`);
+          const batchEmbeddings = await this.embeddings.embedDocuments(batch);
+          
+          const totalInputTokens = batch.reduce((sum, text) => {
+              if (typeof text !== 'string' || text.length === 0) return sum;
+              try {
+                if (enc) return sum + enc.encode(text).length;
+                return sum + Math.ceil(text.length / 4);  
+              } catch {
+                return sum + Math.ceil(text.length / 4); // per-string fallback
+              }
+          }, 0);
+          
+          if (totalInputTokens > 0) {
+            try {
+              // const modelRecord = await getModelForCategory("embedding").catch(() => null);
+              // const embeddingModelName = modelRecord?.model || this.embeddingModelName;
+              // const inputCostPerMillion = modelRecord?.inputCost || 0;
+              const inputCost = (totalInputTokens / 1000000) * inputCostPerMillion;
+              
+              logOpenAIUsage({
+                userId,
+                agentId,
+                model: embeddingModelName,
+                type: 'embedding',
+                inputTokens: totalInputTokens,
+                outputTokens: 0,
+                cacheTokens: 0,
+                totalTokens: totalInputTokens,
+                inputCost,
+                outputCost: 0,
+                cacheCost: 0,
+                totalCost: inputCost,
+              }).catch((logErr) => {
+                console.warn(`[QdrantService] Error logging embedding usage: ${logErr.message}`);
+              });
+            } catch (logError) {
+              console.warn(`[QdrantService] Error logging embedding usage: ${logError.message}`);
+            }
+          }
+          
+          embeddings.push(...batchEmbeddings);
+
+          if (onProgress) {
+            await onProgress({
+              step: "embedding",
+              embedded: Math.min(i + batch.length, contents.length),
+              total: contents.length,
+            });
+          }
+        }
+      } finally {
+        if (enc) {
+          enc.free();
         }
       }
 

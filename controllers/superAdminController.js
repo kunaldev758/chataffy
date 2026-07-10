@@ -19,6 +19,9 @@ const {
 } = require("../constants/superAdminCookie");
 const User = require("../models/User");
 const ImpersonationSession = require("../models/ImpersonationSession");
+const {AiModelsCategory,AiModel} = require("../models/AiModel");
+const { default: mongoose } = require("mongoose");
+const { clearModelCache } = require("../services/aiModelService");
 
 // SuperAdmin login
 module.exports.superAdminLogin = async (req, res) => {
@@ -240,13 +243,17 @@ module.exports.getDashboardData = async (req, res) => {
       });
     }
 
-    // 10. OpenAI Usage (all users)
-    const openAIUsageAgg = await UsageTrackingService.getOpenAIUsage(undefined);
-    const openAIUsage = openAIUsageAgg ? openAIUsageAgg : {
-      totalTokens: 0,
-      totalCost: 0,
-      totalRequests:0
+    // 10. OpenAI Usage (all users) — overall totals + per-type breakdown
+    const [openAIUsageAgg, openAIUsageByTypeAgg] = await Promise.all([
+      UsageTrackingService.getOpenAIUsage(undefined),
+      UsageTrackingService.getOpenAIUsageByType(undefined),
+    ]);
+    const openAIUsage = openAIUsageAgg || {
+      totalTokens: 0, totalCost: 0, totalRequests: 0,
+      totalInputTokens: 0, totalOutputTokens: 0, totalCacheTokens: 0,
+      totalInputCost: 0, totalOutputCost: 0, totalCacheCost: 0,
     };
+    const openAIUsageByType = openAIUsageByTypeAgg || { byType: {}, totals: {} };
 
     // 11. Qdrant Usage (all collections)
     const qdrantUsageAgg = await UsageTrackingService.getQdrantUsage(undefined);
@@ -312,8 +319,19 @@ module.exports.getDashboardData = async (req, res) => {
         last7Days
       },
       openAIUsage: {
+        // Grand totals across all types
+        totalInputTokens: openAIUsage.totalInputTokens || 0,
+        totalOutputTokens: openAIUsage.totalOutputTokens || 0,
+        totalCacheTokens: openAIUsage.totalCacheTokens || 0,
         totalTokens: openAIUsage.totalTokens || 0,
-        totalCost: openAIUsage.totalCost || 0
+        totalInputCost: openAIUsage.totalInputCost || 0,
+        totalOutputCost: openAIUsage.totalOutputCost || 0,
+        totalCacheCost: openAIUsage.totalCacheCost || 0,
+        totalCost: openAIUsage.totalCost || 0,
+        totalRequests: openAIUsage.totalRequests || 0,
+        
+        // Full dynamic breakdown for any custom categories added by the super admin
+        byType: openAIUsageByType.byType || {},
       },
       qdrantUsage: {
         totalVectorsAdded: qdrantUsage.totalVectorsAdded || 0,
@@ -762,3 +780,240 @@ module.exports.directClientLogin = async (req, res) => {
   }
 };
 
+// ================================ AI Models ================================
+module.exports.getAllAiModels = async (req, res) => {
+  try {
+    const aiModels = await AiModel.find({}).lean().populate("categories").lean();
+    if(!aiModels || aiModels.length === 0) {
+      return res.status(404).json({ message: "No AI models found" });
+    }
+    res.status(200).json({
+      success: true,
+      data: aiModels,
+    });
+  } catch (error) {
+    console.error("Error fetching ai models:", error);
+    res.status(500).json({ message: "Error fetching ai models" });
+  }
+};
+
+
+module.exports.createAiModel = async (req, res) => {
+  try {
+    const {
+      model,
+      status,
+      inputCost,
+      outputCost,
+      cacheCost,
+      categories,
+    } = req.body;
+
+    const validation = validateAiModel(model, status, inputCost, outputCost, cacheCost, categories);
+    if (!validation.success) {
+      return res.status(400).json({ message: validation.message });
+    }
+
+    const aiModel = await AiModel.create({
+      model,
+      status,
+      inputCost,
+      outputCost,
+      cacheCost,
+      categories,
+    });
+
+    if (categories?.length) {
+      await AiModel.updateMany(
+        { _id: { $ne: aiModel._id } },
+        { $pull: { categories: { $in: categories } } }
+      );
+    }
+
+    clearModelCache();
+
+    res.status(200).json({ success: true, data: aiModel });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: "Ai model already exists" });
+    }
+    console.error("Error creating ai model:", error);
+    res.status(500).json({ message: "Error creating ai model" });
+  }
+};
+
+module.exports.updateAiModel = async (req, res) => {
+  try {
+    const { modelId, model, status, inputCost, outputCost, cacheCost, categories } = req.body;
+
+    const validation = validateAiModel(model, status, inputCost, outputCost, cacheCost, categories);
+    if (!validation.success) {
+      return res.status(400).json({ message: validation.message });
+    }
+
+    const updated = await AiModel.findByIdAndUpdate(
+      modelId,
+      { model, status, inputCost, outputCost, cacheCost, categories },
+      { new: true }
+    );
+
+    if (categories?.length && updated) {
+      // For each category this model just claimed as default,
+      // pull it out of defaultFor on every other model
+      await AiModel.updateMany(
+        { _id: { $ne: updated._id } },
+        { $pull: { categories: { $in: categories } } }
+      );
+    }
+
+    clearModelCache();
+
+    res.status(200).json({ success: true, data: updated });
+  } catch (error) {
+    console.error("Error updating ai model:", error);
+    if (error.code === 11000) return res.status(400).json({ message: "Ai model already exists" });
+    res.status(500).json({ message: "Error updating ai model" });
+  }
+};
+
+module.exports.deleteAiModel = async (req, res) => {
+  try {
+    const { modelId } = req.params;
+    const deletedModel = await AiModel.findByIdAndDelete(modelId);
+    if (!deletedModel) {
+      return res.status(404).json({ message: "Ai model not found" });
+    }
+    clearModelCache();
+    res.status(200).json({ success: true, message: "Ai model deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting ai model:", error);
+    res.status(500).json({ message: error.message || "Error deleting ai model" });
+  }
+};
+
+
+function validateAiModel(model, status, inputCost, outputCost, cacheCost, categories) {
+  if (!model || !status) {
+    return { success: false, message: "Model and status are required" };
+  }
+
+  if (inputCost == null || outputCost == null || cacheCost == null) {
+    return { success: false, message: "All cost fields are required" };
+  }
+
+  if (!categories) {
+    return { success: false, message: "Categories are required" };
+  }
+
+  if(status !== "active" && status !== "inactive") {
+    return { success: false, message: "Status must be active or inactive" };
+  }
+
+  if(inputCost < 0 || outputCost < 0 || cacheCost < 0) {
+    return { success: false, message: "Costs must not be negative" };
+  }
+
+  if(categories.length === 0) {
+    return { success: false, message: "Categories must be an array" };
+  }
+
+  if(categories.some((c) => !mongoose.Types.ObjectId.isValid(c))) {
+    return { success: false, message: "Categories must be an array of valid ObjectIds" };
+  }
+
+  if(categories.some((c) => c.length === 0)) {
+    return { success: false, message: "Categories must be an array of non-empty strings" };
+  }
+
+  return { success: true, message: "Validation successful" };
+}
+
+
+// ===================== AI Model Categories =====================
+module.exports.getAllAiModelCategories = async (req, res) => {
+  try {
+    const categories = await AiModelsCategory.find({}).lean();
+    res.status(200).json({ success: true, data: categories });
+  } catch (error) {
+    console.error("Error fetching ai model categories:", error);
+    res.status(500).json({ message: "Error fetching ai model categories" });
+  }
+};
+
+module.exports.createAiModelCategory = async (req, res) => {
+  try {
+    const rawName = req.body.category || req.body.name;
+    if (!rawName || typeof rawName !== "string" || rawName.trim().length === 0) {
+      return res.status(400).json({ message: "Category name is required and must be a non-empty string" });
+    }
+
+    const category = await AiModelsCategory.create({ category: rawName.trim() });
+    clearModelCache();
+    res.status(200).json({ success: true, data: category });
+  } catch (error) {
+    console.error("Error creating ai model category:", error);
+    if(error.code === 11000) {
+      return res.status(400).json({ message: "Category with this name already exists" });
+    }
+    res.status(500).json({ message: "Error creating ai model category" });
+  }
+};
+
+module.exports.updateAiModelCategory = async (req, res) => {
+  try {
+    const { categoryId } = req.body;
+    const rawName = req.body.category || req.body.name;
+    if (!rawName || typeof rawName !== "string" || rawName.trim().length === 0) {
+      return res.status(400).json({ message: "Category name is required and must be a non-empty string" });
+    }
+
+    const existingCategory = await AiModelsCategory.findOne({ category: rawName.trim(), _id: { $ne: categoryId } }).lean();
+    if (existingCategory) {
+      return res.status(400).json({ message: "Another category with this name already exists" });
+    }
+
+    const updatedCategory = await AiModelsCategory.findByIdAndUpdate(
+      categoryId,
+      { category: rawName.trim() },
+      { new: true }
+    );
+
+    if (!updatedCategory) {
+      return res.status(404).json({ message: "Category not found" });
+    }
+
+    clearModelCache();
+
+    res.status(200).json({ success: true, data: updatedCategory });
+  } catch (error) {
+    console.error("Error updating ai model category:", error);
+    res.status(500).json({ message: "Error updating ai model category" });
+  }
+};
+
+module.exports.deleteAiModelCategory = async (req, res) => {
+  try {
+    const { categoryId } = req.params;
+
+    const category = await AiModelsCategory.findById(categoryId).lean();
+    if (!category) {
+      return res.status(404).json({ message: "Category not found" });
+    }
+
+    // Remove this category from all AiModels that reference it
+    await AiModel.updateMany(
+      { categories: categoryId },
+      { $pull: { categories: categoryId } }
+    );
+
+    // Delete the category
+    await AiModelsCategory.findByIdAndDelete(categoryId);
+
+    clearModelCache();
+
+    res.status(200).json({ success: true, message: "Category deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting ai model category:", error);
+    res.status(500).json({ message: "Error deleting ai model category" });
+  }
+};

@@ -64,7 +64,7 @@ const {
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 // Define models used in this service
-const EMBEDDING_MODEL =
+const DEFAULT_EMBEDDING_MODEL =
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
 const CHAT_MODEL_PREMIUM =
   process.env.OPENAI_CHAT_MODEL_PREMIUM ||
@@ -258,27 +258,122 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // Initialize Qdrant client
 const qdrantClient = new QdrantClient({
-  url:
-    process.env.QDRANT_URL ||
-    "https://8659fcda-ff81-4896-8786-55418a544b55.eu-central-1-0.aws.cloud.qdrant.io",
+  url: process.env.QDRANT_URL,
   apiKey:
-    process.env.QDRANT_API_KEY ||
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.HRXxjdjkAjB3phjpoI9inwpfxo8Bv8DjQ11EMdiUrGk",
+    process.env.QDRANT_API_KEY 
 });
 
 class QuestionAnsweringSystem {
-  constructor() {
-    // Explicitly set the model in OpenAIEmbeddings
-    this.embeddingModel = new OpenAIEmbeddings({
-      openAIApiKey: OPENAI_API_KEY,
-      modelName: EMBEDDING_MODEL,
-    });
-
+   constructor() {
+    this.embeddingModel = null;
+    this.currentModelName = null;
     this.qdrantClient = qdrantClient;
   }
 
   // check 2 ---->
 
+  async getEmbeddingModel() {
+    const modelRecord = await getModelForCategory("embedding");
+    const modelName =
+      modelRecord?.model ||
+      process.env.OPENAI_EMBEDDING_MODEL ||
+      DEFAULT_EMBEDDING_MODEL;
+
+    if (
+      this.embeddingModel &&
+      this.currentModelName === modelName
+    ) {
+      return this.embeddingModel;
+    }
+
+    console.log(`Switching embedding model to ${modelName}`);
+
+    this.embeddingModel = new OpenAIEmbeddings({
+      openAIApiKey: OPENAI_API_KEY,
+      modelName,
+    });
+
+    this.currentModelName = modelName;
+
+    return this.embeddingModel;
+  }
+
+  async getChatModelName() {
+    try {
+      const modelRecord = await getModelForCategory("chat");
+      return modelRecord?.model || process.env.OPENAI_CHAT_MODEL || DEFAULT_CHAT_MODEL;
+    } catch (error) {
+      console.warn(
+        `[QueryController] Failed to resolve chat model, falling back to default: ${error.message}`
+      );
+      return process.env.OPENAI_CHAT_MODEL || DEFAULT_CHAT_MODEL;
+    }
+  }
+
+  async logOpenAIChatUsage({
+    userId,
+    agentId,
+    conversationId,
+    usage,
+    modelName,
+    type = "chat",
+  }) {
+    if (!usage) {
+      return;
+    }
+
+    // Fetch model record based on type category (chat, embedding, intent, etc.)
+    let modelRecord = null;
+    try {
+      modelRecord = await getModelForCategory(type);
+    } catch (error) {
+      console.warn(
+        `Unable to fetch model record for category "${type}": ${error.message}`
+      );
+    }
+
+    const inputCostPerMillion = modelRecord?.inputCost || 0;
+    const outputCostPerMillion = modelRecord?.outputCost || 0;
+    const cacheCostPerMillion = modelRecord?.cacheCost || 0;
+
+    const promptTokens = usage.prompt_tokens || 0;
+    const completionTokens = usage.completion_tokens || 0;
+    const cacheTokens = usage?.prompt_tokens_details?.cached_tokens ?? 0;
+
+    const uncachedPromptTokens = Math.max(0, promptTokens - cacheTokens);
+
+    const inputCost =
+      (uncachedPromptTokens / 1000000) * inputCostPerMillion;
+
+    const cacheCost =
+      (cacheTokens / 1000000) * cacheCostPerMillion;
+
+    const outputCost =
+      (completionTokens / 1000000) * outputCostPerMillion;
+
+    const totalCost = inputCost + cacheCost + outputCost;
+
+    await logOpenAIUsage({
+      userId,
+      agentId,
+      conversationId,
+      model: modelName,
+      type,
+      inputTokens: promptTokens,
+      outputTokens: completionTokens,
+      cacheTokens: cacheTokens,
+      totalTokens: usage.total_tokens || 0,
+      inputCost,
+      outputCost,
+      cacheCost,
+      totalCost: inputCost + outputCost + cacheCost,
+    });
+  }
+
+
+
+  // check 2 ----> 
+  
   async getChatHistory(conversationId) {
     try {
       if (!conversationId) {
@@ -2534,6 +2629,13 @@ ${answerInstructions}`;
         agentData,
       });
 
+      // await this.getChatModelName({
+      //   agentId,
+      //   websiteData,
+      //   query: question,
+      //   conversationId,
+      // });
+
       if (
         !clientData ||
         !agentData.qdrantIndexName ||
@@ -2799,10 +2901,28 @@ ${answerInstructions}`;
       let questionEmbedding = null;
       const getQuestionEmbedding = async () => {
         if (!questionEmbedding) {
-          questionEmbedding =
-            await this.embeddingModel.embedQuery(embeddingQuery);
-          if (!questionEmbedding) {
+          const embeddingModel = await this.getEmbeddingModel();
+          const embeddingResponse = await embeddingModel.embedQuery(embeddingQuery);
+          if (!embeddingResponse) {
             throw new Error("Failed to generate question embedding.");
+          }
+          // Handle response object with usage or direct embedding
+          questionEmbedding = embeddingResponse.embedding || embeddingResponse;
+          
+          // Log embedding API usage if available
+          if (embeddingResponse.usage) {
+            try {
+              this.logOpenAIChatUsage({
+                userId,
+                agentId,
+                conversationId,
+                usage: embeddingResponse.usage,
+                modelName: embeddingResponse.model || "embedding",
+                type: "embedding"
+              });
+            } catch (logError) {
+              console.warn(`[QueryController] Error logging embedding usage: ${logError.message}`);
+            }
           }
         }
         return questionEmbedding;

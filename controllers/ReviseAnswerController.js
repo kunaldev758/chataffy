@@ -5,6 +5,7 @@ const { v4: uuidv4 } = require("uuid");
 const Agent = require("../models/Agent");
 const Client = require("../models/Client");
 const { logOpenAIUsage, logQdrantUsage } = require("../services/UsageTrackingService");
+const { getModelForCategory } = require("../services/aiModelService");
 
 const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
 const EMBEDDING_DIMENSION = parseInt(process.env.OPENAI_EMBEDDING_DIMENSION || "1536", 10);
@@ -62,9 +63,31 @@ const reviseAnswer = async (req, res) => {
     // Generate embedding
     const [vector] = await embeddings.embedDocuments([textToEmbed]);
 
-    const tokens = Math.ceil(textToEmbed.length / 4);
-    if (tokens > 0) {
-      logOpenAIUsage({ userId, agentId, tokens, requests: 1 });
+    const inputTokens = Math.ceil(textToEmbed.length / 4);
+    if (inputTokens > 0) {
+      try {
+        const modelRecord = await getModelForCategory("embedding").catch(() => null);
+        const embeddingModel = modelRecord?.model || "text-embedding-3-small";
+        const inputCostPerMillion = modelRecord?.inputCost || 0;
+        const inputCost = (inputTokens / 1000000) * inputCostPerMillion;
+
+        await logOpenAIUsage({
+          userId,
+          agentId,
+          model: embeddingModel,
+          type: 'embedding',
+          inputTokens,
+          outputTokens: 0,
+          cacheTokens: 0,
+          totalTokens: inputTokens,
+          inputCost,
+          outputCost: 0,
+          cacheCost: 0,
+          totalCost: inputCost,
+        });
+      } catch (logError) {
+        console.warn(`[ReviseAnswer] Error logging embedding usage: ${logError.message}`);
+      }
     }
 
     const point = {
