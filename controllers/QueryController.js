@@ -10,6 +10,7 @@ const Agent = require("../models/Agent");
 const WebsiteData = require("../models/WebsiteData");
 const HumanAgent = require("../models/HumanAgent");
 const { logOpenAIUsage } = require("../services/UsageTrackingService");
+const { getModelForCategory } = require("../services/aiModelService");
 const {
   routeQuery,
   ROUTES,
