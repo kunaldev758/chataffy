@@ -1244,13 +1244,32 @@ async bulkInsertUrls(userId,agentId, urls) {
       let searchOr = null;
       if (searchTerm) {
         const escaped = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        searchOr = [
-          { title: { $regex: escaped, $options: "i" } },
-          { "webPage.url": { $regex: escaped, $options: "i" } },
+        const urlRegex = { "webPage.url": { $regex: escaped, $options: "i" } };
+        const fileRegex = [
           { fileName: { $regex: escaped, $options: "i" } },
           { originalFileName: { $regex: escaped, $options: "i" } },
+        ];
+        const textRegex = [
+          { title: { $regex: escaped, $options: "i" } },
           { content: { $regex: escaped, $options: "i" } },
         ];
+
+        if (filterType === 0) {
+          // Web pages: match keyword in URL only (not page title or scraped content).
+          searchOr = [urlRegex];
+        } else if (filterType === 1) {
+          searchOr = fileRegex;
+        } else if (filterType === 2 || filterType === 3) {
+          searchOr = textRegex;
+        } else {
+          searchOr = [
+            { type: 0, ...urlRegex },
+            { type: 1, fileName: { $regex: escaped, $options: "i" } },
+            { type: 1, originalFileName: { $regex: escaped, $options: "i" } },
+            { type: { $in: [2, 3] }, title: { $regex: escaped, $options: "i" } },
+            { type: { $in: [2, 3] }, content: { $regex: escaped, $options: "i" } },
+          ];
+        }
       }
 
       const completedOrLegacy = {
