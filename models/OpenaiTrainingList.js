@@ -31,6 +31,44 @@ const trainingListSchema = new mongoose.Schema({
     title: String,
     content: String,
   
+    // Classification and metadata fields
+    entity_type: {
+      type: String,
+      default: "general",
+    },
+    entity_name: {
+      type: String,
+      default: null,
+    },
+    classification_confidence: {
+      type: Number,
+      default: null,
+    },
+    classification_reason: {
+      type: String,
+      default: null,
+    },
+    content_hash: {
+      type: String,
+      default: null,
+    },
+    attributes: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
+    search_terms: {
+      type: [String],
+      default: [],
+    },
+    language: {
+      type: String,
+      default: null,
+    },
+    is_active: {
+      type: Boolean,
+      default: true,
+    },
+
     // Common fields
     trainingStatus: {
       type: Number,

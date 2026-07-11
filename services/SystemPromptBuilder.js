@@ -158,6 +158,14 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
 - List **every** matching item from the knowledge base (up to ${countHint} if a number was requested, otherwise all found)
 - Each item: name, price (if shown), clickable link when URL is available
 - HTML: <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>
+- **Product Cards**: When recommending products, if an Image URL is available in the product details, format each product as a beautiful HTML product card inline instead of a plain list bullet:
+  <div style="border:1px solid #e2e8f0; border-radius:8px; padding:12px; margin-top:8px; width:180px; display:inline-block; vertical-align:top; margin-right:8px; font-family:inherit; box-shadow:0 1px 3px rgba(0,0,0,0.05); background:#ffffff;">
+    <a href="PRODUCT_URL" target="_blank" style="text-decoration:none; color:inherit; display:block;">
+      <img src="IMAGE_URL" style="width:100%; height:120px; object-fit:cover; border-radius:6px; margin-bottom:8px;" alt="Name" />
+      <div style="font-weight:600; font-size:12px; margin-bottom:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#1e293b;">Name</div>
+      <div style="color:#4686FE; font-weight:700; font-size:13px; margin-bottom:2px;">$Price</div>
+    </a>
+  </div>
 - Never say items/sizes are unavailable if they appear in the knowledge base or conversation history
 - You may use more than 2 sentences when listing multiple items
 - Do not invent products, sizes, or URLs; do not reference "the context" or "the provided context" in your response`;

@@ -1123,7 +1123,7 @@ class QuestionAnsweringSystem {
         await getQuestionEmbedding(),
         semanticTopK,
         userIdString,
-        { sizes: queryAttributes?.sizes },
+        { sizes: queryAttributes?.sizes, priceRange: queryAttributes?.priceRange },
       ),
       runKeyword
         ? this.structuralFetchByKeywords(
@@ -2054,6 +2054,32 @@ ${answerInstructions}`;
     }
   }
 
+  formatProductPayloadForContext(payload) {
+    if (payload.entity_type !== "product") return "";
+    
+    const attrs = payload.attributes || {};
+    let structured = `[PRODUCT DETAILS]\n`;
+    if (payload.entity_name) structured += `Name: ${payload.entity_name}\n`;
+    else if (payload.title) structured += `Name: ${payload.title}\n`;
+    
+    const price = payload.price || attrs.price;
+    if (price) {
+      structured += `Price: $${price}${attrs.currency ? ` ${attrs.currency}` : ""}\n`;
+    }
+    if (attrs.sku) structured += `SKU: ${attrs.sku}\n`;
+    if (attrs.availability) {
+      const avail = attrs.availability === "InStock" ? "In Stock" :
+                    attrs.availability === "OutOfStock" ? "Out of Stock" : attrs.availability;
+      structured += `Availability: ${avail}\n`;
+    }
+    if (attrs.brand) structured += `Brand: ${attrs.brand}\n`;
+    if (attrs.category) structured += `Category: ${attrs.category}\n`;
+    if (attrs.imageUrl) structured += `Image URL: ${attrs.imageUrl}\n`;
+    if (payload.url) structured += `Product URL: ${payload.url}\n`;
+    structured += `[END PRODUCT DETAILS]\n`;
+    return structured;
+  }
+
   // Context extraction for Qdrant results — always include source URL/title when available
   getRelevantContext(matches, options = {}) {
     const maxChunkChars = options.maxChunkChars ?? RAG_MAX_CHUNK_CHARS;
@@ -2067,6 +2093,13 @@ ${answerInstructions}`;
       const url = payload.url || "";
       const title = payload.title || url || "";
       if (!text) continue;
+
+      if (payload.entity_type === "product" && !text.includes("[PRODUCT DETAILS]")) {
+        const productInfo = this.formatProductPayloadForContext(payload);
+        if (productInfo) {
+          text = `${productInfo}${text}`;
+        }
+      }
 
       if (text.length > maxChunkChars) {
         text = `${text.slice(0, maxChunkChars)}…`;
@@ -2273,13 +2306,30 @@ ${answerInstructions}`;
           continue;
         }
 
-        const pageText = validChunks
+        let isProductPage = false;
+        let productPayload = null;
+        for (const p of validChunks) {
+          if (p.payload?.entity_type === "product") {
+            isProductPage = true;
+            productPayload = p.payload;
+            break;
+          }
+        }
+
+        let pageText = validChunks
           .map((p) => {
             let t = stripHtmlForContext(p.payload?.text || "");
             if (t.length > maxChunkChars) t = `${t.slice(0, maxChunkChars)}…`;
             return t;
           })
           .join("\n\n");
+
+        if (isProductPage && productPayload && !pageText.includes("[PRODUCT DETAILS]")) {
+          const productInfo = this.formatProductPayloadForContext(productPayload);
+          if (productInfo) {
+            pageText = `${productInfo}${pageText}`;
+          }
+        }
 
         const block = `Source: ${title} (${url})\n---\n${pageText}\n---`;
 
@@ -2383,6 +2433,8 @@ ${answerInstructions}`;
         .map((s) => s.replace(/\s/g, "").toLowerCase())
         .filter(Boolean);
 
+      const priceRange = options.priceRange;
+
       const buildFilter = (withSizeBoost = false) => {
         const must = [];
         if (userId) {
@@ -2391,12 +2443,37 @@ ${answerInstructions}`;
             match: { value: userId.toString() },
           });
         }
+
+        // Filter active chunks only
+        must.push({
+          key: "is_active",
+          match: { value: true },
+        });
+
         if (withSizeBoost && sizeTokens.length > 0) {
           must.push({
             key: "sizes",
             match: { any: sizeTokens },
           });
         }
+
+        // Filter by price range if specified
+        if (priceRange) {
+          const rangeObj = {};
+          if (priceRange.minPrice !== null && priceRange.minPrice !== undefined) {
+            rangeObj.gte = priceRange.minPrice;
+          }
+          if (priceRange.maxPrice !== null && priceRange.maxPrice !== undefined) {
+            rangeObj.lte = priceRange.maxPrice;
+          }
+          if (Object.keys(rangeObj).length > 0) {
+            must.push({
+              key: "price",
+              range: rangeObj,
+            });
+          }
+        }
+        
         return must.length > 0 ? { must } : undefined;
       };
 

@@ -98,6 +98,8 @@ function extractQueryAttributes({
   const wantsPrices =
     /\b(price|prices|cost|pricing|how\s+much)\b/i.test(q);
 
+  const priceRange = extractPriceRange(q);
+
   return {
     normalizedQuestion,
     retrievalQuery,
@@ -111,6 +113,7 @@ function extractQueryAttributes({
     route: routing.route || ROUTES.SEMANTIC_RAG,
     subIntent,
     userLanguage: routing.userLanguage || "en",
+    priceRange,
     flags: {
       wantsProductLinks,
       isCatalogQuery,
@@ -152,9 +155,40 @@ function isExplicitSizedCatalogQuery(question, queryAttributes) {
   return hasProductWord && hasListIntent;
 }
 
+function extractPriceRange(text) {
+  const q = (text || "").toLowerCase();
+  let maxPrice = null;
+  let minPrice = null;
+
+  // 1. Between $X and $Y
+  const betweenMatch = q.match(/\b(?:between|from)\s+\$?\s*(\d+(?:\.\d+)?)\s+(?:and|to)\s+\$?\s*(\d+(?:\.\d+)?)\b/);
+  if (betweenMatch) {
+    minPrice = parseFloat(betweenMatch[1]);
+    maxPrice = parseFloat(betweenMatch[2]);
+    return { minPrice, maxPrice };
+  }
+
+  // 2. Under $X
+  const underMatch = q.match(/\b(?:under|less\s+than|cheaper\s+than|max|maximum|below|<)\s+\$?\s*(\d+(?:\.\d+)?)\b/);
+  if (underMatch) {
+    maxPrice = parseFloat(underMatch[1]);
+    return { minPrice, maxPrice };
+  }
+
+  // 3. Over $X
+  const overMatch = q.match(/\b(?:over|more\s+than|above|min|minimum|greater\s+than|>)\s+\$?\s*(\d+(?:\.\d+)?)\b/);
+  if (overMatch) {
+    minPrice = parseFloat(overMatch[1]);
+    return { minPrice, maxPrice };
+  }
+
+  return null;
+}
+
 module.exports = {
   extractQueryAttributes,
   isRagRoute,
   needsKeywordRetrieval,
   isExplicitSizedCatalogQuery,
+  extractPriceRange,
 };

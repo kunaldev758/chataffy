@@ -1,57 +1,80 @@
 require("dotenv").config();
-const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter");
 const QdrantVectorStoreManager = require("./QdrantService");
+const { chunkContentByStructure } = require("../utils/structureChunker");
 
 class BatchTrainingService {
   constructor() {
-    // Increased chunk size for better semantic context
-    // 500 tokens = ~2000 chars provides better context for embeddings
-    this.CHUNK_SIZE = 500; // tokens (increased from 300)
-    this.CHUNK_OVERLAP = 100; // tokens (increased from 50 for better continuity)
-    this.CHARS_PER_TOKEN = 4; // Rough estimate
+    // Keep constructor for backward compatibility
   }
 
-  async deleteItemFromVectorStore(userId,agentId,url,type) {
-    try{
+  async deleteItemFromVectorStore(userId, agentId, url, type) {
+    try {
+      const qdrantIndexName = `${userId}-${agentId}`; // standard fallback structure
+      const vectorStore = new QdrantVectorStoreManager(qdrantIndexName);
       await vectorStore.deleteByFields({
-        user_id: userId,
-        agent_id: agentId,
+        user_id: userId?.toString(),
+        agent_id: agentId?.toString(),
         url: url,
         type: type,
       });
-    } catch(error){
+    } catch (error) {
       return error;
     }
   }
 
-
   async processDocumentAndTrain(documents, userId, agentId, qdrantIndexName, options = {}) {
     const { onProgress } = options;
     try {
-      const splitter = new RecursiveCharacterTextSplitter({
-        chunkSize: this.CHUNK_SIZE * this.CHARS_PER_TOKEN,
-        chunkOverlap: this.CHUNK_OVERLAP * this.CHARS_PER_TOKEN,
-        separators: ["\n## ", "\n### ", "\n\n", "\n", ". ", " ", ""]
-      });
-
       let allChunks = [];
       let chunkCountPerUrl = {};
       const docTotal = documents.length;
+      
+      const vectorStore = new QdrantVectorStoreManager(qdrantIndexName);
+      await vectorStore.createCollection();
 
       for (let docIndex = 0; docIndex < documents.length; docIndex++) {
         const doc = documents[docIndex];
-        const chunks = await splitter.createDocuments([doc.content]);
-        chunkCountPerUrl[doc?.originalUrl] = chunks.length;
+        
+        // Delete old vectors in Qdrant for this specific item before re-indexing to avoid orphaned chunks
+        try {
+          if (doc.type === 0 && doc.originalUrl) {
+            // Delete webpage vectors by URL
+            await vectorStore.deleteByFields({
+              user_id: userId?.toString(),
+              agent_id: agentId?.toString(),
+              url: doc.originalUrl,
+            });
+          } else if (doc.metadata?.title) {
+            // Delete file/snippet/FAQ vectors by title
+            await vectorStore.deleteByFields({
+              user_id: userId?.toString(),
+              agent_id: agentId?.toString(),
+              title: doc.metadata.title,
+            });
+          }
+        } catch (deleteError) {
+          console.warn(`[BatchTrainingService] Error clearing old vectors for ${doc.originalUrl || doc.metadata?.title}: ${deleteError.message}`);
+        }
+
+        // Structure-aware chunking based on entity_type
+        const entityType = doc.metadata?.entity_type || (doc.type === 3 ? "faq" : "general");
+        const attributes = doc.metadata?.attributes || {};
+        const entityName = doc.metadata?.entity_name || doc.metadata?.title || "";
+        const url = doc.metadata?.url || doc.originalUrl || "";
+
+        const chunks = chunkContentByStructure(doc.content, entityType, attributes, entityName, url);
+        chunkCountPerUrl[doc?.originalUrl || doc.metadata?.title] = chunks.length;
 
         const enhancedChunks = chunks.map((chunk, index) => ({
-          ...chunk,
+          pageContent: chunk.text,
           metadata: {
             ...doc.metadata,
             user_id: userId?.toString(), // Ensure user_id is always a string for Qdrant filtering
             agent_id: agentId?.toString(),
             chunk_index: index,
             total_chunks: chunks.length,
-            created_at: new Date().toISOString(),
+            heading_path: chunk.heading_path || "",
+            created_at: doc.metadata?.created_at || new Date().toISOString(),
           },
         }));
 
@@ -67,8 +90,15 @@ class BatchTrainingService {
         }
       }
 
-      const vectorStore = new QdrantVectorStoreManager(qdrantIndexName);
-      await vectorStore.createCollection();
+      if (allChunks.length === 0) {
+        console.log("No chunks generated for indexing.");
+        return {
+          success: true,
+          totalChunks: 0,
+          chunkCountPerUrl,
+          failedUrls: [],
+        };
+      }
 
       const upsertResult = await vectorStore.upsertDocuments(allChunks, userId, {
         agentId,
@@ -98,7 +128,8 @@ class BatchTrainingService {
             }
           : undefined,
       });
-      console.log("Upsert result response",upsertResult);
+
+      console.log("Upsert result response", upsertResult);
       return {
         success: upsertResult?.success,
         totalChunks: allChunks?.length,
@@ -108,10 +139,11 @@ class BatchTrainingService {
         estimatedCost: upsertResult?.estimatedCost
       };
     } catch (error) {
-      return{
-        success:false,
-        error:error.message
-      }
+      console.error("[BatchTrainingService] training error:", error);
+      return {
+        success: false,
+        error: error.message
+      };
     }
   }
 }

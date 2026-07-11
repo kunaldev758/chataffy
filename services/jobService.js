@@ -11,6 +11,10 @@ const webScraper = require("./WebScraper.js");
 const urlModule = require("url");
 const TurndownService = require("turndown");
 const QdrantVectorStoreManager = require("./QdrantService");
+const crypto = require("crypto");
+const { detectContentType } = require("../utils/contentTypeDetector");
+const { refineHtmlContent } = require("../utils/readabilityRefiner");
+const { classifyContent } = require("./GeminiClassifierService");
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
 const {
   isScrapableWebUrl,
@@ -932,80 +936,145 @@ new Worker(
             maxRetries: 2,
           });
 
-          const processResult = await processWebPage(
-            url,
-            sourceCode,
-            footerCache,
-          );
-          if (!processResult.content) {
-            await TrainingModel.create({
-              userId,
-              agentId,
-              type: 0,
-              content: "",
-              dataSize: 0,
-              trainingStatus: 2,
-              error: "No data found",
-              "webPage.url": url,
-              chunkCount: 0,
-              lastEdit: Date.now(),
-            });
+          const existingDoc = await TrainingModel.findOne({
+            userId,
+            agentId,
+            "webPage.url": url,
+          }).select("content_hash trainingStatus").lean();
+
+          const processResult = refineHtmlContent(sourceCode, url);
+          if (!processResult || !processResult.markdown) {
+            await TrainingModel.findOneAndUpdate(
+              { userId, agentId, "webPage.url": url },
+              {
+                $set: {
+                  type: 0,
+                  content: "",
+                  dataSize: 0,
+                  trainingStatus: 2,
+                  error: "Failed to process/refine web page content",
+                  "webPage.url": url,
+                  chunkCount: 0,
+                  lastEdit: Date.now(),
+                  is_active: false,
+                },
+              },
+              { upsert: true, setDefaultsOnInsert: true }
+            );
             await Url.updateOne(
               { url: url, agentId: agentId },
               {
                 $set: {
                   trainStatus: 2,
-                  error: "Failed to process/minify web page content",
+                  error: "Failed to process/refine web page content",
                 },
               },
             );
             continue;
           }
 
-          const {
-            content,
-            title,
-            metaDescription,
-            webPageURL,
-            websiteMetadata,
-          } = processResult;
+          const { markdown, title, metaDescription, productMetadata } = processResult;
+          const contentHash = crypto.createHash("md5").update(markdown).digest("hex");
 
-          // Store website metadata if extracted
-          // Priority: homepage always wins; otherwise use first URL (domain-based name)
-          if (websiteMetadata) {
-            const isHome = websiteMetadata._isHomepage === true;
-            const shouldStore =
-              isHome || (!metadataExtracted && !metadataFromHomepage);
+          // Step 8: Compare content_hash
+          if (existingDoc && existingDoc.content_hash === contentHash && existingDoc.trainingStatus === 1) {
+            console.log(`[jobService] Skipping URL ${url} because content hash is unchanged.`);
+            await Url.updateOne(
+              { url: url, agentId: agentId },
+              { $set: { trainStatus: 1 } }
+            );
+            continue;
+          }
 
-            if (shouldStore) {
-              try {
-                let websiteData = await WebsiteData.getOrCreate({
-                  userId,
-                  ...(agentId ? { agentId } : {}),
-                });
-                // Remove internal flag before storing
-                const { _isHomepage, ...cleanMetadata } = websiteMetadata;
-                await websiteData.updateData({
-                  ...cleanMetadata,
-                  website_url: cleanMetadata.website_url || url,
-                  domain: cleanMetadata.domain || new URL(url).hostname,
-                });
-                metadataExtracted = true;
-                if (isHome) metadataFromHomepage = true;
-                console.log(
-                  `[jobService] Stored website metadata for user ${userId} from ${url}`,
-                );
-              } catch (metadataError) {
-                console.error(
-                  `[jobService] Error storing website metadata:`,
-                  metadataError,
-                );
-                // Don't fail the job if metadata storage fails
-              }
+          // Step 3: Content Type Detection
+          const $ = cheerio.load(sourceCode);
+          const typeDetection = detectContentType($, url);
+          let entityType = typeDetection.entityType;
+          let schemaType = typeDetection.schemaType;
+          let confidence = typeDetection.confidence;
+          let reason = typeDetection.reason;
+
+          if (productMetadata && productMetadata.isProduct) {
+            entityType = "product";
+            confidence = 0.95;
+            reason = "Heuristic product metadata detected (price, sku or image)";
+          }
+
+          // Step 5: Classify with Gemini
+          const classification = await classifyContent({
+            content: markdown,
+            schemaType: schemaType,
+            url: url,
+          });
+
+          const finalEntityType = classification.entity_type || entityType;
+          const finalEntityName = classification.entity_name || title;
+          const finalAttributes = classification.attributes || {};
+          // Merge price/imageUrl/sku from parser if not extracted by Gemini
+          if (productMetadata) {
+            if (productMetadata.price !== null && finalAttributes.price === undefined) {
+              finalAttributes.price = productMetadata.price;
+            }
+            if (productMetadata.currency && !finalAttributes.currency) {
+              finalAttributes.currency = productMetadata.currency;
+            }
+            if (productMetadata.sku && !finalAttributes.sku) {
+              finalAttributes.sku = productMetadata.sku;
+            }
+            if (productMetadata.imageUrl && !finalAttributes.imageUrl) {
+              finalAttributes.imageUrl = productMetadata.imageUrl;
+            }
+            if (productMetadata.availability && !finalAttributes.availability) {
+              finalAttributes.availability = productMetadata.availability;
+            }
+            if (productMetadata.brand && !finalAttributes.brand) {
+              finalAttributes.brand = productMetadata.brand;
+            }
+            if (productMetadata.category && !finalAttributes.category) {
+              finalAttributes.category = productMetadata.category;
             }
           }
 
-          const contentSize = Buffer.byteLength(content, "utf8");
+          const finalSearchTerms = classification.search_terms || [];
+          const finalConfidence = classification.classification_confidence || confidence;
+          const finalReason = classification.classification_reason || reason;
+
+          // Website metadata storage (Homepage check)
+          const urlPath = new URL(url).pathname;
+          const isHomepage = urlPath === "/" || urlPath === "";
+          
+          if (isHomepage) {
+            try {
+              const websiteMetadata = extractWebsiteMetadata($, url, { isHomepage: true });
+              let websiteData = await WebsiteData.getOrCreate({
+                userId,
+                ...(agentId ? { agentId } : {}),
+              });
+              await websiteData.updateData({
+                company_name: websiteMetadata.company_name || title,
+                company_type: websiteMetadata.company_type || finalEntityType,
+                industry: websiteMetadata.industry || "",
+                founded_year: websiteMetadata.founded_year || "",
+                services_list: websiteMetadata.services_list?.length > 0 ? websiteMetadata.services_list : finalSearchTerms.slice(0, 10),
+                value_proposition: websiteMetadata.value_proposition || metaDescription,
+                website_url: url,
+                domain: new URL(url).hostname,
+                primary_language: websiteMetadata.primary_language || "en",
+              });
+              metadataExtracted = true;
+              metadataFromHomepage = true;
+              console.log(
+                `[jobService] Stored website metadata for user ${userId} from homepage ${url}`,
+              );
+            } catch (metadataError) {
+              console.error(
+                `[jobService] Error storing website metadata:`,
+                metadataError,
+              );
+            }
+          }
+
+          const contentSize = Buffer.byteLength(markdown, "utf8");
 
           let clientDoc = await Client.findOne({ userId });
           currentDataSize = clientDoc?.currentDataSize || 0;
@@ -1015,24 +1084,13 @@ new Worker(
               ? clientDoc.customLimits.maxStorage
               : plan.limits.maxStorage;
 
-          console.log("clientDoc", clientDoc);
-
-          console.log("max storage is", maxStorage);
-          console.log(
-            "current data size + content size ",
-            currentDataSize + contentSize,
-          );
-          // if (currentDataSize + contentSize > plan.limits.maxStorage) {
           if (currentDataSize + contentSize > maxStorage) {
-
-
             console.log("storage limit exceeded");
             await Client.updateOne(
               { userId },
               { $set: { "upgradePlanStatus.storageLimitExceeded": true } },
             );
 
-            // Emit progress before stopping due to storage limit
             const storageLimitElapsedTime = Math.floor(
               (Date.now() - scrapingStartTime.getTime()) / 1000,
             );
@@ -1076,13 +1134,23 @@ new Worker(
 
             scrapedDocs.push({
               type: 0,
-              content,
+              content: markdown,
               dataSize: contentSize,
               metadata: {
-                url: webPageURL,
-                title,
-                metaDescription,
+                url: url,
+                title: finalEntityName || title || url,
+                metaDescription: metaDescription,
                 type: "webpage",
+                source_type: "html_crawl",
+                entity_type: finalEntityType,
+                entity_name: finalEntityName,
+                search_terms: finalSearchTerms,
+                attributes: finalAttributes,
+                classification_confidence: finalConfidence,
+                classification_reason: finalReason,
+                content_hash: contentHash,
+                language: "en",
+                is_active: true,
               },
               originalUrl: url,
             });
@@ -1184,31 +1252,37 @@ new Worker(
         // 3️⃣ Update training status in DB
         for (const doc of scrapedDocs) {
           const status = result?.failedUrls?.includes(doc.originalUrl) ? 2 : 1;
-          if (status == 1) {
-            await TrainingModel.create({
-              userId,
-              agentId,
-              type: 0,
-              content: doc.content,
-              dataSize: doc.dataSize,
-              trainingStatus: status,
-              "webPage.url": doc.originalUrl,
-              chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
-              lastEdit: Date.now(),
-            });
-          } else if (status == 2) {
-            await TrainingModel.create({
-              userId,
-              agentId,
-              type: 0,
-              content: doc.content,
-              dataSize: doc.dataSize,
-              trainingStatus: status,
-              error: "Failed to process/minify web page content",
-              "webPage.url": doc.originalUrl,
-              chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
-              lastEdit: Date.now(),
-            });
+          
+          const updateFields = {
+            type: 0,
+            content: doc.content,
+            dataSize: doc.dataSize,
+            trainingStatus: status,
+            chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
+            lastEdit: Date.now(),
+            "webPage.url": doc.originalUrl,
+            entity_type: doc.metadata?.entity_type,
+            entity_name: doc.metadata?.entity_name,
+            classification_confidence: doc.metadata?.classification_confidence,
+            classification_reason: doc.metadata?.classification_reason,
+            content_hash: doc.metadata?.content_hash,
+            attributes: doc.metadata?.attributes,
+            search_terms: doc.metadata?.search_terms,
+            language: doc.metadata?.language,
+            is_active: status === 1,
+          };
+
+          if (status === 2) {
+            updateFields.error = "Failed to process/minify web page content";
+          }
+
+          await TrainingModel.findOneAndUpdate(
+            { userId, agentId, "webPage.url": doc.originalUrl },
+            { $set: updateFields },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+          );
+
+          if (status === 2) {
             await Url.updateOne(
               { url: doc.originalUrl, agentId: agentId },
               {
@@ -1224,7 +1298,6 @@ new Worker(
               {
                 $set: {
                   trainStatus: status,
-                  // error: "Failed to process/minify web page content",
                 },
               },
             );
@@ -1659,24 +1732,74 @@ new Worker(
           const { rawHtml } = await webScraper.scrapeWebpage(url, {
             maxRetries: 2,
           });
+          const processResult = refineHtmlContent(rawHtml, url);
 
-          const processResult = await processWebPage(
-            url,
-            rawHtml,
-            footerCache,
-          );
-
-          if (!processResult?.content) {
+          if (!processResult || !processResult.markdown) {
             await markEntryFailedAndContinue({
               entry,
               prevStatus,
-              error: "Failed to process/minify web page content",
+              error: "Failed to process/refine web page content",
             });
             continue;
           }
 
-          const { content, title, metaDescription, webPageURL } = processResult;
-          const contentSize = Buffer.byteLength(content, "utf8");
+          const { markdown, title, metaDescription, productMetadata } = processResult;
+          const contentHash = crypto.createHash("md5").update(markdown).digest("hex");
+
+          // Step 3: Content Type Detection
+          const $ = cheerio.load(rawHtml);
+          const typeDetection = detectContentType($, url);
+          let entityType = typeDetection.entityType;
+          let schemaType = typeDetection.schemaType;
+          let confidence = typeDetection.confidence;
+          let reason = typeDetection.reason;
+
+          if (productMetadata && productMetadata.isProduct) {
+            entityType = "product";
+            confidence = 0.95;
+            reason = "Heuristic product metadata detected (price, sku or image)";
+          }
+
+          // Step 5: Classify with Gemini
+          const classification = await classifyContent({
+            content: markdown,
+            schemaType: schemaType,
+            url: url,
+          });
+
+          const finalEntityType = classification.entity_type || entityType;
+          const finalEntityName = classification.entity_name || title;
+          const finalAttributes = classification.attributes || {};
+          // Merge price/imageUrl/sku from parser if not extracted by Gemini
+          if (productMetadata) {
+            if (productMetadata.price !== null && finalAttributes.price === undefined) {
+              finalAttributes.price = productMetadata.price;
+            }
+            if (productMetadata.currency && !finalAttributes.currency) {
+              finalAttributes.currency = productMetadata.currency;
+            }
+            if (productMetadata.sku && !finalAttributes.sku) {
+              finalAttributes.sku = productMetadata.sku;
+            }
+            if (productMetadata.imageUrl && !finalAttributes.imageUrl) {
+              finalAttributes.imageUrl = productMetadata.imageUrl;
+            }
+            if (productMetadata.availability && !finalAttributes.availability) {
+              finalAttributes.availability = productMetadata.availability;
+            }
+            if (productMetadata.brand && !finalAttributes.brand) {
+              finalAttributes.brand = productMetadata.brand;
+            }
+            if (productMetadata.category && !finalAttributes.category) {
+              finalAttributes.category = productMetadata.category;
+            }
+          }
+
+          const finalSearchTerms = classification.search_terms || [];
+          const finalConfidence = classification.classification_confidence || confidence;
+          const finalReason = classification.classification_reason || reason;
+
+          const contentSize = Buffer.byteLength(markdown, "utf8");
           const oldDataSize = entry.dataSize || 0;
           const dataSizeDelta = contentSize - oldDataSize;
 
@@ -1684,18 +1807,28 @@ new Worker(
             entry,
             prevStatus,
             url,
-            content,
+            content: markdown,
             contentSize,
             dataSizeDelta,
             scrapedDoc: {
               type: 0,
-              content,
+              content: markdown,
               dataSize: contentSize,
               metadata: {
-                url: webPageURL,
-                title,
-                metaDescription,
+                url: url,
+                title: finalEntityName || title || url,
+                metaDescription: metaDescription,
                 type: "webpage",
+                source_type: "html_crawl",
+                entity_type: finalEntityType,
+                entity_name: finalEntityName,
+                search_terms: finalSearchTerms,
+                attributes: finalAttributes,
+                classification_confidence: finalConfidence,
+                classification_reason: finalReason,
+                content_hash: contentHash,
+                language: "en",
+                is_active: true,
               },
               originalUrl: url,
             },
@@ -1778,6 +1911,15 @@ new Worker(
                   lastEdit: new Date(),
                   chunkCount: result.chunkCountPerUrl?.[item.url] || 0,
                   "webPage.url": item.url,
+                  entity_type: item.scrapedDoc.metadata.entity_type,
+                  entity_name: item.scrapedDoc.metadata.entity_name,
+                  classification_confidence: item.scrapedDoc.metadata.classification_confidence,
+                  classification_reason: item.scrapedDoc.metadata.classification_reason,
+                  content_hash: item.scrapedDoc.metadata.content_hash,
+                  attributes: item.scrapedDoc.metadata.attributes,
+                  search_terms: item.scrapedDoc.metadata.search_terms,
+                  language: item.scrapedDoc.metadata.language,
+                  is_active: true,
                 },
               },
             );

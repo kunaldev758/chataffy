@@ -22,10 +22,13 @@ const {
 const PAYLOAD_INDEX_SCHEMAS = {
   user_id: "keyword",
   agent_id: "keyword",
+  entity_type: "keyword",
+  is_active: "bool",
+  language: "keyword",
+  price: "float",
   url: "keyword",
   title: "keyword",
   source_type: "keyword",
-  type: "integer",
 };
 
 class QdrantVectorStoreManager {
@@ -220,88 +223,51 @@ class QdrantVectorStoreManager {
 
 
       const points = documents.map((doc, i) => {
-        // Ensure user_id is a string for proper filtering in Qdrant
         const metadata = { ...doc.metadata };
         if (metadata.user_id) {
           metadata.user_id = metadata.user_id.toString();
         }
+        if (metadata.agent_id) {
+          metadata.agent_id = metadata.agent_id.toString();
+        }
         
-        const pageContent = doc.pageContent || "";
-        const title = metadata.title || "";
-        const url = metadata.url || "";
-        const payloadAttrs = extractPayloadAttributes({
-          text: pageContent,
-          title,
-          url,
-          source_type: metadata.source_type,
-        });
+        const payload = {
+          url: metadata.url || "",
+          title: metadata.title || "",
+          metaDescription: metadata.metaDescription || "",
+          entity_type: metadata.entity_type || "general",
+          source_type: metadata.source_type || "html_crawl",
+          classification_reason: metadata.classification_reason || "",
+          classification_confidence: typeof metadata.classification_confidence === "number" ? metadata.classification_confidence : 1.0,
+          user_id: metadata.user_id || "",
+          agent_id: metadata.agent_id || "",
+          chunk_index: typeof metadata.chunk_index === "number" ? metadata.chunk_index : i,
+          total_chunks: typeof metadata.total_chunks === "number" ? metadata.total_chunks : documents.length,
+          heading_path: metadata.heading_path || "",
+          content_hash: metadata.content_hash || "",
+          created_at: metadata.created_at || new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          is_active: metadata.is_active !== false,
+          language: metadata.language || "en",
+          text: doc.pageContent || "",
+          search_terms: Array.isArray(metadata.search_terms) ? metadata.search_terms : [],
+          entity_name: metadata.entity_name || null,
+          attributes: typeof metadata.attributes === "object" ? metadata.attributes : {},
+        };
+
+        // Hoist price if available in attributes
+        if (payload.attributes && typeof payload.attributes.price === "number") {
+          payload.price = payload.attributes.price;
+        }
 
         return {
           id: uuidv4(),
           vector: embeddings[i],
-          payload: {
-            ...metadata,
-            text: pageContent,
-            search_terms: extractSearchTerms({
-              text: pageContent,
-              title,
-              url,
-            }),
-            sizes: payloadAttrs.sizes,
-            collections: payloadAttrs.collections,
-            source_type: payloadAttrs.source_type,
-            created_at: new Date().toISOString(),
-          },
+          payload: payload,
         };
       });
 
 
-      // const points = documents.map((doc, i) => {
-      //   id : uuidv4(), //this.generateVectorId(doc.pageContent, i);
-      //   vector: embeddings[i],
-      //   payload: {
-      //     ...doc.metadata,
-      //     text: doc.pageContent,
-      //     created_at: new Date().toISOString(),
-      //   },
-      // // }));
-
-      //   // Filter metadata to ensure Qdrant compatibility
-      //   const originalMetadata = doc.metadata && typeof doc.metadata === "object" ? doc.metadata : {};
-      //   const filteredMetadata = {};
-
-      //   for (const key in originalMetadata) {
-      //     const value = originalMetadata[key];
-      //     if (
-      //       typeof value === "string" ||
-      //       typeof value === "number" ||
-      //       typeof value === "boolean" ||
-      //       value === null ||
-      //       typeof value === "undefined" ||
-      //       (Array.isArray(value) &&value.every((item) => typeof item === "string"))
-      //     ) {
-      //       // Ensure string values aren't too long for Qdrant
-      //       if (typeof value === "string" && value.length > 1000) {
-      //         filteredMetadata[key] = value.substring(0, 1000) + "...";
-      //       } else {
-      //         filteredMetadata[key] = value;
-      //       }
-      //     }
-      //   }
-
-      //   return {
-      //     id,
-      //     vector: embeddings[i],
-      //     payload: {
-      //       ...filteredMetadata,
-      //       text: doc.pageContent,
-      //       created_at: new Date().toISOString(),
-      //       content_length: doc.pageContent.length,
-      //     },
-      //   };
-      // });
-
-      // console.log(`Created ${points.length} points, starting upsert...`);
 
       // Batch upsert for better performance
       const upsertBatchSize = 256; // Reduced batch size for stability
@@ -325,27 +291,6 @@ class QdrantVectorStoreManager {
             });
           }
 
-          // totalUpserted += batch.length;
-          // console.log(
-          //   `Successfully upserted batch ${batchNumber}/${totalBatches}`
-          // );
-        // } catch (batchError) {
-        //   console.error(`Error upserting batch ${batchNumber}:`, batchError);
-
-        //   // Log problematic point details for debugging
-        //   console.error("Batch details:");
-        //   batch.forEach((point, idx) => {
-        //     console.error(
-        //       `  Point ${idx + 1}: ID=${point.id}, VectorLen=${
-        //         point.vector.length
-        //       }, PayloadKeys=[${Object.keys(point.payload).join(", ")}]`
-        //     );
-        //   });
-
-        //   throw new Error(
-        //     `Batch upsert failed at batch ${batchNumber}: ${batchError.message}`
-        //   );
-        // }
       }
 
         // Calculate storage usage
