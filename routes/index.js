@@ -155,6 +155,10 @@ router.post('/superadmin/ai-model-categories/create',verifySuperAdminToken, supe
 router.put('/superadmin/ai-model-categories/update',verifySuperAdminToken, superAdminController.updateAiModelCategory);
 router.delete('/superadmin/ai-model-categories/delete/:categoryId',verifySuperAdminToken, superAdminController.deleteAiModelCategory);
 
+// IP Proxy Settings (scraper)
+router.get('/superadmin/scrape-proxy-settings',verifySuperAdminToken, superAdminController.getScrapeProxySettings);
+router.put('/superadmin/scrape-proxy-settings',verifySuperAdminToken, superAdminController.updateScrapeProxySettings);
+
 router.get('/available', PlanController.getAvailablePlans);
 
 

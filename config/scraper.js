@@ -1,8 +1,7 @@
 require("dotenv").config();
 
-function loadProxies() {
-  // Collapse accidental line breaks / spaces around commas in .env
-  const raw = (process.env.SCRAPE_PROXIES || "")
+function parseProxies(rawInput) {
+  const raw = String(rawInput || "")
     .replace(/\r?\n/g, ",")
     .replace(/\s*,\s*/g, ",");
   return raw
@@ -24,51 +23,69 @@ function loadProxies() {
     .filter(Boolean);
 }
 
-const proxies = loadProxies();
-
 function extractProxyHost(proxyUrl) {
   if (!proxyUrl) return null;
   const match = proxyUrl.match(/@([^:/]+)/);
   return match ? match[1] : null;
 }
 
-const proxyEnabled = proxies.length > 0;
-const proxyTrainingOnly =
-  process.env.SCRAPE_PROXY_TRAINING_ONLY !== "false";
-const requestDelayMs = Number(process.env.SCRAPE_REQUEST_DELAY_MS || 100);
-const discoveryDelayMs = Number(process.env.SCRAPE_DISCOVERY_DELAY_MS ?? 0);
-
-if (proxies.length > 0) {
-  const hosts = proxies.map(extractProxyHost).filter(Boolean);
-  console.log(
-    `[scraper] Proxy rotation enabled: ${proxies.length} proxy/proxies — IPs: ${hosts.join(", ")}`,
-  );
-  if (proxyTrainingOnly) {
-    console.log(
-      "[scraper] Proxy used for page training only; discovery/CSS/logo use direct connection (faster)",
-    );
-  }
-} else {
-  console.log(
-    "[scraper] Proxy rotation disabled (set SCRAPE_PROXIES in .env to enable)",
-  );
+function buildRuntimeFromSettings(settings = {}) {
+  const proxies = parseProxies(settings.proxies);
+  return {
+    proxies,
+    proxyEnabled: proxies.length > 0,
+    proxyTrainingOnly: settings.proxyTrainingOnly !== false,
+    requestsPerProxy: Number(settings.requestsPerProxy ?? 100),
+    maxRetries: Number(settings.maxRetries ?? 1),
+    requestDelayMs: Number(settings.requestDelayMs ?? 100),
+    discoveryDelayMs: Number(settings.discoveryDelayMs ?? 0),
+    proxyFallbackDirect: settings.proxyFallbackDirect !== false,
+    defaultTimeout: Number(process.env.SCRAPE_TIMEOUT_MS || 30000),
+    maxContentLength: 50 * 1024 * 1024,
+    userAgent:
+      process.env.SCRAPE_USER_AGENT ||
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  };
 }
 
-module.exports = {
-  extractProxyHost,
-  proxies,
-  proxyEnabled,
-  /** When true, only scrapeWebpage (training) uses proxies; fetchUrl goes direct */
-  proxyTrainingOnly,
-  requestsPerProxy: Number(process.env.SCRAPE_REQUESTS_PER_PROXY || 100),
-  maxRetries: Number(process.env.SCRAPE_MAX_RETRIES || 1),
-  requestDelayMs,
-  discoveryDelayMs,
-  /** When true, retry without proxy after all proxy attempts fail (training only) */
-  proxyFallbackDirect: process.env.SCRAPE_PROXY_FALLBACK_DIRECT !== "false",
-  defaultTimeout: Number(process.env.SCRAPE_TIMEOUT_MS || 30000),
-  maxContentLength: 50 * 1024 * 1024,
-  userAgent:
-    process.env.SCRAPE_USER_AGENT ||
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-};
+function logProxyStatus(runtime) {
+  if (runtime.proxies.length > 0) {
+    const hosts = runtime.proxies.map(extractProxyHost).filter(Boolean);
+    console.log(
+      `[scraper] Proxy rotation enabled: ${runtime.proxies.length} proxy/proxies — IPs: ${hosts.join(", ")}`,
+    );
+    if (runtime.proxyTrainingOnly) {
+      console.log(
+        "[scraper] Proxy used for page training only; discovery/CSS/logo use direct connection (faster)",
+      );
+    }
+  } else {
+    console.log(
+      "[scraper] Proxy rotation disabled (configure proxies in SuperAdmin → IP Proxy Setting)",
+    );
+  }
+}
+
+/** Mutable runtime config — updated when SuperAdmin saves settings or on DB load */
+const runtime = buildRuntimeFromSettings({
+  proxies: "",
+  requestsPerProxy: 100,
+  maxRetries: 1,
+  requestDelayMs: 100,
+  discoveryDelayMs: 0,
+  proxyTrainingOnly: true,
+  proxyFallbackDirect: true,
+});
+
+function applyRuntimeSettings(settings) {
+  const next = buildRuntimeFromSettings(settings);
+  Object.assign(runtime, next);
+  logProxyStatus(runtime);
+  return runtime;
+}
+
+module.exports = runtime;
+module.exports.extractProxyHost = extractProxyHost;
+module.exports.parseProxies = parseProxies;
+module.exports.buildRuntimeFromSettings = buildRuntimeFromSettings;
+module.exports.applyRuntimeSettings = applyRuntimeSettings;

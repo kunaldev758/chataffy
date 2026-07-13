@@ -24,6 +24,17 @@ initializeSocketController(server);
 
 mongoose.connect(process.env.MONGODB_URI);
 
+mongoose.connection.once("connected", async () => {
+  try {
+    const {
+      loadScrapeProxySettingsIntoRuntime,
+    } = require("./services/scraperSettingsService");
+    await loadScrapeProxySettingsIntoRuntime();
+  } catch (error) {
+    console.error("[scraper] Failed to load proxy settings from DB:", error);
+  }
+});
+
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) {

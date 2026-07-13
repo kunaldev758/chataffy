@@ -114,14 +114,20 @@ class SequentialRotation {
 
 class WebScraper {
   constructor() {
-    this.rotationHandler = config.proxyEnabled
-      ? new SequentialRotation(config.proxies, config.requestsPerProxy)
-      : null;
     this._agentCache = new Map();
     this._lastTrainingRequestAt = 0;
     this._lastDiscoveryRequestAt = 0;
     /** Lock only proxy rotation + proxied training requests (not direct discovery) */
     this._proxyLock = Promise.resolve();
+    this.reloadConfig();
+  }
+
+  /** Rebuild proxy rotation after SuperAdmin saves IP proxy settings */
+  reloadConfig() {
+    this._agentCache.clear();
+    this.rotationHandler = config.proxyEnabled
+      ? new SequentialRotation(config.proxies, config.requestsPerProxy)
+      : null;
   }
 
   sleep(ms) {
@@ -216,7 +222,7 @@ class WebScraper {
   assertAcceptableResponse(response, url) {
     if (response.status === 407) {
       throw new Error(
-        "HTTP 407: Proxy authentication required (check SCRAPE_PROXIES credentials)",
+        "HTTP 407: Proxy authentication required (check IP Proxy Setting credentials)",
       );
     }
     if (response.status === 403 || response.status === 429) {
@@ -273,7 +279,7 @@ class WebScraper {
 
   /**
    * Discovery, sitemap, CSS, logo — direct by default (fast, parallel-safe).
-   * Set options.useProxy=true or SCRAPE_PROXY_TRAINING_ONLY=false to proxy these too.
+   * Set options.useProxy=true or proxyTrainingOnly=false in SuperAdmin to proxy these too.
    */
   async fetchUrl(url, options = {}) {
     const useProxy = this.shouldUseProxyForFetch(options);
@@ -348,7 +354,7 @@ class WebScraper {
   }
 
   /**
-   * Page training — uses proxy rotation when SCRAPE_PROXIES is set.
+   * Page training — uses proxy rotation when proxies are configured in SuperAdmin.
    */
   async scrapeWebpage(url, options = {}) {
     const maxRetries = options.maxRetries ?? config.maxRetries;

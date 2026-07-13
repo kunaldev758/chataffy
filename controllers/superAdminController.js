@@ -22,6 +22,12 @@ const ImpersonationSession = require("../models/ImpersonationSession");
 const {AiModelsCategory,AiModel} = require("../models/AiModel");
 const { default: mongoose } = require("mongoose");
 const { clearModelCache } = require("../services/aiModelService");
+const {
+  getOrCreateSettings,
+  updateScrapeProxySettings,
+  toPublicSettings,
+  validateProxySettingsPayload,
+} = require("../services/scraperSettingsService");
 
 // SuperAdmin login
 module.exports.superAdminLogin = async (req, res) => {
@@ -1015,5 +1021,38 @@ module.exports.deleteAiModelCategory = async (req, res) => {
   } catch (error) {
     console.error("Error deleting ai model category:", error);
     res.status(500).json({ message: "Error deleting ai model category" });
+  }
+};
+
+// ===================== IP Proxy Settings =====================
+module.exports.getScrapeProxySettings = async (req, res) => {
+  try {
+    const settings = await getOrCreateSettings();
+    res.status(200).json({
+      success: true,
+      data: toPublicSettings(settings),
+    });
+  } catch (error) {
+    console.error("Error fetching scrape proxy settings:", error);
+    res.status(500).json({ message: "Error fetching proxy settings" });
+  }
+};
+
+module.exports.updateScrapeProxySettings = async (req, res) => {
+  try {
+    const validation = validateProxySettingsPayload(req.body || {});
+    if (!validation.success) {
+      return res.status(400).json({ message: validation.message });
+    }
+
+    const settings = await updateScrapeProxySettings(req.body || {});
+    res.status(200).json({
+      success: true,
+      data: toPublicSettings(settings),
+      message: "Proxy settings updated successfully",
+    });
+  } catch (error) {
+    console.error("Error updating scrape proxy settings:", error);
+    res.status(500).json({ message: "Error updating proxy settings" });
   }
 };
