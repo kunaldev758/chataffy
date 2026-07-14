@@ -289,6 +289,14 @@ function emptyUsageTotals() {
   };
 }
 
+/** Types that count toward chat conversation usage (not website-training embeddings). */
+const CHAT_USAGE_TYPES = ['chat', 'brief-chat', 'intent', 'open-source'];
+const CONVERSATION_USAGE_TYPES = [...CHAT_USAGE_TYPES, 'embedding'];
+
+function isChatUsageType(type) {
+  return CHAT_USAGE_TYPES.includes(type);
+}
+
 function toObjectIdOrValue(id) {
   if (id == null || id === '') return id;
   if (id instanceof mongoose.Types.ObjectId) return id;
@@ -369,10 +377,12 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
       totalRequests: row.totalRequests || 0,
     };
     const agentBucket = ensureAgent(key);
-    addInto(agentBucket.openAIUsage, usage);
     addInto(totals, usage);
     if (type === 'embedding') {
       addInto(agentBucket.embeddingUsage, usage);
+    } else {
+      // Chat / brief-chat / intent / open-source — keep separate from training embeddings
+      addInto(agentBucket.openAIUsage, usage);
     }
   }
 
@@ -382,6 +392,7 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
 /**
  * Aggregate OpenAI usage per conversation for one agent (chatbot).
  * Returns chat metrics plus embedding input tokens/cost when logged with that conversationId.
+ * Chat includes brief-chat / intent / open-source (same thread cost as premium "chat").
  */
 async function getOpenAIUsageGroupedByConversation(
   userId,
@@ -390,7 +401,7 @@ async function getOpenAIUsageGroupedByConversation(
 ) {
   const match = {
     conversationId: { $ne: null, $exists: true },
-    type: { $in: ['chat', 'embedding'] },
+    type: { $in: CONVERSATION_USAGE_TYPES },
   };
   if (userId) match.userId = toObjectIdOrValue(userId);
   if (agentId) match.agentId = toObjectIdOrValue(agentId);
@@ -454,7 +465,7 @@ async function getOpenAIUsageGroupedByConversation(
       conv.embeddingInputCost += row.inputCost || 0;
       conv.embeddingTotalTokens += row.totalTokens || 0;
       conv.embeddingTotalRequests += row.totalRequests || 0;
-    } else if (type === 'chat') {
+    } else if (isChatUsageType(type)) {
       conv.inputTokens += row.inputTokens || 0;
       conv.outputTokens += row.outputTokens || 0;
       conv.cacheTokens += row.cacheTokens || 0;
@@ -502,7 +513,7 @@ async function getOpenAIUsageForConversation(
   { startDate, endDate } = {}
 ) {
   const match = {
-    type: { $in: ['chat', 'embedding'] },
+    type: { $in: CONVERSATION_USAGE_TYPES },
   };
   if (userId) match.userId = toObjectIdOrValue(userId);
   if (conversationId) match.conversationId = toObjectIdOrValue(conversationId);
@@ -538,18 +549,18 @@ async function getOpenAIUsageForConversation(
 
   for (const row of rows) {
     if (row._id === 'embedding') {
-      result.embeddingInputTokens = row.inputTokens || 0;
-      result.embeddingInputCost = row.inputCost || 0;
-    } else if (row._id === 'chat') {
-      result.inputTokens = row.inputTokens || 0;
-      result.outputTokens = row.outputTokens || 0;
-      result.cacheTokens = row.cacheTokens || 0;
-      result.totalTokens = row.totalTokens || 0;
-      result.inputCost = row.inputCost || 0;
-      result.outputCost = row.outputCost || 0;
-      result.cacheCost = row.cacheCost || 0;
-      result.totalCost = row.totalCost || 0;
-      result.totalRequests = row.totalRequests || 0;
+      result.embeddingInputTokens += row.inputTokens || 0;
+      result.embeddingInputCost += row.inputCost || 0;
+    } else if (isChatUsageType(row._id)) {
+      result.inputTokens += row.inputTokens || 0;
+      result.outputTokens += row.outputTokens || 0;
+      result.cacheTokens += row.cacheTokens || 0;
+      result.totalTokens += row.totalTokens || 0;
+      result.inputCost += row.inputCost || 0;
+      result.outputCost += row.outputCost || 0;
+      result.cacheCost += row.cacheCost || 0;
+      result.totalCost += row.totalCost || 0;
+      result.totalRequests += row.totalRequests || 0;
     }
   }
 
@@ -566,6 +577,8 @@ module.exports = {
   getOpenAIUsageGroupedByConversation,
   getOpenAIUsageForConversation,
   emptyUsageTotals,
+  CHAT_USAGE_TYPES,
+  CONVERSATION_USAGE_TYPES,
   logQdrantUsage,
   getQdrantUsage
 };
