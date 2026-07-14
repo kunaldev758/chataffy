@@ -673,6 +673,7 @@ class QuestionAnsweringSystem {
     maxScore,
     userId,
     agentId,
+    conversationId = null,
   }) {
     let matches = relevantMatches;
     if (matches.length === 0 && queryResponse.length > 0) {
@@ -718,7 +719,7 @@ class QuestionAnsweringSystem {
         websiteData,
         sharedOpts,
       );
-      this.logAnswerUsage(userId, agentId, result);
+      this.logAnswerUsage(userId, agentId, result, conversationId);
       return { answer: result.answer, matches };
     }
 
@@ -737,7 +738,7 @@ class QuestionAnsweringSystem {
       websiteData,
       sharedOpts,
     );
-    this.logAnswerUsage(userId, agentId, result);
+    this.logAnswerUsage(userId, agentId, result, conversationId);
     return { answer: result.answer, matches: [] };
   }
 
@@ -3344,6 +3345,7 @@ ${answerInstructions}`;
           maxScore,
           userId,
           agentId,
+          conversationId,
         });
         finalAnswer = onTopicResult.answer;
         contextMatchesForSources = onTopicResult.matches || [];
