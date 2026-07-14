@@ -89,6 +89,8 @@ const RAG_MAX_CHUNK_CHARS_LIST =
   Number(process.env.RAG_MAX_CHUNK_CHARS_LIST) || 800;
 const RAG_LIST_MAX_URLS = Number(process.env.RAG_LIST_MAX_URLS) || 30;
 const RAG_KEYWORD_FETCH_MAX = Number(process.env.RAG_KEYWORD_FETCH_MAX) || 120;
+/** Max unique sources shown in UI — taken from chunks used for answer generation. */
+const MAX_ANSWER_SOURCES = Number(process.env.MAX_ANSWER_SOURCES) || 6;
 const USE_LIGHTWEIGHT_RESPONSES =
   process.env.USE_LIGHTWEIGHT_RESPONSES !== "false";
 const LOW_RETRIEVAL_SCORE_PREMIUM =
@@ -1720,23 +1722,32 @@ class QuestionAnsweringSystem {
     return lines.join("\n");
   }
 
-  matchesToSources(matches) {
+  matchesToSources(matches, maxSources = MAX_ANSWER_SOURCES) {
     const seenSourceKeys = new Set();
-    return (matches || [])
-      .map((match) => {
-        const payload = match.payload || {};
-        const sourceType = payload.type !== undefined ? payload.type : null;
-        const title = payload.title || payload.url || null;
-        const url = payload.url || null;
-        return { type: sourceType, title, url };
-      })
-      .filter(({ type, title, url }) => {
-        if (type === null && !title && !url) return false;
-        const key = url || title;
-        if (!key || seenSourceKeys.has(key)) return false;
-        seenSourceKeys.add(key);
-        return true;
-      });
+    const sorted = [...(matches || [])].sort(
+      (a, b) => (b.score || 0) - (a.score || 0),
+    );
+    const sources = [];
+    const limit = Math.max(1, Number(maxSources) || MAX_ANSWER_SOURCES);
+
+    for (const match of sorted) {
+      if (sources.length >= limit) break;
+
+      const payload = match.payload || {};
+      const sourceType = payload.type !== undefined ? payload.type : null;
+      const title = payload.title || payload.url || null;
+      const url = payload.url || null;
+
+      if (sourceType === null && !title && !url) continue;
+
+      const key = url || title;
+      if (!key || seenSourceKeys.has(key)) continue;
+
+      seenSourceKeys.add(key);
+      sources.push({ type: sourceType, title, url });
+    }
+
+    return sources;
   }
 
   extractRequestedCount(question, fallback = 5) {
@@ -3252,6 +3263,8 @@ ${answerInstructions}`;
       // }
 
       let finalAnswer;
+      // Chunks actually used for generation — sources are derived from these only.
+      let contextMatchesForSources = [];
       // let completionUsage = null;
 
       // // Check if message looks accidental or like test input
@@ -3333,6 +3346,7 @@ ${answerInstructions}`;
           agentId,
         });
         finalAnswer = onTopicResult.answer;
+        contextMatchesForSources = onTopicResult.matches || [];
       } else if (relevantMatches.length === 0 || isIrrelevant) {
 
         console.log("check 2 : ",)
@@ -3349,6 +3363,7 @@ ${answerInstructions}`;
             isIrrelevant,
           });
           finalAnswer = offTopicResult.answer;
+          contextMatchesForSources = [];
         } else {
 
           console.log("check 3 : ");
@@ -3368,6 +3383,7 @@ ${answerInstructions}`;
             { ...langOpts, forcePremium: false },
           );
           finalAnswer = offTopicResult.answer;
+          contextMatchesForSources = [];
           this.logAnswerUsage(userId, agentId, offTopicResult, conversationId);
         }
       } else {
@@ -3416,34 +3432,12 @@ ${answerInstructions}`;
           },
         });
         finalAnswer = answerResult.answer;
+        contextMatchesForSources = relevantMatches;
         this.logAnswerUsage(userId, agentId, answerResult, conversationId);
       }
 
-      // 10. Prepare Sources from Qdrant matched payloads
-      // Use full retrieval set (not threshold-filtered) so citations appear even when
-      // scores are low, irrelevant redirect runs, or LLM context used only "relevant" hits.
-      const matchesForSources =
-        queryResponse.length > 0
-          ? [...queryResponse].sort((a, b) => b.score - a.score)
-          : [];
-      const seenSourceKeys = new Set();
-      const sources = matchesForSources
-        .map((match) => {
-          const payload = match.payload || {};
-          const sourceType = payload.type !== undefined ? payload.type : null;
-          const title = payload.title || payload.url || null;
-          const url = payload.url || null;
-          return { type: sourceType, title, url };
-        })
-        .filter(({ type, title, url }) => {
-          // Keep only entries with some identifier
-          if (type === null && !title && !url) return false;
-          // Deduplicate by url (for webpages) or title (for others)
-          const key = url || title;
-          if (!key || seenSourceKeys.has(key)) return false;
-          seenSourceKeys.add(key);
-          return true;
-        });
+      // 10. Sources = top unique pages from chunks used for generation (not full retrieval).
+      const sources = this.matchesToSources(contextMatchesForSources);
 
       return {
         success: true,

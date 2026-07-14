@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const OpenAIUsage = require('../models/OpenAIUsageSchema');
 const QdrantUsage = require('../models/qdrantUsageSchema');
 const { getModelForCategory } = require('./aiModelService');
@@ -207,10 +208,295 @@ async function getOpenAIUsageByType(userId, { startDate, endDate } = {}) {
   return { byType, totals };
 }
 
+function emptyUsageTotals() {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheTokens: 0,
+    totalTokens: 0,
+    inputCost: 0,
+    outputCost: 0,
+    cacheCost: 0,
+    totalCost: 0,
+    totalRequests: 0,
+  };
+}
+
+function toObjectIdOrValue(id) {
+  if (id == null || id === '') return id;
+  if (id instanceof mongoose.Types.ObjectId) return id;
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    return new mongoose.Types.ObjectId(String(id));
+  }
+  return id;
+}
+
+/**
+ * Aggregate OpenAI usage grouped by agentId for a client user.
+ * Returns overall totals per agent plus embedding-only (website training) usage.
+ */
+async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {}) {
+  const match = {};
+  if (userId) match.userId = toObjectIdOrValue(userId);
+  if (startDate || endDate) {
+    match.createdAt = {};
+    if (startDate) match.createdAt.$gte = new Date(startDate);
+    if (endDate) match.createdAt.$lte = new Date(endDate);
+  }
+
+  const rows = await OpenAIUsage.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: { agentId: '$agentId', type: '$type' },
+        inputTokens: { $sum: '$inputTokens' },
+        outputTokens: { $sum: '$outputTokens' },
+        cacheTokens: { $sum: '$cacheTokens' },
+        totalTokens: { $sum: '$totalTokens' },
+        inputCost: { $sum: '$inputCost' },
+        outputCost: { $sum: '$outputCost' },
+        cacheCost: { $sum: '$cacheCost' },
+        totalCost: { $sum: '$totalCost' },
+        totalRequests: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const byAgent = {};
+  const totals = emptyUsageTotals();
+
+  const ensureAgent = (key) => {
+    if (!byAgent[key]) {
+      byAgent[key] = {
+        openAIUsage: emptyUsageTotals(),
+        embeddingUsage: emptyUsageTotals(),
+      };
+    }
+    return byAgent[key];
+  };
+
+  const addInto = (target, usage) => {
+    target.inputTokens += usage.inputTokens;
+    target.outputTokens += usage.outputTokens;
+    target.cacheTokens += usage.cacheTokens;
+    target.totalTokens += usage.totalTokens;
+    target.inputCost += usage.inputCost;
+    target.outputCost += usage.outputCost;
+    target.cacheCost += usage.cacheCost;
+    target.totalCost += usage.totalCost;
+    target.totalRequests += usage.totalRequests;
+  };
+
+  for (const row of rows) {
+    const key = row._id?.agentId ? String(row._id.agentId) : 'unknown';
+    const type = row._id?.type || 'unknown';
+    const usage = {
+      inputTokens: row.inputTokens || 0,
+      outputTokens: row.outputTokens || 0,
+      cacheTokens: row.cacheTokens || 0,
+      totalTokens: row.totalTokens || 0,
+      inputCost: row.inputCost || 0,
+      outputCost: row.outputCost || 0,
+      cacheCost: row.cacheCost || 0,
+      totalCost: row.totalCost || 0,
+      totalRequests: row.totalRequests || 0,
+    };
+    const agentBucket = ensureAgent(key);
+    addInto(agentBucket.openAIUsage, usage);
+    addInto(totals, usage);
+    if (type === 'embedding') {
+      addInto(agentBucket.embeddingUsage, usage);
+    }
+  }
+
+  return { byAgent, totals };
+}
+
+/**
+ * Aggregate OpenAI usage per conversation for one agent (chatbot).
+ * Returns chat metrics plus embedding input tokens/cost when logged with that conversationId.
+ */
+async function getOpenAIUsageGroupedByConversation(
+  userId,
+  agentId,
+  { startDate, endDate } = {}
+) {
+  const match = {
+    conversationId: { $ne: null, $exists: true },
+    type: { $in: ['chat', 'embedding'] },
+  };
+  if (userId) match.userId = toObjectIdOrValue(userId);
+  if (agentId) match.agentId = toObjectIdOrValue(agentId);
+  if (startDate || endDate) {
+    match.createdAt = {};
+    if (startDate) match.createdAt.$gte = new Date(startDate);
+    if (endDate) match.createdAt.$lte = new Date(endDate);
+  }
+
+  const rows = await OpenAIUsage.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: { conversationId: '$conversationId', type: '$type' },
+        inputTokens: { $sum: '$inputTokens' },
+        outputTokens: { $sum: '$outputTokens' },
+        cacheTokens: { $sum: '$cacheTokens' },
+        totalTokens: { $sum: '$totalTokens' },
+        inputCost: { $sum: '$inputCost' },
+        outputCost: { $sum: '$outputCost' },
+        cacheCost: { $sum: '$cacheCost' },
+        totalCost: { $sum: '$totalCost' },
+        totalRequests: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const byConversation = new Map();
+
+  const ensureConv = (id) => {
+    const key = String(id);
+    if (!byConversation.has(key)) {
+      byConversation.set(key, {
+        conversationId: key,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheTokens: 0,
+        totalTokens: 0,
+        inputCost: 0,
+        outputCost: 0,
+        cacheCost: 0,
+        totalCost: 0,
+        totalRequests: 0,
+        embeddingInputTokens: 0,
+        embeddingInputCost: 0,
+        embeddingTotalTokens: 0,
+        embeddingTotalRequests: 0,
+      });
+    }
+    return byConversation.get(key);
+  };
+
+  for (const row of rows) {
+    const convId = row._id?.conversationId;
+    if (!convId) continue;
+    const type = row._id?.type;
+    const conv = ensureConv(convId);
+
+    if (type === 'embedding') {
+      conv.embeddingInputTokens += row.inputTokens || 0;
+      conv.embeddingInputCost += row.inputCost || 0;
+      conv.embeddingTotalTokens += row.totalTokens || 0;
+      conv.embeddingTotalRequests += row.totalRequests || 0;
+    } else if (type === 'chat') {
+      conv.inputTokens += row.inputTokens || 0;
+      conv.outputTokens += row.outputTokens || 0;
+      conv.cacheTokens += row.cacheTokens || 0;
+      conv.totalTokens += row.totalTokens || 0;
+      conv.inputCost += row.inputCost || 0;
+      conv.outputCost += row.outputCost || 0;
+      conv.cacheCost += row.cacheCost || 0;
+      conv.totalCost += row.totalCost || 0;
+      conv.totalRequests += row.totalRequests || 0;
+    }
+  }
+
+  const conversations = Array.from(byConversation.values()).sort(
+    (a, b) => (b.totalCost + b.embeddingInputCost) - (a.totalCost + a.embeddingInputCost)
+  );
+
+  const totals = {
+    ...emptyUsageTotals(),
+    embeddingInputTokens: 0,
+    embeddingInputCost: 0,
+  };
+  for (const c of conversations) {
+    totals.inputTokens += c.inputTokens;
+    totals.outputTokens += c.outputTokens;
+    totals.cacheTokens += c.cacheTokens;
+    totals.totalTokens += c.totalTokens;
+    totals.inputCost += c.inputCost;
+    totals.outputCost += c.outputCost;
+    totals.cacheCost += c.cacheCost;
+    totals.totalCost += c.totalCost;
+    totals.totalRequests += c.totalRequests;
+    totals.embeddingInputTokens += c.embeddingInputTokens;
+    totals.embeddingInputCost += c.embeddingInputCost;
+  }
+
+  return { conversations, totals };
+}
+
+/**
+ * Aggregate OpenAI usage for a single conversation (chat + embedding by default).
+ */
+async function getOpenAIUsageForConversation(
+  userId,
+  conversationId,
+  { startDate, endDate } = {}
+) {
+  const match = {
+    type: { $in: ['chat', 'embedding'] },
+  };
+  if (userId) match.userId = toObjectIdOrValue(userId);
+  if (conversationId) match.conversationId = toObjectIdOrValue(conversationId);
+  if (startDate || endDate) {
+    match.createdAt = {};
+    if (startDate) match.createdAt.$gte = new Date(startDate);
+    if (endDate) match.createdAt.$lte = new Date(endDate);
+  }
+
+  const rows = await OpenAIUsage.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: '$type',
+        inputTokens: { $sum: '$inputTokens' },
+        outputTokens: { $sum: '$outputTokens' },
+        cacheTokens: { $sum: '$cacheTokens' },
+        totalTokens: { $sum: '$totalTokens' },
+        inputCost: { $sum: '$inputCost' },
+        outputCost: { $sum: '$outputCost' },
+        cacheCost: { $sum: '$cacheCost' },
+        totalCost: { $sum: '$totalCost' },
+        totalRequests: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const result = {
+    ...emptyUsageTotals(),
+    embeddingInputTokens: 0,
+    embeddingInputCost: 0,
+  };
+
+  for (const row of rows) {
+    if (row._id === 'embedding') {
+      result.embeddingInputTokens = row.inputTokens || 0;
+      result.embeddingInputCost = row.inputCost || 0;
+    } else if (row._id === 'chat') {
+      result.inputTokens = row.inputTokens || 0;
+      result.outputTokens = row.outputTokens || 0;
+      result.cacheTokens = row.cacheTokens || 0;
+      result.totalTokens = row.totalTokens || 0;
+      result.inputCost = row.inputCost || 0;
+      result.outputCost = row.outputCost || 0;
+      result.cacheCost = row.cacheCost || 0;
+      result.totalCost = row.totalCost || 0;
+      result.totalRequests = row.totalRequests || 0;
+    }
+  }
+
+  return result;
+}
+
 module.exports = {
   logOpenAIUsage,
   getOpenAIUsage,
   getOpenAIUsageByType,
+  getOpenAIUsageGroupedByAgent,
+  getOpenAIUsageGroupedByConversation,
+  getOpenAIUsageForConversation,
+  emptyUsageTotals,
   logQdrantUsage,
   getQdrantUsage
 };

@@ -5,6 +5,7 @@ const Agent = require("../models/Agent");
 const HumanAgent = require("../models/HumanAgent");
 const Conversation = require("../models/Conversation");
 const ChatMessage = require("../models/ChatMessage");
+const Visitor = require("../models/Visitor");
 const PlanService = require("../services/PlanService")
 const UsageTrackingService= require("../services/UsageTrackingService")
 const bcrypt = require("bcrypt");
@@ -571,7 +572,7 @@ module.exports.getClientAgents = async (req, res) => {
       return res.status(404).json({ message: "Client not found" });
     }
 
-    const [aiAgents, humanAgents] = await Promise.all([
+    const [aiAgents, humanAgents, openAIGrouped] = await Promise.all([
       Agent.find({ userId: client.userId, isDeleted: { $ne: true } })
         .select(
           "agentName website_name email phone isActive liveAgentSupport lastTrained createdAt qdrantIndexName"
@@ -583,13 +584,26 @@ module.exports.getClientAgents = async (req, res) => {
         .populate("assignedAgents", "agentName website_name _id")
         .sort({ createdAt: -1 })
         .lean(),
+      UsageTrackingService.getOpenAIUsageGroupedByAgent(client.userId),
     ]);
+
+    const byAgent = openAIGrouped?.byAgent || {};
+    const empty = UsageTrackingService.emptyUsageTotals();
+    const aiAgentsWithUsage = aiAgents.map((bot) => {
+      const bucket = byAgent[String(bot._id)] || {};
+      return {
+        ...bot,
+        openAIUsage: bucket.openAIUsage || { ...empty },
+        embeddingUsage: bucket.embeddingUsage || { ...empty },
+      };
+    });
 
     res.status(200).json({
       success: true,
       data: {
-        aiAgents,
+        aiAgents: aiAgentsWithUsage,
         humanAgents,
+        openAIUsageTotal: openAIGrouped?.totals || empty,
       },
     });
   } catch (error) {
@@ -598,6 +612,166 @@ module.exports.getClientAgents = async (req, res) => {
   }
 };
 
+/**
+ * Per-conversation OpenAI usage for one AI chatbot under a client.
+ * GET /superadmin/clients/:clientId/agents/:agentId/conversations-usage
+ */
+module.exports.getAgentConversationsUsage = async (req, res) => {
+  try {
+    const { clientId, agentId } = req.params;
+    const client = await Client.findById(clientId).lean();
+    if (!client) {
+      return res.status(404).json({ message: "Client not found" });
+    }
+
+    const agent = await Agent.findOne({
+      _id: agentId,
+      userId: client.userId,
+      isDeleted: { $ne: true },
+    })
+      .select("agentName website_name")
+      .lean();
+
+    if (!agent) {
+      return res.status(404).json({ message: "AI chatbot not found for this client" });
+    }
+
+    const { conversations, totals } =
+      await UsageTrackingService.getOpenAIUsageGroupedByConversation(
+        client.userId,
+        agentId
+      );
+
+    const conversationIds = conversations
+      .map((c) => c.conversationId)
+      .filter(Boolean);
+
+    const convDocs =
+      conversationIds.length > 0
+        ? await Conversation.find({ _id: { $in: conversationIds } })
+            .select("_id visitor createdAt updatedAt")
+            .lean()
+        : [];
+
+    const convById = new Map(convDocs.map((c) => [String(c._id), c]));
+    const visitorIds = [
+      ...new Set(
+        convDocs
+          .map((c) => c.visitor)
+          .filter(Boolean)
+          .map((v) => String(v))
+      ),
+    ];
+
+    const visitors =
+      visitorIds.length > 0
+        ? await Visitor.find({ _id: { $in: visitorIds } })
+            .select("_id name")
+            .lean()
+        : [];
+    const visitorById = new Map(visitors.map((v) => [String(v._id), v]));
+
+    const conversationsWithVisitor = conversations.map((row) => {
+      const conv = convById.get(String(row.conversationId));
+      const visitorId = conv?.visitor ? String(conv.visitor) : null;
+      const visitor = visitorId ? visitorById.get(visitorId) : null;
+      return {
+        ...row,
+        visitorId,
+        visitorName: visitor?.name || "Unknown visitor",
+        conversationCreatedAt: conv?.createdAt || null,
+        conversationUpdatedAt: conv?.updatedAt || null,
+      };
+    });
+
+    // Same order as Inbox Chat Logs (lastActivity): newest updatedAt first
+    conversationsWithVisitor.sort((a, b) => {
+      const dateA = new Date(
+        a.conversationUpdatedAt || a.conversationCreatedAt || 0
+      ).getTime();
+      const dateB = new Date(
+        b.conversationUpdatedAt || b.conversationCreatedAt || 0
+      ).getTime();
+      return dateB - dateA;
+    });
+
+    // Chat-only conversation totals already in `totals`.
+    // Optional agent-level totals for the card (overall + embedding).
+    const agentUsageMap = await UsageTrackingService.getOpenAIUsageGroupedByAgent(
+      client.userId
+    );
+    const agentBucket = agentUsageMap.byAgent[String(agentId)] || {};
+    const empty = UsageTrackingService.emptyUsageTotals();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        agent: {
+          _id: agent._id,
+          agentName: agent.agentName,
+          website_name: agent.website_name,
+        },
+        /** Sum of chat usage records that have a conversationId */
+        conversationsTotals: totals,
+        agentTotals: agentBucket.openAIUsage || empty,
+        embeddingUsage: agentBucket.embeddingUsage || empty,
+        conversations: conversationsWithVisitor,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching agent conversations usage:", error);
+    res.status(500).json({ message: "Error fetching agent conversations usage" });
+  }
+};
+
+/**
+ * OpenAI usage breakdown for one conversation.
+ * GET /superadmin/clients/:clientId/conversations/:conversationId/usage
+ */
+module.exports.getConversationOpenAIUsage = async (req, res) => {
+  try {
+    const { clientId, conversationId } = req.params;
+    const client = await Client.findById(clientId).lean();
+    if (!client) {
+      return res.status(404).json({ message: "Client not found" });
+    }
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      userId: client.userId,
+    })
+      .select("_id visitor agentId createdAt")
+      .lean();
+
+    if (!conversation) {
+      return res.status(404).json({ message: "Conversation not found" });
+    }
+
+    const [usage, visitor] = await Promise.all([
+      UsageTrackingService.getOpenAIUsageForConversation(
+        client.userId,
+        conversationId
+      ),
+      conversation.visitor
+        ? Visitor.findById(conversation.visitor).select("name").lean()
+        : null,
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        conversationId: String(conversation._id),
+        visitorId: conversation.visitor ? String(conversation.visitor) : null,
+        visitorName: visitor?.name || "Unknown visitor",
+        agentId: conversation.agentId ? String(conversation.agentId) : null,
+        openAIUsage: usage,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching conversation OpenAI usage:", error);
+    res.status(500).json({ message: "Error fetching conversation OpenAI usage" });
+  }
+};
 
 module.exports.cancelClientSubscription = async (req, res) => {
   try {
@@ -621,6 +795,7 @@ module.exports.cancelClientSubscription = async (req, res) => {
 
     res.status(200).json({
       success: true,
+      
       message: "Client subscription cancelled and set to default plan"
     });
   } catch (error) {
