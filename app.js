@@ -24,11 +24,39 @@ initializeSocketController(server);
 
 mongoose.connect(process.env.MONGODB_URI);
 
-mongoose.connection.once("open", () => {
-  const { ensureDefaultAiModels } = require("./services/aiModelSeedService");
-  ensureDefaultAiModels().catch((err) => {
-    console.error("[aiModelSeed] failed to ensure default AI models:", err);
-  });
+// mongoose.connection.once("open", () => {
+//   const { ensureDefaultAiModels } = require("./services/aiModelSeedService");
+//   ensureDefaultAiModels().catch((err) => {
+//     console.error("[aiModelSeed] failed to ensure default AI models:", err);
+//   });
+// mongoose.connection.once("connected", async () => {
+//   try {
+//     const {
+//       loadScrapeProxySettingsIntoRuntime,
+//     } = require("./services/scraperSettingsService");
+//     await loadScrapeProxySettingsIntoRuntime();
+//   } catch (error) {
+//     console.error("[scraper] Failed to load proxy settings from DB:", error);
+//   }
+// });
+
+
+mongoose.connection.once("open", async () => {
+  try {
+    const { ensureDefaultAiModels } = require("./services/aiModelSeedService");
+    await ensureDefaultAiModels();
+  } catch (error) {
+    console.error("[aiModelSeed] Failed to ensure default AI models:", error);
+  }
+
+  try {
+    const {
+      loadScrapeProxySettingsIntoRuntime,
+    } = require("./services/scraperSettingsService");
+    await loadScrapeProxySettingsIntoRuntime();
+  } catch (error) {
+    console.error("[scraper] Failed to load proxy settings from DB:", error);
+  }
 });
 
 // Ensure uploads directory exists

@@ -122,6 +122,8 @@ router.get('/superadmin/me', verifySuperAdminToken, superAdminController.superAd
 router.get('/superadmin/dashboard', verifySuperAdminToken, superAdminController.getDashboardData);
 router.get('/superadmin/clients', verifySuperAdminToken, superAdminController.getAllClients);
 router.get('/superadmin/clients/:clientId/agents', verifySuperAdminToken, superAdminController.getClientAgents);
+router.get('/superadmin/clients/:clientId/agents/:agentId/conversations-usage', verifySuperAdminToken, superAdminController.getAgentConversationsUsage);
+router.get('/superadmin/clients/:clientId/conversations/:conversationId/usage', verifySuperAdminToken, superAdminController.getConversationOpenAIUsage);
 router.get('/superadmin/clients/:clientId', verifySuperAdminToken, superAdminController.getClientById);
 router.get('/superadmin/agent/:clientId', verifySuperAdminToken, superAdminController.getClientAgents);
 router.get('/superadmin/cancel/sunscription/:clientId', verifySuperAdminToken, superAdminController.cancelClientSubscription);
@@ -154,6 +156,10 @@ router.get('/superadmin/ai-model-categories',verifySuperAdminToken, superAdminCo
 router.post('/superadmin/ai-model-categories/create',verifySuperAdminToken, superAdminController.createAiModelCategory);
 router.put('/superadmin/ai-model-categories/update',verifySuperAdminToken, superAdminController.updateAiModelCategory);
 router.delete('/superadmin/ai-model-categories/delete/:categoryId',verifySuperAdminToken, superAdminController.deleteAiModelCategory);
+
+// IP Proxy Settings (scraper)
+router.get('/superadmin/scrape-proxy-settings',verifySuperAdminToken, superAdminController.getScrapeProxySettings);
+router.put('/superadmin/scrape-proxy-settings',verifySuperAdminToken, superAdminController.updateScrapeProxySettings);
 
 router.get('/available', PlanController.getAvailablePlans);
 
