@@ -614,6 +614,7 @@ module.exports.getClientAgents = async (req, res) => {
 
 /**
  * Per-conversation OpenAI usage for one AI chatbot under a client.
+ * Lists real Chat Logs conversations for the agent, then merges usage when present.
  * GET /superadmin/clients/:clientId/agents/:agentId/conversations-usage
  */
 module.exports.getAgentConversationsUsage = async (req, res) => {
@@ -636,24 +637,38 @@ module.exports.getAgentConversationsUsage = async (req, res) => {
       return res.status(404).json({ message: "AI chatbot not found for this client" });
     }
 
-    const { conversations, totals } =
-      await UsageTrackingService.getOpenAIUsageGroupedByConversation(
+    const emptyConvUsage = () => ({
+      ...UsageTrackingService.emptyUsageTotals(),
+      embeddingInputTokens: 0,
+      embeddingInputCost: 0,
+      embeddingTotalTokens: 0,
+      embeddingTotalRequests: 0,
+    });
+
+    const [usageGrouped, convDocs, agentUsageMap] = await Promise.all([
+      UsageTrackingService.getOpenAIUsageGroupedByConversation(
         client.userId,
         agentId
-      );
+      ),
+      // Same basis as Inbox Chat Logs for this chatbot
+      Conversation.find({
+        userId: client.userId,
+        agentId,
+        is_started: true,
+      })
+        .select("_id visitor createdAt updatedAt")
+        .sort({ updatedAt: -1 })
+        .lean(),
+      UsageTrackingService.getOpenAIUsageGroupedByAgent(client.userId),
+    ]);
 
-    const conversationIds = conversations
-      .map((c) => c.conversationId)
-      .filter(Boolean);
+    const usageByConvId = new Map(
+      (usageGrouped.conversations || []).map((c) => [
+        String(c.conversationId),
+        c,
+      ])
+    );
 
-    const convDocs =
-      conversationIds.length > 0
-        ? await Conversation.find({ _id: { $in: conversationIds } })
-            .select("_id visitor createdAt updatedAt")
-            .lean()
-        : [];
-
-    const convById = new Map(convDocs.map((c) => [String(c._id), c]));
     const visitorIds = [
       ...new Set(
         convDocs
@@ -671,18 +686,68 @@ module.exports.getAgentConversationsUsage = async (req, res) => {
         : [];
     const visitorById = new Map(visitors.map((v) => [String(v._id), v]));
 
-    const conversationsWithVisitor = conversations.map((row) => {
-      const conv = convById.get(String(row.conversationId));
-      const visitorId = conv?.visitor ? String(conv.visitor) : null;
+    const seen = new Set();
+    const conversationsWithVisitor = convDocs.map((conv) => {
+      const id = String(conv._id);
+      seen.add(id);
+      const usage = usageByConvId.get(id) || emptyConvUsage();
+      const visitorId = conv.visitor ? String(conv.visitor) : null;
       const visitor = visitorId ? visitorById.get(visitorId) : null;
       return {
-        ...row,
+        ...usage,
+        conversationId: id,
         visitorId,
         visitorName: visitor?.name || "Unknown visitor",
-        conversationCreatedAt: conv?.createdAt || null,
-        conversationUpdatedAt: conv?.updatedAt || null,
+        conversationCreatedAt: conv.createdAt || null,
+        conversationUpdatedAt: conv.updatedAt || null,
       };
     });
+
+    // Keep any usage rows whose conversation is missing / not is_started
+    const orphanIds = (usageGrouped.conversations || [])
+      .map((c) => String(c.conversationId))
+      .filter((id) => id && !seen.has(id));
+
+    if (orphanIds.length > 0) {
+      const orphanDocs = await Conversation.find({ _id: { $in: orphanIds } })
+        .select("_id visitor createdAt updatedAt")
+        .lean();
+      const orphanById = new Map(orphanDocs.map((c) => [String(c._id), c]));
+      const orphanVisitorIds = [
+        ...new Set(
+          orphanDocs
+            .map((c) => c.visitor)
+            .filter(Boolean)
+            .map((v) => String(v))
+        ),
+      ];
+      const orphanVisitors =
+        orphanVisitorIds.length > 0
+          ? await Visitor.find({ _id: { $in: orphanVisitorIds } })
+              .select("_id name")
+              .lean()
+          : [];
+      const orphanVisitorById = new Map(
+        orphanVisitors.map((v) => [String(v._id), v])
+      );
+
+      for (const row of usageGrouped.conversations || []) {
+        const id = String(row.conversationId);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const conv = orphanById.get(id);
+        const visitorId = conv?.visitor ? String(conv.visitor) : null;
+        const visitor = visitorId ? orphanVisitorById.get(visitorId) : null;
+        conversationsWithVisitor.push({
+          ...row,
+          conversationId: id,
+          visitorId,
+          visitorName: visitor?.name || "Unknown visitor",
+          conversationCreatedAt: conv?.createdAt || null,
+          conversationUpdatedAt: conv?.updatedAt || null,
+        });
+      }
+    }
 
     // Same order as Inbox Chat Logs (lastActivity): newest updatedAt first
     conversationsWithVisitor.sort((a, b) => {
@@ -695,13 +760,31 @@ module.exports.getAgentConversationsUsage = async (req, res) => {
       return dateB - dateA;
     });
 
-    // Chat-only conversation totals already in `totals`.
-    // Optional agent-level totals for the card (overall + embedding).
-    const agentUsageMap = await UsageTrackingService.getOpenAIUsageGroupedByAgent(
-      client.userId
-    );
     const agentBucket = agentUsageMap.byAgent[String(agentId)] || {};
     const empty = UsageTrackingService.emptyUsageTotals();
+    const embeddingUsage = agentBucket.embeddingUsage || empty;
+    const agentTotals = agentBucket.openAIUsage || empty;
+
+    // Prefer attributed conversation chat totals; fall back to agent-level totals
+    // so the panel matches the chatbot card when usage lacked conversationId.
+    const attributed = usageGrouped.totals || {
+      ...empty,
+      embeddingInputTokens: 0,
+      embeddingInputCost: 0,
+    };
+    const conversationsTotals = {
+      ...(attributed.totalTokens > 0 || attributed.totalCost > 0
+        ? attributed
+        : {
+            ...agentTotals,
+            embeddingInputTokens: attributed.embeddingInputTokens || 0,
+            embeddingInputCost: attributed.embeddingInputCost || 0,
+          }),
+      embeddingInputTokens:
+        attributed.embeddingInputTokens || embeddingUsage.inputTokens || 0,
+      embeddingInputCost:
+        attributed.embeddingInputCost || embeddingUsage.inputCost || 0,
+    };
 
     res.status(200).json({
       success: true,
@@ -711,10 +794,9 @@ module.exports.getAgentConversationsUsage = async (req, res) => {
           agentName: agent.agentName,
           website_name: agent.website_name,
         },
-        /** Sum of chat usage records that have a conversationId */
-        conversationsTotals: totals,
-        agentTotals: agentBucket.openAIUsage || empty,
-        embeddingUsage: agentBucket.embeddingUsage || empty,
+        conversationsTotals,
+        agentTotals,
+        embeddingUsage,
         conversations: conversationsWithVisitor,
       },
     });
