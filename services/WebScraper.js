@@ -3,7 +3,9 @@ const { HttpsProxyAgent } = require("https-proxy-agent");
 const { HttpProxyAgent } = require("http-proxy-agent");
 const config = require("../config/scraper");
 const { extractProxyHost } = config;
-const { isHtmlContentType } = require("../utils/webUrlUtils");
+const { isHtmlContentType, mightBeSpaShell, looksLikeUnrenderedSpa } = require("../utils/webUrlUtils");
+const browserScraper = require("./BrowserScraperService");
+const cheerio = require("cheerio");
 
 function formatProxyLabel(proxySelection, proxyUrl) {
   if (!proxySelection) return "direct (no proxy)";
@@ -353,6 +355,28 @@ class WebScraper {
     throw lastError || new Error(`Failed to fetch ${url}`);
   }
 
+  // If the page is a SPA shell, rendering it with the browser
+  async maybeRenderSpaWithBrowser(result, url, options, proxyUrl, proxyLabel) {
+    if (!mightBeSpaShell(result.rawHtml)) return result;
+
+    const $ = cheerio.load(result.rawHtml);
+    if (!looksLikeUnrenderedSpa($)) return result;
+
+    console.log(`[WebScraper] Detected unrendered SPA shell, retrying with browser | ${url}`);
+    try {
+      return await browserScraper.scrapeWebpage(url, {
+        proxyUrl,
+        proxyLabel,
+        userId: options.userId,
+        jobId: options.jobId,
+        timeout: options.timeout,
+      });
+    } catch (browserErr) {
+      console.warn(`[WebScraper] Browser fallback failed, keeping thin HTML | ${url} | ${browserErr.message}`);
+      return result;
+    }
+  }
+
   /**
    * Page training — uses proxy rotation when proxies are configured in SuperAdmin.
    */
@@ -421,7 +445,8 @@ class WebScraper {
     };
 
     if (!config.proxyEnabled) {
-      return runScrape(null, null);
+      const result = await runScrape(null, null);
+      return this.maybeRenderSpaWithBrowser(result, url, options, null, null);
     }
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -430,7 +455,8 @@ class WebScraper {
       const proxyLabel = formatProxyLabel(proxySelection, proxyUrl);
 
       try {
-        return await runScrape(proxyUrl, proxySelection);
+        const result = await runScrape(proxyUrl, proxySelection);
+        return await this.maybeRenderSpaWithBrowser(result, url, options, proxyUrl, proxyLabel);
       } catch (err) {
         lastError = err;
         console.warn(
@@ -448,7 +474,8 @@ class WebScraper {
     if (config.proxyFallbackDirect) {
       try {
         console.log(`[WebScraper] scrape fallback direct (no proxy) | ${url}`);
-        return await runScrape(null, null);
+        const result = await runScrape(null, null);
+        return await this.maybeRenderSpaWithBrowser(result, url, options, null, null);
       } catch (directErr) {
         lastError = directErr;
       }
