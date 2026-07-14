@@ -603,18 +603,28 @@ const processWebPage = async (url, sourceCode, footerCache = {}) => {
     ).remove();
     $(".ad, .advertisement, .popup, .modal").remove();
 
-    // ---- Handle footer: scrape once per domain ----
-    let footerHTML = "";
-    const footer = $("footer").first();
+    // ---- Shared header/nav/footer chrome ----
+    const isPageLevelChrome = (el) =>
+      $(el).closest("article, main").length === 0;
 
+    let footerHTML = "";
+    const footer = $("footer, [role='contentinfo']")
+      .filter((_, el) => isPageLevelChrome(el))
+      .first();
     if (footer.length) {
       const footerText = footer.text().trim();
       if (footerText && !footerCache[domain]) {
-        footerCache[domain] = true; // mark as processed
+        footerCache[domain] = true;
         footerHTML = footer.html();
       }
-      footer.remove(); // remove footer from page to prevent duplication
     }
+
+    $(
+      "header, footer, nav, [role='banner'], [role='contentinfo'], [role='navigation']",
+    ).each((_, el) => {
+      if (!isPageLevelChrome(el)) return;
+      $(el).remove();
+    });
 
     // ---- Convert relative URLs ----
     $("a, img").each((_, el) => {
