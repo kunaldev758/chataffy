@@ -184,7 +184,7 @@ async function classifyWebsiteType({
   const provider = String(
     process.env.LLAMA_WEBSITE_TYPE_PROVIDER ||
       process.env.LLAMA_MICRO_PROVIDER ||
-      "ollama",
+      "grok",
   ).toLowerCase();
   const timeoutMs = Number(process.env.LLAMA_WEBSITE_TYPE_TIMEOUT_MS) || 30000;
   const system =
@@ -209,7 +209,7 @@ async function classifyWebsiteType({
     } else {
       const baseUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
       const model =
-        process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama3.2:3b-instruct";
+        process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
       raw = await callOllama({ model, prompt, baseUrl, timeoutMs, system });
     }
   } catch (error) {

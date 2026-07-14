@@ -4,8 +4,8 @@ const { QdrantClient } = require("@qdrant/js-client-rest");
 const { v4: uuidv4 } = require("uuid");
 const Agent = require("../models/Agent");
 const Client = require("../models/Client");
-const { logOpenAIUsage, logQdrantUsage } = require("../services/UsageTrackingService");
-const { getModelForCategory } = require("../services/aiModelService");
+const { logOpenAIUsage, logQdrantUsage, computeTokenCosts } = require("../services/UsageTrackingService");
+const { getResolvedModelConfig } = require("../services/aiModelService");
 
 const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
 const EMBEDDING_DIMENSION = parseInt(process.env.OPENAI_EMBEDDING_DIMENSION || "1536", 10);
@@ -66,10 +66,16 @@ const reviseAnswer = async (req, res) => {
     const inputTokens = Math.ceil(textToEmbed.length / 4);
     if (inputTokens > 0) {
       try {
-        const modelRecord = await getModelForCategory("embedding").catch(() => null);
+        const modelRecord = await getResolvedModelConfig("embedding");
         const embeddingModel = modelRecord?.model || "text-embedding-3-small";
-        const inputCostPerMillion = modelRecord?.inputCost || 0;
-        const inputCost = (inputTokens / 1000000) * inputCostPerMillion;
+        const costs = computeTokenCosts({
+          inputTokens,
+          outputTokens: 0,
+          cacheTokens: 0,
+          inputCostPerMillion: modelRecord?.inputCost || 0,
+          outputCostPerMillion: 0,
+          cacheCostPerMillion: 0,
+        });
 
         await logOpenAIUsage({
           userId,
@@ -80,10 +86,7 @@ const reviseAnswer = async (req, res) => {
           outputTokens: 0,
           cacheTokens: 0,
           totalTokens: inputTokens,
-          inputCost,
-          outputCost: 0,
-          cacheCost: 0,
-          totalCost: inputCost,
+          ...costs,
         });
       } catch (logError) {
         console.warn(`[ReviseAnswer] Error logging embedding usage: ${logError.message}`);

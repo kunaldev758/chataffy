@@ -24,6 +24,13 @@ initializeSocketController(server);
 
 mongoose.connect(process.env.MONGODB_URI);
 
+mongoose.connection.once("open", () => {
+  const { ensureDefaultAiModels } = require("./services/aiModelSeedService");
+  ensureDefaultAiModels().catch((err) => {
+    console.error("[aiModelSeed] failed to ensure default AI models:", err);
+  });
+});
+
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) {

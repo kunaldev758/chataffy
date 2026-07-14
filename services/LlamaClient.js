@@ -1,54 +1,152 @@
 const axios = require("axios");
-const { logOpenAIUsage } = require("./UsageTrackingService");
+const {
+  logOpenAIUsage,
+  computeTokenCosts,
+} = require("./UsageTrackingService");
+const {
+  getResolvedModelConfig,
+  usageTypeForCategory,
+} = require("./aiModelService");
 
-function getLlamaConfig() {
-  const provider = String(
-    process.env.LLAMA_PROVIDER || process.env.LLAMA_MICRO_PROVIDER || "ollama"
-  ).toLowerCase();
-  const timeoutMs =
-    Number(process.env.LLAMA_TIMEOUT_MS || process.env.LLAMA_MICRO_TIMEOUT_MS) ||
-    4000;
+/**
+ * Resolve Llama/open-source config from DB (greeting → micro-classifier fallback),
+ * with env used for OLLAMA_BASE_URL / GROQ_API_KEY so local vs production stay correct.
+ */
+async function getLlamaConfig(feature = "greeting") {
+  // Lightweight reply features share greeting / micro-classifier model config.
+  const lightweightFeatures = new Set([
+    "greeting",
+    "contact",
+    "accidental",
+    "live_agent",
+    "off_topic",
+  ]);
 
-  if (provider === "groq") {
-    return {
-      provider: "groq",
-      model:
-        process.env.LLAMA_MODEL ||
-        process.env.LLAMA_MICRO_MODEL ||
-        "llama-3.1-8b-instant",
-      apiKey: process.env.GROQ_API_KEY,
-      timeoutMs,
-    };
-  }
+
+  console.log("feature in the get lamma config check : ",feature);
+
+const primary =
+  feature === "website"
+    ? "website-classifier"
+    : lightweightFeatures.has(feature)
+      ? "micro-classifier"
+      : "micro-classifier";
+
+
+  console.log("primary check :",primary)
+
+  const fallbacks =
+    primary === "greeting"
+      ? ["micro-classifier", "open-source"]
+      : primary === "website-classifier"
+        ? ["open-source"]
+        : ["open-source"];
+
+  const cfg = await getResolvedModelConfig(primary, fallbacks);
+
+
+  console.log("cfg check : ",cfg)
 
   return {
-    provider: "ollama",
-    model:
-      process.env.LLAMA_MODEL ||
-      process.env.LLAMA_MICRO_MODEL ||
-      "llama3.1:8b",
-    baseUrl: process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434",
-    timeoutMs,
+    provider: cfg.provider === "groq" ? "groq" : "ollama",
+    model: cfg.model,
+    apiKey: cfg.apiKey,
+    baseUrl: cfg.baseUrl,
+    timeoutMs: cfg.timeoutMs,
+    inputCost: cfg.inputCost,
+    outputCost: cfg.outputCost,
+    cacheCost: cfg.cacheCost,
+    fromDb: cfg.fromDb,
+    category: cfg.category,
   };
 }
 
-function isLlamaFeatureEnabled(feature = "greeting") {
+function isLlamaEnvEnabled(feature = "greeting") {
   if (String(process.env.LLAMA_ENABLED || "").toLowerCase() === "true") {
     return true;
   }
+  if (String(process.env.LLAMA_MICRO_ENABLED || "").toLowerCase() === "true") {
+    return true;
+  }
 
-  const envKey =
-    feature === "contact" ? "LLAMA_CONTACT_ENABLED" : "LLAMA_GREETING_ENABLED";
+  const featureEnvMap = {
+    contact: "LLAMA_CONTACT_ENABLED",
+    greeting: "LLAMA_GREETING_ENABLED",
+    accidental: "LLAMA_GREETING_ENABLED",
+    live_agent: "LLAMA_GREETING_ENABLED",
+    off_topic: "LLAMA_GREETING_ENABLED",
+  };
+  const envKey = featureEnvMap[feature] || "LLAMA_GREETING_ENABLED";
   const flag = String(process.env[envKey] || "").toLowerCase();
   if (flag === "false") return false;
   if (flag === "true") return true;
-
-  const cfg = getLlamaConfig();
-  if (cfg.provider === "groq") return Boolean(cfg.apiKey);
-  return false;
+  return null; // undecided — check DB
 }
 
-function isLlamaConfigured(feature = "greeting") {
+function estimateUsageFromText({ system, prompt, text }) {
+  const inputChars =
+    String(system || "").length + String(prompt || "").length;
+  const outputChars = String(text || "").length;
+  const prompt_tokens = Math.max(1, Math.ceil(inputChars / 4));
+  const completion_tokens = Math.max(1, Math.ceil(outputChars / 4));
+  return {
+    prompt_tokens,
+    completion_tokens,
+    total_tokens: prompt_tokens + completion_tokens,
+  };
+}
+
+function logLlamaUsage({
+  cfg,
+  usage,
+  userId,
+  agentId,
+  conversationId,
+}) {
+  if (!userId || !usage) return;
+
+  const costs = computeTokenCosts({
+    inputTokens: usage.prompt_tokens || 0,
+    outputTokens: usage.completion_tokens || 0,
+    cacheTokens: 0,
+    inputCostPerMillion: cfg.inputCost,
+    outputCostPerMillion: cfg.outputCost,
+    cacheCostPerMillion: cfg.cacheCost,
+  });
+
+  logOpenAIUsage({
+    userId,
+    agentId,
+    conversationId,
+    model: cfg.model,
+    type: usageTypeForCategory(cfg.category || "open-source"),
+    inputTokens: usage.prompt_tokens || 0,
+    outputTokens: usage.completion_tokens || 0,
+    cacheTokens: 0,
+    totalTokens: usage.total_tokens || 0,
+    ...costs,
+  }).catch((err) =>
+    console.warn(`[LlamaClient] Error logging usage: ${err.message}`)
+  );
+}
+
+async function isLlamaFeatureEnabled(feature = "greeting") {
+  const envFlag = isLlamaEnvEnabled(feature);
+  if (envFlag === false) return false;
+  if (envFlag === true) return true;
+
+  try {
+    const cfg = await getLlamaConfig(feature);
+    if (cfg.fromDb) return true;
+    if (cfg.provider === "groq") return Boolean(cfg.apiKey);
+    // ollama without DB: only if explicitly enabled via env above
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function isLlamaConfigured(feature = "greeting") {
   return isLlamaFeatureEnabled(feature);
 }
 
@@ -70,18 +168,26 @@ async function callOllama({ model, prompt, baseUrl, timeoutMs, system }) {
   );
 
   const text = String(res.data?.message?.content || res.data?.response || "").trim();
-  // Ollama may return eval_count (output tokens) and prompt_eval_count (input tokens)
-  const usage = res.data?.eval_count != null
-    ? {
-        prompt_tokens: res.data.prompt_eval_count || 0,
-        completion_tokens: res.data.eval_count || 0,
-        total_tokens: (res.data.prompt_eval_count || 0) + (res.data.eval_count || 0),
-      }
-    : null;
+  const usage =
+    res.data?.eval_count != null
+      ? {
+          prompt_tokens: res.data.prompt_eval_count || 0,
+          completion_tokens: res.data.eval_count || 0,
+          total_tokens:
+            (res.data.prompt_eval_count || 0) + (res.data.eval_count || 0),
+        }
+      : null;
   return { text, usage };
 }
 
-async function callGroq({ model, prompt, apiKey, timeoutMs, system, maxTokens = 120 }) {
+async function callGroq({
+  model,
+  prompt,
+  apiKey,
+  timeoutMs,
+  system,
+  maxTokens = 120,
+}) {
   const url = "https://api.groq.com/openai/v1/chat/completions";
   const messages = [];
   if (system) messages.push({ role: "system", content: system });
@@ -112,10 +218,11 @@ async function completeLlama({
   maxTokens = 120,
   userId = null,
   agentId = null,
+  conversationId = null,
 }) {
-  if (!isLlamaFeatureEnabled(feature)) return null;
+  if (!(await isLlamaFeatureEnabled(feature))) return null;
 
-  const cfg = getLlamaConfig();
+  const cfg = await getLlamaConfig(feature);
   try {
     let result;
     if (cfg.provider === "groq") {
@@ -138,27 +245,35 @@ async function completeLlama({
       });
     }
 
-    if (result.usage && userId) {
-      logOpenAIUsage({
+
+    console.log("result check : ",result);
+
+    console.log(`[LlamaClient] ${cfg.provider}`,{
+      model: cfg.model,
+      prompt,
+      system,
+      text: result.text,
+      usage: result.usage,
+
+    })
+
+    if (result.text && userId) {
+      const usage =
+        result.usage ||
+        estimateUsageFromText({ system, prompt, text: result.text });
+      logLlamaUsage({
+        cfg,
+        usage,
         userId,
         agentId,
-        model: cfg.model,
-        type: "open-source",
-        inputTokens: result.usage.prompt_tokens || 0,
-        outputTokens: result.usage.completion_tokens || 0,
-        cacheTokens: 0,
-        totalTokens: result.usage.total_tokens || 0,
-        inputCost: 0,
-        outputCost: 0,
-        cacheCost: 0,
-        totalCost: 0,
-      }).catch((err) =>
-        console.warn(`[LlamaClient] Error logging usage: ${err.message}`)
-      );
+        conversationId,
+      });
     }
 
     return result.text;
   } catch (error) {
+
+    console.log("result check : ",error);
     console.warn(`[LlamaClient] ${cfg.provider} call failed:`, error.message);
     return null;
   }

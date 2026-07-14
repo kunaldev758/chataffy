@@ -586,7 +586,12 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
   return metadata;
 };
 
-const processWebPage = async (url, sourceCode, footerCache = {}) => {
+const processWebPage = async (
+  url,
+  sourceCode,
+  footerCache = {},
+  { userId = null, agentId = null } = {},
+) => {
   try {
     const $ = cheerio.load(sourceCode);
     const webPageURL = url;
@@ -690,6 +695,8 @@ const processWebPage = async (url, sourceCode, footerCache = {}) => {
         description: metaDescription,
         pageContent: cleanContent,
         schemaTypes: websiteMetadata._schemaTypes || [],
+        userId,
+        agentId,
       });
 
       if (llamaType?.company_type) {
@@ -936,6 +943,7 @@ new Worker(
             url,
             sourceCode,
             footerCache,
+            { userId, agentId },
           );
           if (!processResult.content) {
             await TrainingModel.create({
@@ -1664,6 +1672,7 @@ new Worker(
             url,
             rawHtml,
             footerCache,
+            { userId, agentId },
           );
 
           if (!processResult?.content) {

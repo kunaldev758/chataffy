@@ -82,6 +82,7 @@ async function generateContactResponse({
   matches,
   userId = null,
   agentId = null,
+  conversationId = null,
 }) {
   const facts = extractContactFacts(matches);
   if (facts.length === 0) return null;
@@ -125,6 +126,7 @@ async function generateContactResponse({
     maxTokens: 80,
     userId,
     agentId,
+    conversationId,
   });
 
   if (introRaw) {

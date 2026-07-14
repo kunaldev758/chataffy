@@ -1,6 +1,13 @@
 const axios = require("axios");
 const { normalizeLanguageCode } = require("../utils/websiteLanguage");
-const { logOpenAIUsage } = require("./UsageTrackingService");
+const {
+  logOpenAIUsage,
+  computeTokenCosts,
+} = require("./UsageTrackingService");
+const {
+  getResolvedModelConfig,
+  usageTypeForCategory,
+} = require("./aiModelService");
 
 function safeJsonParse(text) {
   try {
@@ -55,13 +62,15 @@ async function callOllama({ model, prompt, baseUrl, timeoutMs }) {
     { timeout: timeoutMs }
   );
   const text = String(res.data?.response || "").trim();
-  const usage = res.data?.eval_count != null
-    ? {
-        prompt_tokens: res.data.prompt_eval_count || 0,
-        completion_tokens: res.data.eval_count || 0,
-        total_tokens: (res.data.prompt_eval_count || 0) + (res.data.eval_count || 0),
-      }
-    : null;
+  const usage =
+    res.data?.eval_count != null
+      ? {
+          prompt_tokens: res.data.prompt_eval_count || 0,
+          completion_tokens: res.data.eval_count || 0,
+          total_tokens:
+            (res.data.prompt_eval_count || 0) + (res.data.eval_count || 0),
+        }
+      : null;
   return { text, usage };
 }
 
@@ -88,17 +97,9 @@ async function callGroq({ model, prompt, apiKey, timeoutMs }) {
 }
 
 /**
- * Optional micro-classifier using an open-weight Llama model via:
- * - Ollama (local) or
- * - Groq (hosted, often free tier)
- *
- * Controlled by env vars:
- * - LLAMA_MICRO_ENABLED=true|false (default false)
- * - LLAMA_MICRO_PROVIDER=ollama|groq (default ollama)
- * - LLAMA_MICRO_MODEL (default llama3.1:8b for ollama, llama-3.1-8b-instant for groq)
- * - OLLAMA_BASE_URL (default http://127.0.0.1:11434)
- * - GROQ_API_KEY (required for groq)
- * - LLAMA_MICRO_TIMEOUT_MS (default 2000)
+ * Optional micro-classifier using an open-weight Llama model via Ollama or Groq.
+ * Config resolved from AiModel category `micro-classifier` (env fallback).
+ * OLLAMA_BASE_URL / GROQ_API_KEY from env win for local vs production.
  */
 async function classifyShortText({
   message,
@@ -106,13 +107,22 @@ async function classifyShortText({
   visitorLocale,
   userId = null,
   agentId = null,
+  conversationId = null,
 }) {
-  const enabled = String(process.env.LLAMA_MICRO_ENABLED || "false") === "true";
-  if (!enabled) return null;
+  const explicitEnabled = String(process.env.LLAMA_MICRO_ENABLED || "").toLowerCase();
+  let cfg;
+  try {
+    cfg = await getResolvedModelConfig("micro-classifier", ["open-source"]);
+  } catch {
+    return null;
+  }
 
-  const provider = String(process.env.LLAMA_MICRO_PROVIDER || "ollama").toLowerCase();
-  const timeoutMs = Number(process.env.LLAMA_MICRO_TIMEOUT_MS) || 2000;
+  // Explicit false disables; otherwise allow when DB has an active model or env says true
+  if (explicitEnabled === "false") return null;
+  if (explicitEnabled !== "true" && !cfg.fromDb) return null;
 
+  const provider = cfg.provider === "groq" ? "groq" : "ollama";
+  const timeoutMs = cfg.timeoutMs || 2000;
   const prompt = buildClassifierPrompt({
     message,
     websiteLanguage,
@@ -121,19 +131,25 @@ async function classifyShortText({
 
   let raw = "";
   let callUsage = null;
-  let callModel = null;
+  const callModel = cfg.model;
   try {
     if (provider === "groq") {
-      const apiKey = process.env.GROQ_API_KEY;
-      if (!apiKey) return null;
-      callModel = process.env.LLAMA_MICRO_MODEL || "llama-3.1-8b-instant";
-      const result = await callGroq({ model: callModel, prompt, apiKey, timeoutMs });
+      if (!cfg.apiKey) return null;
+      const result = await callGroq({
+        model: callModel,
+        prompt,
+        apiKey: cfg.apiKey,
+        timeoutMs,
+      });
       raw = result.text;
       callUsage = result.usage;
     } else {
-      callModel = process.env.LLAMA_MICRO_MODEL || "llama3.1:8b";
-      const baseUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
-      const result = await callOllama({ model: callModel, prompt, baseUrl, timeoutMs });
+      const result = await callOllama({
+        model: callModel,
+        prompt,
+        baseUrl: cfg.baseUrl,
+        timeoutMs,
+      });
       raw = result.text;
       callUsage = result.usage;
     }
@@ -142,19 +158,25 @@ async function classifyShortText({
   }
 
   if (callUsage && userId) {
+    const costs = computeTokenCosts({
+      inputTokens: callUsage.prompt_tokens || 0,
+      outputTokens: callUsage.completion_tokens || 0,
+      cacheTokens: 0,
+      inputCostPerMillion: cfg.inputCost,
+      outputCostPerMillion: cfg.outputCost,
+      cacheCostPerMillion: cfg.cacheCost,
+    });
     logOpenAIUsage({
       userId,
       agentId,
+      conversationId,
       model: callModel,
-      type: "open-source",
+      type: usageTypeForCategory("micro-classifier"),
       inputTokens: callUsage.prompt_tokens || 0,
       outputTokens: callUsage.completion_tokens || 0,
       cacheTokens: 0,
       totalTokens: callUsage.total_tokens || 0,
-      inputCost: 0,
-      outputCost: 0,
-      cacheCost: 0,
-      totalCost: 0,
+      ...costs,
     }).catch((err) =>
       console.warn(`[LlamaMicroClassifier] Error logging usage: ${err.message}`)
     );
@@ -181,4 +203,3 @@ async function classifyShortText({
 module.exports = {
   classifyShortText,
 };
-

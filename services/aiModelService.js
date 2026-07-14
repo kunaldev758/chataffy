@@ -1,10 +1,63 @@
 const { AiModelsCategory, AiModel } = require("../models/AiModel");
 
-// in memory cache for ai model data 
+// in memory cache for ai model data
 let cache = {};
 const CACHE_TTL = 30000; // 30 seconds
 
-// when admin add/update/delete model then we have to clear cache
+const CATEGORY_ENV_FALLBACKS = {
+  intent: {
+    provider: "openai",
+    model: process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano",
+  },
+  chat: {
+    provider: "openai",
+    model:
+      process.env.OPENAI_CHAT_MODEL_PREMIUM ||
+      process.env.OPENAI_CHAT_MODEL ||
+      "gpt-4.1",
+  },
+  "brief-chat": {
+    provider: "openai",
+    model: process.env.OPENAI_CHAT_MODEL_BRIEF || "gpt-4.1-mini",
+  },
+  // typo alias used in existing DB rows
+  "breif-chat": {
+    provider: "openai",
+    model: process.env.OPENAI_CHAT_MODEL_BRIEF || "gpt-4.1-mini",
+  },
+  embedding: {
+    provider: "openai",
+    model: process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small",
+    embeddingDimension: Number(process.env.OPENAI_EMBEDDING_DIMENSION) || 1536,
+  },
+  "micro-classifier": {
+    provider: process.env.LLAMA_MICRO_PROVIDER || "groq",
+    model: process.env.LLAMA_MICRO_MODEL || "llama-3.1-8b-instant",
+    timeoutMs: Number(process.env.LLAMA_MICRO_TIMEOUT_MS) || 2000,
+  },
+  "website-classifier": {
+    provider: process.env.LLAMA_WEBSITE_TYPE_PROVIDER || "groq",
+    model: process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant",
+    timeoutMs: Number(process.env.LLAMA_WEBSITE_TYPE_TIMEOUT_MS) || 30000,
+  },
+  greeting: {
+    provider:
+      process.env.LLAMA_PROVIDER || process.env.LLAMA_MICRO_PROVIDER || "groq",
+    model:
+      process.env.LLAMA_MODEL ||
+      process.env.LLAMA_MICRO_MODEL ||
+      "llama-3.1-8b-instant",
+    timeoutMs:
+      Number(process.env.LLAMA_TIMEOUT_MS || process.env.LLAMA_MICRO_TIMEOUT_MS) ||
+      4000,
+  },
+  "open-source": {
+    provider: process.env.LLAMA_MICRO_PROVIDER || "groq",
+    model: process.env.LLAMA_MICRO_MODEL || "llama-3.1-8b-instant",
+    timeoutMs: Number(process.env.LLAMA_MICRO_TIMEOUT_MS) || 2000,
+  },
+};
+
 exports.clearModelCache = () => {
   cache = {};
 };
@@ -13,19 +66,17 @@ exports.clearModelCache = () => {
  * Fetch active AI model configuration for a specific category.
  * Cached to prevent hitting the database multiple times during parallel/consecutive steps of a request.
  *
- * @param {string} category - The category to fetch the active model for (e.g. 'chat', 'embedding', 'intent')
+ * @param {string} category - e.g. 'chat', 'embedding', 'intent', 'micro-classifier'
  * @returns {Promise<Object>} The active model record object
  */
 exports.getModelForCategory = async (category) => {
   const now = Date.now();
   const cached = cache[category];
 
-  // Return the cached promise if it exists and is within TTL
-  if (cached && (now - cached.timestamp < CACHE_TTL)) {
+  if (cached && now - cached.timestamp < CACHE_TTL) {
     return cached.promise;
   }
 
-  // Define the DB lookup promise
   const fetchPromise = (async () => {
     const model = await AiModelsCategory.findOne({
       category: category,
@@ -44,20 +95,18 @@ exports.getModelForCategory = async (category) => {
 
     if (!aiModel) {
       throw new Error(
-        `No active AI model configured for category "${category}"`
+        `No active AI model configured for category "${category}"`,
       );
     }
 
     return aiModel;
   })();
 
-  // Cache the promise immediately so concurrent requests share the exact same promise/query
   cache[category] = {
     promise: fetchPromise,
     timestamp: now,
   };
 
-  // If the lookup fails, clean up the cache so subsequent requests can try again
   fetchPromise.catch(() => {
     if (cache[category] && cache[category].promise === fetchPromise) {
       delete cache[category];
@@ -66,3 +115,107 @@ exports.getModelForCategory = async (category) => {
 
   return fetchPromise;
 };
+
+/**
+ * Resolve a usable runtime config for a category.
+ * DB active model wins for model name / provider / costs / timeout;
+ * env wins for infrastructure (grok_BASE_URL, GROQ_API_KEY, OPENAI_API_KEY).
+ * Falls back to env defaults when no active DB model exists.
+ *
+ * @param {string} category
+ * @param {string[]} [fallbackCategories] - try these if primary category has no active model
+ */
+exports.getResolvedModelConfig = async (
+  category,
+  fallbackCategories = [],
+) => {
+  const categoriesToTry = [category, ...fallbackCategories];
+  let record = null;
+  let resolvedCategory = category;
+
+  console.log("categories to try : ",categoriesToTry);
+
+  for (const cat of categoriesToTry) {
+    try {
+      record = await exports.getModelForCategory(cat);
+      resolvedCategory = cat;
+      break;
+    } catch {
+      record = null;
+    }
+  }
+
+  const fallback = CATEGORY_ENV_FALLBACKS[resolvedCategory] ||
+    CATEGORY_ENV_FALLBACKS[category] || {
+      provider: "openai",
+      model: "gpt-4.1-mini",
+    };
+
+  const provider = String(
+    record?.provider || fallback.provider || "openai",
+  ).toLowerCase();
+
+  const cfg = record?.providerConfig || {};
+  const timeoutMs =
+    Number(cfg.timeoutMs) ||
+    Number(fallback.timeoutMs) ||
+    30000;
+
+  // Env wins for infra URLs/keys so local vs production stay correct.
+  let baseUrl =
+    process.env.grok_BASE_URL ||
+    cfg.baseUrl ||
+    "http://127.0.0.1:11434";
+
+  let apiKey = "";
+  if (provider === "groq") {
+    apiKey = process.env.GROQ_API_KEY || cfg.apiKey || "";
+  } else if (provider === "openai") {
+    apiKey = process.env.OPENAI_API_KEY || cfg.apiKey || "";
+  } else {
+    apiKey = cfg.apiKey || "";
+  }
+
+  const embeddingDimension =
+    record?.embeddingDimension ||
+    fallback.embeddingDimension ||
+    Number(process.env.OPENAI_EMBEDDING_DIMENSION) ||
+    1536;
+
+  return {
+    category: resolvedCategory,
+    fromDb: Boolean(record),
+    status: record?.status || "active",
+    model: record?.model || fallback.model,
+    provider,
+    baseUrl,
+    apiKey,
+    timeoutMs,
+    embeddingDimension,
+    inputCost: record?.inputCost ?? 0,
+    outputCost: record?.outputCost ?? 0,
+    cacheCost: record?.cacheCost ?? 0,
+    record,
+  };
+};
+
+/**
+ * Map a fine-grained category to the OpenAIUsage `type` enum.
+ */
+exports.usageTypeForCategory = (category) => {
+  const cat = String(category || "").toLowerCase();
+  if (cat === "embedding") return "embedding";
+  if (cat === "intent") return "intent";
+  if (
+    cat === "open-source" ||
+    cat === "micro-classifier" ||
+    cat === "website-classifier" ||
+    cat === "greeting"
+  ) {
+    return "open-source";
+  }
+  // chat, brief-chat, breif-chat, etc.
+  return "chat";
+};
+
+exports.CATEGORY_ENV_FALLBACKS = CATEGORY_ENV_FALLBACKS;

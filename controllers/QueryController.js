@@ -9,8 +9,11 @@ const Widget = require("../models/Widget");
 const Agent = require("../models/Agent");
 const WebsiteData = require("../models/WebsiteData");
 const HumanAgent = require("../models/HumanAgent");
-const { logOpenAIUsage } = require("../services/UsageTrackingService");
-const { getModelForCategory } = require("../services/aiModelService");
+const { logOpenAIUsage, computeTokenCosts } = require("../services/UsageTrackingService");
+const {
+  getResolvedModelConfig,
+  usageTypeForCategory,
+} = require("../services/aiModelService");
 const {
   routeQuery,
   ROUTES,
@@ -18,15 +21,16 @@ const {
   isPureGreeting,
 } = require("../services/QueryRouter");
 const {
-  buildGreetingResponse,
-  buildLiveAgentResponse,
-  buildAccidentalResponse,
-  buildOffTopicResponse,
   buildAcknowledgementResponse,
   isGibberishOrAccidentalMessage,
 } = require("../services/LightweightResponseService");
 const { generateContactResponse } = require("../services/LlamaContactService");
-const { generateGreeting } = require("../services/LlamaGreetingService");
+const {
+  generateGreeting,
+  generateAccidentalReply,
+  generateLiveAgentReply,
+  generateOffTopicReply,
+} = require("../services/LlamaGreetingService");
 const {
   expandQueryForRetrieval,
   isProductLinkRequest,
@@ -206,21 +210,23 @@ function selectChatModel({
   retrievalMaxScore,
   wasExpanded = false,
   forcePremium = false,
+  premiumModel = CHAT_MODEL_PREMIUM,
+  briefModel = CHAT_MODEL_BRIEF,
 }) {
   if (forcePremium || isPremiumResponseMode(responseMode)) {
-    return CHAT_MODEL_PREMIUM;
+    return premiumModel;
   }
   if (wasExpanded) {
-    return CHAT_MODEL_PREMIUM;
+    return premiumModel;
   }
   if (
     retrievalMaxScore !== undefined &&
     retrievalMaxScore !== null &&
     retrievalMaxScore < LOW_RETRIEVAL_SCORE_PREMIUM
   ) {
-    return CHAT_MODEL_PREMIUM;
+    return premiumModel;
   }
-  return CHAT_MODEL_BRIEF;
+  return briefModel;
 }
 
 function getContextLimitsForMode(responseMode) {
@@ -277,11 +283,8 @@ class QuestionAnsweringSystem {
 
     try{
 
-          const modelRecord = await getModelForCategory("embedding");
-    const modelName =
-      modelRecord?.model ||
-      process.env.OPENAI_EMBEDDING_MODEL ||
-      DEFAULT_EMBEDDING_MODEL;
+    const cfg = await getResolvedModelConfig("embedding");
+    const modelName = cfg.model || DEFAULT_EMBEDDING_MODEL;
 
     if (
       this.embeddingModel &&
@@ -316,13 +319,25 @@ class QuestionAnsweringSystem {
 
   async getChatModelName() {
     try {
-      const modelRecord = await getModelForCategory("chat");
-      return modelRecord?.model || process.env.OPENAI_CHAT_MODEL || DEFAULT_CHAT_MODEL;
+      const cfg = await getResolvedModelConfig("chat");
+      return cfg.model;
     } catch (error) {
       console.warn(
         `[QueryController] Failed to resolve chat model, falling back to default: ${error.message}`
       );
-      return process.env.OPENAI_CHAT_MODEL || DEFAULT_CHAT_MODEL;
+      return process.env.OPENAI_CHAT_MODEL || CHAT_MODEL_PREMIUM;
+    }
+  }
+
+  async getBriefChatModelName() {
+    try {
+      const cfg = await getResolvedModelConfig("brief-chat", ["breif-chat"]);
+      return cfg.model;
+    } catch (error) {
+      console.warn(
+        `[QueryController] Failed to resolve brief chat model: ${error.message}`
+      );
+      return CHAT_MODEL_BRIEF;
     }
   }
 
@@ -338,51 +353,53 @@ class QuestionAnsweringSystem {
       return;
     }
 
-    // Fetch model record based on type category (chat, embedding, intent, etc.)
-    let modelRecord = null;
+    // type may be usage enum (chat/embedding/intent) or a category name
+    const category =
+      type === "open-source"
+        ? "open-source"
+        : type === "embedding"
+          ? "embedding"
+          : type === "intent"
+            ? "intent"
+            : type === "brief-chat" || type === "breif-chat"
+              ? type
+              : "chat";
+
+    let cfg = null;
     try {
-      modelRecord = await getModelForCategory(type);
+      cfg = await getResolvedModelConfig(category, [
+        type === "chat" ? "brief-chat" : "chat",
+      ]);
     } catch (error) {
       console.warn(
-        `Unable to fetch model record for category "${type}": ${error.message}`
+        `Unable to fetch model record for category "${category}": ${error.message}`
       );
     }
-
-    const inputCostPerMillion = modelRecord?.inputCost || 0;
-    const outputCostPerMillion = modelRecord?.outputCost || 0;
-    const cacheCostPerMillion = modelRecord?.cacheCost || 0;
 
     const promptTokens = usage.prompt_tokens || 0;
     const completionTokens = usage.completion_tokens || 0;
     const cacheTokens = usage?.prompt_tokens_details?.cached_tokens ?? 0;
 
-    const uncachedPromptTokens = Math.max(0, promptTokens - cacheTokens);
-
-    const inputCost =
-      (uncachedPromptTokens / 1000000) * inputCostPerMillion;
-
-    const cacheCost =
-      (cacheTokens / 1000000) * cacheCostPerMillion;
-
-    const outputCost =
-      (completionTokens / 1000000) * outputCostPerMillion;
-
-    const totalCost = inputCost + cacheCost + outputCost;
+    const costs = computeTokenCosts({
+      inputTokens: promptTokens,
+      outputTokens: completionTokens,
+      cacheTokens,
+      inputCostPerMillion: cfg?.inputCost || 0,
+      outputCostPerMillion: cfg?.outputCost || 0,
+      cacheCostPerMillion: cfg?.cacheCost || 0,
+    });
 
     await logOpenAIUsage({
       userId,
       agentId,
       conversationId,
-      model: modelName,
-      type,
+      model: modelName || cfg?.model,
+      type: usageTypeForCategory(category),
       inputTokens: promptTokens,
       outputTokens: completionTokens,
       cacheTokens: cacheTokens,
       totalTokens: usage.total_tokens || 0,
-      inputCost,
-      outputCost,
-      cacheCost,
-      totalCost: inputCost + outputCost + cacheCost,
+      ...costs,
     });
   }
 
@@ -521,6 +538,7 @@ class QuestionAnsweringSystem {
       visitorLocale: options.visitorLocale,
       userId,
       agentId,
+      conversationId,
     });
 
     console.log(
@@ -535,26 +553,29 @@ class QuestionAnsweringSystem {
     };
   }
 
-  respondToAccidental({
+  async respondToAccidental({
     question,
     companyName,
     routing,
     websiteLanguage,
     options,
     conversationId,
+    userId,
+    agentId,
   }) {
-    const { answer } = buildAccidentalResponse(
-      this.buildLightweightResponseContext({
-        companyName,
-        userMessage: question,
-        routing,
-        websiteLanguage,
-        options,
-      }),
-    );
+    const { answer, language, source } = await generateAccidentalReply({
+      companyName,
+      userMessage: question,
+      userLanguage: routing.userLanguage,
+      websiteLanguage,
+      visitorLocale: options?.visitorLocale,
+      userId,
+      agentId,
+      conversationId,
+    });
 
     console.log(
-      `[QueryController] Accidental response (${routing.userLanguage})`,
+      `[QueryController] Accidental response via ${source} (${language || routing.userLanguage})`,
     );
 
     return {
@@ -565,26 +586,29 @@ class QuestionAnsweringSystem {
     };
   }
 
-  respondToLiveAgent({
+  async respondToLiveAgent({
     question,
     companyName,
     routing,
     websiteLanguage,
     options,
     conversationId,
+    userId,
+    agentId,
   }) {
-    const { answer } = buildLiveAgentResponse(
-      this.buildLightweightResponseContext({
-        companyName,
-        userMessage: question,
-        routing,
-        websiteLanguage,
-        options,
-      }),
-    );
+    const { answer, language, source } = await generateLiveAgentReply({
+      companyName,
+      userMessage: question,
+      userLanguage: routing.userLanguage,
+      websiteLanguage,
+      visitorLocale: options?.visitorLocale,
+      userId,
+      agentId,
+      conversationId,
+    });
 
     console.log(
-      `[QueryController] Live-agent response (${routing.userLanguage})`,
+      `[QueryController] Live-agent response via ${source} (${language || routing.userLanguage})`,
     );
 
     return {
@@ -595,7 +619,7 @@ class QuestionAnsweringSystem {
     };
   }
 
-  respondToOffTopic({
+  async respondToOffTopic({
     question,
     companyName,
     routing,
@@ -603,18 +627,23 @@ class QuestionAnsweringSystem {
     options,
     conversationId,
     isIrrelevant = false,
+    userId,
+    agentId,
   }) {
-    const { answer, source } = buildOffTopicResponse({
+    const { answer, language, source } = await generateOffTopicReply({
       companyName,
       userMessage: question,
-      routingUserLanguage: routing?.userLanguage,
-      visitorLocale: options?.visitorLocale,
+      userLanguage: routing?.userLanguage,
       websiteLanguage,
+      visitorLocale: options?.visitorLocale,
       isIrrelevant,
+      userId,
+      agentId,
+      conversationId,
     });
 
     console.log(
-      `[QueryController] Off-topic response via ${source} (${routing?.userLanguage || "en"})`,
+      `[QueryController] Off-topic response via ${source} (${language || routing?.userLanguage || "en"})`,
     );
 
     return {
@@ -784,6 +813,7 @@ class QuestionAnsweringSystem {
         matches,
         userId: answerUserId,
         agentId: answerAgentId,
+        conversationId: answerOptions.conversationId || null,
       });
 
       if (contactResult?.answer) {
@@ -1949,11 +1979,21 @@ class QuestionAnsweringSystem {
 
     const effectiveMode =
       wantsProductUrls && responseMode === "brief" ? "list" : responseMode;
+
+    const [premiumCfg, briefCfg] = await Promise.all([
+      getResolvedModelConfig("chat"),
+      getResolvedModelConfig("brief-chat", ["breif-chat"]),
+    ]);
+    const premiumModel = premiumCfg.model || CHAT_MODEL_PREMIUM;
+    const briefModel = briefCfg.model || CHAT_MODEL_BRIEF;
+
     const chatModel = selectChatModel({
       responseMode: effectiveMode,
       retrievalMaxScore,
       wasExpanded,
       forcePremium,
+      premiumModel,
+      briefModel,
     });
 
     const useMediumPrompt =
@@ -2016,7 +2056,7 @@ ${answerInstructions}`;
         );
       }
 
-      if (chatModel !== CHAT_MODEL_BRIEF) {
+      if (chatModel !== briefModel) {
         console.log(
           `[QueryController] Using premium model ${chatModel} (mode=${effectiveMode})`,
         );
@@ -2784,28 +2824,34 @@ ${answerInstructions}`;
           websiteLanguage,
           options,
           conversationId,
+          userId,
+          agentId,
         });
       }
 
       if (routing.route === ROUTES.ACCIDENTAL && USE_LIGHTWEIGHT_RESPONSES) {
-        return this.respondToAccidental({
+        return await this.respondToAccidental({
           question,
           companyName,
           routing,
           websiteLanguage,
           options,
           conversationId,
+          userId,
+          agentId,
         });
       }
 
       if (routing.route === ROUTES.LIVE_AGENT && USE_LIGHTWEIGHT_RESPONSES) {
-        return this.respondToLiveAgent({
+        return await this.respondToLiveAgent({
           question,
           companyName,
           routing,
           websiteLanguage,
           options,
           conversationId,
+          userId,
+          agentId,
         });
       }
 
@@ -3339,7 +3385,7 @@ ${answerInstructions}`;
         const useLightTemplate = USE_LIGHTWEIGHT_RESPONSES && isIrrelevant;
 
         if (useLightTemplate) {
-          const offTopicResult = this.respondToOffTopic({
+          const offTopicResult = await this.respondToOffTopic({
             question,
             companyName,
             routing,
@@ -3347,6 +3393,8 @@ ${answerInstructions}`;
             options,
             conversationId,
             isIrrelevant,
+            userId,
+            agentId,
           });
           finalAnswer = offTopicResult.answer;
         } else {

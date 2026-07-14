@@ -1,10 +1,35 @@
 const OpenAIUsage = require('../models/OpenAIUsageSchema');
 const QdrantUsage = require('../models/qdrantUsageSchema');
-const { getModelForCategory } = require('./aiModelService');
-const { AiModelsCategory } = require('../models/AiModel');
+const {
+  getResolvedModelConfig,
+  usageTypeForCategory,
+} = require('./aiModelService');
 
 /**
- * Log an OpenAI API usage record to the database.
+ * Compute token costs from per-million rates on an AiModel record / resolved config.
+ */
+function computeTokenCosts({
+  inputTokens = 0,
+  outputTokens = 0,
+  cacheTokens = 0,
+  inputCostPerMillion = 0,
+  outputCostPerMillion = 0,
+  cacheCostPerMillion = 0,
+}) {
+  const uncachedPromptTokens = Math.max(0, inputTokens - cacheTokens);
+  const inputCost = (uncachedPromptTokens / 1_000_000) * (inputCostPerMillion || 0);
+  const cacheCost = (cacheTokens / 1_000_000) * (cacheCostPerMillion || 0);
+  const outputCost = (outputTokens / 1_000_000) * (outputCostPerMillion || 0);
+  return {
+    inputCost,
+    outputCost,
+    cacheCost,
+    totalCost: inputCost + outputCost + cacheCost,
+  };
+}
+
+/**
+ * Log an OpenAI / open-source API usage record to the database.
  * Silently no-ops (with a warning) if required fields are missing, so callers
  * are never crashed by a logging failure.
  */
@@ -39,16 +64,58 @@ async function logOpenAIUsage({
       inputTokens,
       outputTokens,
       cacheTokens,
-      totalTokens,
+      totalTokens: totalTokens || inputTokens + outputTokens,
       inputCost,
       outputCost,
       cacheCost,
-      totalCost,
+      totalCost: totalCost || inputCost + outputCost + cacheCost,
     });
   } catch (err) {
     console.error('[UsageTrackingService] Failed to save OpenAI usage record:', err.message);
     return null;
   }
+}
+
+/**
+ * Resolve model pricing for a category and log usage from an OpenAI-style usage object
+ * ({ prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details }).
+ */
+async function logUsageForCategory({
+  category,
+  userId,
+  agentId = null,
+  conversationId = null,
+  usage = null,
+  modelName = null,
+  fallbackCategories = [],
+}) {
+  if (!userId || !usage) return null;
+
+  const cfg = await getResolvedModelConfig(category, fallbackCategories);
+  const inputTokens = usage.prompt_tokens || usage.input_tokens || 0;
+  const outputTokens = usage.completion_tokens || usage.output_tokens || 0;
+  const cacheTokens = usage?.prompt_tokens_details?.cached_tokens ?? 0;
+  const costs = computeTokenCosts({
+    inputTokens,
+    outputTokens,
+    cacheTokens,
+    inputCostPerMillion: cfg.inputCost,
+    outputCostPerMillion: cfg.outputCost,
+    cacheCostPerMillion: cfg.cacheCost,
+  });
+
+  return logOpenAIUsage({
+    userId,
+    agentId,
+    conversationId,
+    model: modelName || cfg.model,
+    type: usageTypeForCategory(category),
+    inputTokens,
+    outputTokens,
+    cacheTokens,
+    totalTokens: usage.total_tokens || inputTokens + outputTokens,
+    ...costs,
+  });
 }
 
 async function getOpenAIUsage(userId, { startDate, endDate } = {}) {
@@ -209,6 +276,8 @@ async function getOpenAIUsageByType(userId, { startDate, endDate } = {}) {
 
 module.exports = {
   logOpenAIUsage,
+  logUsageForCategory,
+  computeTokenCosts,
   getOpenAIUsage,
   getOpenAIUsageByType,
   logQdrantUsage,

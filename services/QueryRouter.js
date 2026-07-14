@@ -1,5 +1,6 @@
 require("dotenv").config();
 const { OpenAI } = require("openai");
+const { getResolvedModelConfig } = require("./aiModelService");
 const { normalizeLanguageCode, detectLanguageFromText } = require("../utils/websiteLanguage");
 const {
   detectCatalogFollowUp,
@@ -481,13 +482,26 @@ async function llmRoute(question, options = {}) {
     websiteLanguage = "en",
     openaiClient = null,
     logOpenAIUsage = null,
-    routerModel = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano",
+    routerModel = null,
   } = options;
 
   const client =
     openaiClient ||
     new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const modelName = routerModel || process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano";
+
+    console.log("llm route get called with client : ",client)
+
+  let modelName = routerModel;
+  if (!modelName) {
+    try {
+      const cfg = await getResolvedModelConfig("intent");
+
+      console.log("cfg for intent model: ",cfg)
+      modelName = cfg.model;
+    } catch {
+      modelName = process.env.OPENAI_ROUTER_MODEL || ROUTER_MODEL;
+    }
+  }
 
 //   const systemPrompt = `You are a query router for a multilingual customer-support chatbot.
 
@@ -638,7 +652,7 @@ async function routeQuery(question, options = {}) {
     websiteLanguage = "en",
     openaiClient = null,
     logOpenAIUsage,
-    routerModel = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano",
+    routerModel = null,
   } = options;
 
   const ruleOutcome = applyRuleEngine(question, {

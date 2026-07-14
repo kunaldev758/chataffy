@@ -807,9 +807,22 @@ module.exports.createAiModel = async (req, res) => {
       outputCost,
       cacheCost,
       categories,
+      provider,
+      embeddingDimension,
+      providerConfig,
     } = req.body;
 
-    const validation = validateAiModel(model, status, inputCost, outputCost, cacheCost, categories);
+    const validation = validateAiModel({
+      model,
+      status,
+      inputCost,
+      outputCost,
+      cacheCost,
+      categories,
+      provider,
+      embeddingDimension,
+      providerConfig,
+    });
     if (!validation.success) {
       return res.status(400).json({ message: validation.message });
     }
@@ -821,6 +834,9 @@ module.exports.createAiModel = async (req, res) => {
       outputCost,
       cacheCost,
       categories,
+      provider: validation.data.provider,
+      embeddingDimension: validation.data.embeddingDimension,
+      providerConfig: validation.data.providerConfig,
     });
 
     if (categories?.length) {
@@ -844,16 +860,47 @@ module.exports.createAiModel = async (req, res) => {
 
 module.exports.updateAiModel = async (req, res) => {
   try {
-    const { modelId, model, status, inputCost, outputCost, cacheCost, categories } = req.body;
+    const {
+      modelId,
+      model,
+      status,
+      inputCost,
+      outputCost,
+      cacheCost,
+      categories,
+      provider,
+      embeddingDimension,
+      providerConfig,
+    } = req.body;
 
-    const validation = validateAiModel(model, status, inputCost, outputCost, cacheCost, categories);
+    const validation = validateAiModel({
+      model,
+      status,
+      inputCost,
+      outputCost,
+      cacheCost,
+      categories,
+      provider,
+      embeddingDimension,
+      providerConfig,
+    });
     if (!validation.success) {
       return res.status(400).json({ message: validation.message });
     }
 
     const updated = await AiModel.findByIdAndUpdate(
       modelId,
-      { model, status, inputCost, outputCost, cacheCost, categories },
+      {
+        model,
+        status,
+        inputCost,
+        outputCost,
+        cacheCost,
+        categories,
+        provider: validation.data.provider,
+        embeddingDimension: validation.data.embeddingDimension,
+        providerConfig: validation.data.providerConfig,
+      },
       { new: true }
     );
 
@@ -902,7 +949,17 @@ module.exports.deleteAiModel = async (req, res) => {
 };
 
 
-function validateAiModel(model, status, inputCost, outputCost, cacheCost, categories) {
+function validateAiModel({
+  model,
+  status,
+  inputCost,
+  outputCost,
+  cacheCost,
+  categories,
+  provider,
+  embeddingDimension,
+  providerConfig,
+}) {
   if (!model || !status) {
     return { success: false, message: "Model and status are required" };
   }
@@ -915,27 +972,61 @@ function validateAiModel(model, status, inputCost, outputCost, cacheCost, catego
     return { success: false, message: "Categories are required" };
   }
 
-  if(status !== "active" && status !== "inactive") {
+  if (status !== "active" && status !== "inactive") {
     return { success: false, message: "Status must be active or inactive" };
   }
 
-  if(inputCost < 0 || outputCost < 0 || cacheCost < 0) {
+  if (inputCost < 0 || outputCost < 0 || cacheCost < 0) {
     return { success: false, message: "Costs must not be negative" };
   }
 
-  if(categories.length === 0) {
-    return { success: false, message: "Categories must be an array" };
+  if (!Array.isArray(categories) || categories.length === 0) {
+    return { success: false, message: "Categories must be a non-empty array" };
   }
 
-  if(categories.some((c) => !mongoose.Types.ObjectId.isValid(c))) {
+  if (categories.some((c) => !mongoose.Types.ObjectId.isValid(c))) {
     return { success: false, message: "Categories must be an array of valid ObjectIds" };
   }
 
-  if(categories.some((c) => c.length === 0)) {
-    return { success: false, message: "Categories must be an array of non-empty strings" };
+  const resolvedProvider = String(provider || "openai").toLowerCase();
+  if (!["openai", "ollama", "groq"].includes(resolvedProvider)) {
+    return { success: false, message: "Provider must be openai, ollama, or groq" };
   }
 
-  return { success: true, message: "Validation successful" };
+  const cfg = providerConfig && typeof providerConfig === "object" ? providerConfig : {};
+  const timeoutMs = cfg.timeoutMs != null ? Number(cfg.timeoutMs) : 30000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return { success: false, message: "timeoutMs must be a positive number" };
+  }
+
+  let resolvedDimension = null;
+  if (embeddingDimension != null && embeddingDimension !== "") {
+    resolvedDimension = Number(embeddingDimension);
+    if (!Number.isFinite(resolvedDimension) || resolvedDimension <= 0) {
+      return { success: false, message: "embeddingDimension must be a positive number" };
+    }
+  }
+
+  // baseUrl / apiKey are optional overrides (env wins at runtime for local vs prod)
+  const normalizedConfig = {
+    apiKey: String(cfg.apiKey || "").trim(),
+    baseUrl: String(cfg.baseUrl || "").trim(),
+    timeoutMs,
+    deploymentName: String(cfg.deploymentName || "").trim(),
+    organization: String(cfg.organization || "").trim(),
+    project: String(cfg.project || "").trim(),
+    apiVersion: String(cfg.apiVersion || "").trim(),
+  };
+
+  return {
+    success: true,
+    message: "Validation successful",
+    data: {
+      provider: resolvedProvider,
+      embeddingDimension: resolvedDimension,
+      providerConfig: normalizedConfig,
+    },
+  };
 }
 
 

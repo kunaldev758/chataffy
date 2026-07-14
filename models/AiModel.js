@@ -7,6 +7,7 @@ const aiModelsCategoriesSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+const PROVIDERS = ["openai", "ollama", "groq"];
 
 const aiModelSchema = new mongoose.Schema(
   {
@@ -20,26 +21,56 @@ const aiModelSchema = new mongoose.Schema(
       enum: ["active", "inactive"],
     },
 
+    provider: {
+      type: String,
+      required: true,
+      default: "openai",
+      enum: PROVIDERS,
+      index: true,
+    },
+
+    /** Embedding vector size (e.g. 1536). Only used for embedding models. */
+    embeddingDimension: {
+      type: Number,
+      default: null,
+    },
+
     inputCost: { type: Number, required: true, default: 0 }, // per million tokens
-
     outputCost: { type: Number, required: true, default: 0 }, // per million tokens
-
     cacheCost: { type: Number, required: true, default: 0 }, // per million tokens
-
     totalCost: { type: Number, required: true, default: 0 }, // per million tokens
+
+    /**
+     * Provider-specific connection settings.
+     * baseUrl / apiKey are optional overrides — env vars win for local vs production:
+     *   OLLAMA_BASE_URL, GROQ_API_KEY, OPENAI_API_KEY
+     */
+    providerConfig: {
+      apiKey: { type: String, default: "" },
+      baseUrl: { type: String, default: "" },
+      timeoutMs: { type: Number, default: 30000 },
+      deploymentName: { type: String, default: "" },
+      organization: { type: String, default: "" },
+      project: { type: String, default: "" },
+      apiVersion: { type: String, default: "" },
+    },
 
     categories: {
       type: [{ type: mongoose.Schema.Types.ObjectId, ref: "AiModelsCategory" }],
       required: true,
       index: true,
       default: [],
-    }, // e.g. "chat", "completion", "embedding", "search", "vector" "open-source"
+    },
   },
   { timestamps: true },
 );
 
-aiModelSchema.pre("save", function(next) {
-  if(this.isModified("inputCost") || this.isModified("outputCost") || this.isModified("cacheCost")) {
+aiModelSchema.pre("save", function (next) {
+  if (
+    this.isModified("inputCost") ||
+    this.isModified("outputCost") ||
+    this.isModified("cacheCost")
+  ) {
     this.totalCost = this.inputCost + this.outputCost + this.cacheCost;
   }
   next();
@@ -53,25 +84,17 @@ async function updateTotalCost(next) {
   const $set = update.$set || update;
 
   const needsUpdate =
-    "inputCost" in $set ||
-    "outputCost" in $set ||
-    "cacheCost" in $set;
+    "inputCost" in $set || "outputCost" in $set || "cacheCost" in $set;
 
   if (!needsUpdate) return next();
 
-  // Get current document
   const doc = await this.model.findOne(this.getQuery());
 
   if (!doc) return next();
 
-  const inputCost =
-    $set.inputCost ?? doc.inputCost;
-
-  const outputCost =
-    $set.outputCost ?? doc.outputCost;
-
-  const cacheCost =
-    $set.cacheCost ?? doc.cacheCost;
+  const inputCost = $set.inputCost ?? doc.inputCost;
+  const outputCost = $set.outputCost ?? doc.outputCost;
+  const cacheCost = $set.cacheCost ?? doc.cacheCost;
 
   $set.totalCost = inputCost + outputCost + cacheCost;
 
@@ -88,9 +111,13 @@ aiModelSchema.pre("findOneAndUpdate", updateTotalCost);
 aiModelSchema.pre("updateOne", updateTotalCost);
 
 const AiModel = mongoose.model("AiModel", aiModelSchema);
-const AiModelsCategory = mongoose.model("AiModelsCategory", aiModelsCategoriesSchema);
+const AiModelsCategory = mongoose.model(
+  "AiModelsCategory",
+  aiModelsCategoriesSchema,
+);
 
 module.exports = {
   AiModel,
   AiModelsCategory,
+  PROVIDERS,
 };
