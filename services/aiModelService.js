@@ -206,6 +206,7 @@ exports.usageTypeForCategory = (category) => {
   const cat = String(category || "").toLowerCase();
   if (cat === "embedding") return "embedding";
   if (cat === "intent") return "intent";
+  if (cat === "brief-chat" || cat === "breif-chat") return "brief-chat";
   if (
     cat === "open-source" ||
     cat === "micro-classifier" ||
@@ -214,7 +215,7 @@ exports.usageTypeForCategory = (category) => {
   ) {
     return "open-source";
   }
-  // chat, brief-chat, breif-chat, etc.
+  // chat and any other chat-like category
   return "chat";
 };
 

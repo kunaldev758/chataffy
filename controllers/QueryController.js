@@ -229,6 +229,31 @@ function selectChatModel({
   return briefModel;
 }
 
+/** OpenAIUsage.type for the model actually selected by selectChatModel. */
+function usageTypeForChatSelection({
+  chatModel,
+  briefModel,
+  premiumModel,
+  responseMode = "brief",
+  retrievalMaxScore,
+  wasExpanded = false,
+  forcePremium = false,
+}) {
+  if (briefModel && premiumModel && briefModel === premiumModel) {
+    const usedPremium =
+      forcePremium ||
+      isPremiumResponseMode(responseMode) ||
+      wasExpanded ||
+      (retrievalMaxScore !== undefined &&
+        retrievalMaxScore !== null &&
+        retrievalMaxScore < LOW_RETRIEVAL_SCORE_PREMIUM);
+    return usedPremium ? "chat" : "brief-chat";
+  }
+  if (chatModel === briefModel) return "brief-chat";
+  if (chatModel === premiumModel) return "chat";
+  return "chat";
+}
+
 function getContextLimitsForMode(responseMode) {
   if (responseMode === "page_links") {
     return {
@@ -353,7 +378,7 @@ class QuestionAnsweringSystem {
       return;
     }
 
-    // type may be usage enum (chat/embedding/intent) or a category name
+    // type may be usage enum or a category name
     const category =
       type === "open-source"
         ? "open-source"
@@ -362,14 +387,18 @@ class QuestionAnsweringSystem {
           : type === "intent"
             ? "intent"
             : type === "brief-chat" || type === "breif-chat"
-              ? type
+              ? "brief-chat"
               : "chat";
 
     let cfg = null;
     try {
-      cfg = await getResolvedModelConfig(category, [
-        type === "chat" ? "brief-chat" : "chat",
-      ]);
+      const fallbackCategories =
+        category === "chat"
+          ? ["brief-chat", "breif-chat"]
+          : category === "brief-chat"
+            ? ["breif-chat", "chat"]
+            : [];
+      cfg = await getResolvedModelConfig(category, fallbackCategories);
     } catch (error) {
       console.warn(
         `Unable to fetch model record for category "${category}": ${error.message}`
@@ -768,7 +797,7 @@ class QuestionAnsweringSystem {
     return { answer: result.answer, matches: [] };
   }
 
-  logAnswerUsage(userId, agentId, { usage, model } = {}, conversationId = null) {
+  logAnswerUsage(userId, agentId, { usage, model, usageType, type } = {}, conversationId = null) {
     if (!usage) return;
     this.logOpenAIChatUsage({
       userId,
@@ -776,7 +805,7 @@ class QuestionAnsweringSystem {
       conversationId,
       usage,
       modelName: model || CHAT_MODEL_BRIEF,
-      type: "chat",
+      type: usageType || type || "chat",
     }).catch((err) =>
       console.warn(`[QueryController] Error logging chat usage: ${err.message}`)
     );
@@ -1995,6 +2024,15 @@ class QuestionAnsweringSystem {
       premiumModel,
       briefModel,
     });
+    const usageType = usageTypeForChatSelection({
+      chatModel,
+      briefModel,
+      premiumModel,
+      responseMode: effectiveMode,
+      retrievalMaxScore,
+      wasExpanded,
+      forcePremium,
+    });
 
     const useMediumPrompt =
       effectiveMode === "brief" &&
@@ -2082,13 +2120,14 @@ ${answerInstructions}`;
         "I apologize, I encountered an issue generating a response.";
       const usage = response.usage;
 
-      return { answer, usage, model: chatModel, source: "llm" };
+      return { answer, usage, model: chatModel, usageType, source: "llm" };
     } catch (error) {
       console.error("Error generating answer with OpenAI:", error);
       return {
         answer: "I apologize, I encountered an issue generating a response.",
         usage: null,
         model: chatModel,
+        usageType,
         source: "llm_error",
       };
     }

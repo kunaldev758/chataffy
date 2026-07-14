@@ -36,7 +36,7 @@ const openAIUsageSchema = new mongoose.Schema({
   type:{
     type: String,
     required: true,
-    enum: ["chat", "embedding", "intent", "open-source"],
+    enum: ["chat", "embedding", "intent", "open-source","brief-chat"],
   }
 },{ timestamps: true });
 

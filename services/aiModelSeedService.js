@@ -9,8 +9,7 @@ const DEFAULT_CATEGORIES = [
   "intent",
   "embedding",
   "chat",
-  "brief-chat",
-  "breif-chat", // legacy typo alias used by existing query paths
+  "brief-chat", // legacy typo alias used by existing query paths
   "micro-classifier",
   "website-classifier",
 ];
@@ -64,8 +63,8 @@ const DEFAULT_MODELS = [
     model: "gpt-4.1",
     provider: "openai",
     status: "active",
-    // brief-chat is canonical; breif-chat kept for legacy lookups
-    categories: ["brief-chat", "breif-chat"],
+    // brief-chat is canonical; brief-chat kept for legacy lookups
+    categories: ["brief-chat", "brief-chat"],
     inputCost: 2.0,
     outputCost: 8.0,
     cacheCost: 0.5,
