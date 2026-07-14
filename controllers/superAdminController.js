@@ -645,25 +645,30 @@ module.exports.getAgentConversationsUsage = async (req, res) => {
       embeddingTotalRequests: 0,
     });
 
+
+    // check on promise on all for usage grouped by conversation, conversation docs and agent usage map
+
     const [usageGrouped, convDocs, agentUsageMap] = await Promise.all([
       UsageTrackingService.getOpenAIUsageGroupedByConversation(
-        client.userId,
+        client?.userId,
         agentId
       ),
       // Same basis as Inbox Chat Logs for this chatbot
       Conversation.find({
-        userId: client.userId,
+        userId: client?.userId,
         agentId,
         is_started: true,
       })
         .select("_id visitor createdAt updatedAt")
         .sort({ updatedAt: -1 })
         .lean(),
-      UsageTrackingService.getOpenAIUsageGroupedByAgent(client.userId),
+      UsageTrackingService.getOpenAIUsageGroupedByAgent(client?.userId),
     ]);
 
+    console.log("Convo docs check : ", convDocs, "Usage grouped check : ", usageGrouped.conversations?.length);
+
     const usageByConvId = new Map(
-      (usageGrouped.conversations || []).map((c) => [
+      (usageGrouped?.conversations || []).map((c) => [
         String(c.conversationId),
         c,
       ])
@@ -679,7 +684,7 @@ module.exports.getAgentConversationsUsage = async (req, res) => {
     ];
 
     const visitors =
-      visitorIds.length > 0
+      visitorIds?.length > 0
         ? await Visitor.find({ _id: { $in: visitorIds } })
             .select("_id name")
             .lean()
@@ -687,7 +692,7 @@ module.exports.getAgentConversationsUsage = async (req, res) => {
     const visitorById = new Map(visitors.map((v) => [String(v._id), v]));
 
     const seen = new Set();
-    const conversationsWithVisitor = convDocs.map((conv) => {
+    const conversationsWithVisitor = convDocs?.map((conv) => {
       const id = String(conv._id);
       seen.add(id);
       const usage = usageByConvId.get(id) || emptyConvUsage();
@@ -704,7 +709,7 @@ module.exports.getAgentConversationsUsage = async (req, res) => {
     });
 
     // Keep any usage rows whose conversation is missing / not is_started
-    const orphanIds = (usageGrouped.conversations || [])
+    const orphanIds = (usageGrouped?.conversations || [])
       .map((c) => String(c.conversationId))
       .filter((id) => id && !seen.has(id));
 
@@ -722,17 +727,17 @@ module.exports.getAgentConversationsUsage = async (req, res) => {
         ),
       ];
       const orphanVisitors =
-        orphanVisitorIds.length > 0
+        orphanVisitorIds?.length > 0
           ? await Visitor.find({ _id: { $in: orphanVisitorIds } })
               .select("_id name")
               .lean()
           : [];
       const orphanVisitorById = new Map(
-        orphanVisitors.map((v) => [String(v._id), v])
+        orphanVisitors?.map((v) => [String(v._id), v])
       );
 
-      for (const row of usageGrouped.conversations || []) {
-        const id = String(row.conversationId);
+      for (const row of usageGrouped?.conversations || []) {
+        const id = String(row?.conversationId);
         if (!id || seen.has(id)) continue;
         seen.add(id);
         const conv = orphanById.get(id);
@@ -767,23 +772,23 @@ module.exports.getAgentConversationsUsage = async (req, res) => {
 
     // Prefer attributed conversation chat totals; fall back to agent-level totals
     // so the panel matches the chatbot card when usage lacked conversationId.
-    const attributed = usageGrouped.totals || {
+    const attributed = usageGrouped?.totals || {
       ...empty,
       embeddingInputTokens: 0,
       embeddingInputCost: 0,
     };
     const conversationsTotals = {
-      ...(attributed.totalTokens > 0 || attributed.totalCost > 0
+      ...(attributed.totalTokens > 0 || attributed?.totalCost > 0
         ? attributed
         : {
             ...agentTotals,
-            embeddingInputTokens: attributed.embeddingInputTokens || 0,
-            embeddingInputCost: attributed.embeddingInputCost || 0,
+            embeddingInputTokens: attributed?.embeddingInputTokens || 0,
+            embeddingInputCost: attributed?.embeddingInputCost || 0,
           }),
       embeddingInputTokens:
-        attributed.embeddingInputTokens || embeddingUsage.inputTokens || 0,
+        attributed?.embeddingInputTokens || embeddingUsage.inputTokens || 0,
       embeddingInputCost:
-        attributed.embeddingInputCost || embeddingUsage.inputCost || 0,
+        attributed?.embeddingInputCost || embeddingUsage.inputCost || 0,
     };
 
     res.status(200).json({
