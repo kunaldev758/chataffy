@@ -930,6 +930,8 @@ new Worker(
 
           const { rawHtml: sourceCode } = await webScraper.scrapeWebpage(url, {
             maxRetries: 2,
+            userId,
+            jobId: job.id,
           });
 
           const processResult = await processWebPage(
@@ -1658,6 +1660,8 @@ new Worker(
 
           const { rawHtml } = await webScraper.scrapeWebpage(url, {
             maxRetries: 2,
+            userId,
+            jobId: job.id,
           });
 
           const processResult = await processWebPage(

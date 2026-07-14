@@ -123,6 +123,35 @@ function isHtmlContentType(contentType) {
   );
 }
 
+const SPA_ROOT_HINT_RE =
+  /id\s*=\s*["']?(?:root|app|__next|__nuxt)["']?(?=[\s"'/>])|<app-root(?=[\s/>])|<main-app(?=[\s/>])/i;
+
+function mightBeSpaShell(html) {
+  if (!html || typeof html !== "string") return false;
+  return SPA_ROOT_HINT_RE.test(html);
+}
+
+function looksLikeUnrenderedSpa($) {
+  $("script,style,noscript").remove();
+
+  const text = $("body").text().replace(/\s+/g, " ").trim();
+
+  const hasRoot =
+    $("#root").length ||
+    $("#app").length ||
+    $("#__next").length ||
+    $("#__nuxt").length ||
+    $("app-root").length ||
+    $("main-app").length; 
+
+  const hasMeaningfulMarkup =
+    $("article").length ||
+    $("main").length ||
+    $("h1").text().trim().length > 0;
+
+  return hasRoot && !hasMeaningfulMarkup && text.length < 150;
+}
+
 module.exports = {
   NON_HTML_EXTENSIONS,
   isScrapableWebUrl,
@@ -130,4 +159,6 @@ module.exports = {
   normalizeWebUrl,
   filterAndDedupeWebUrls,
   isHtmlContentType,
+  mightBeSpaShell,
+  looksLikeUnrenderedSpa,
 };

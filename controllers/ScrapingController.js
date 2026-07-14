@@ -8,6 +8,7 @@ const { readFileContent } = require("../utils/fileReader.js");
 const appEvents = require("../events.js");
 const xml2js = require("xml2js");
 const webScraper = require("../services/WebScraper.js");
+const browserScraper = require("../services/BrowserScraperService.js");
 const cheerio = require("cheerio");
 const { urlProcessingQueue, deleteTrainingDataQueue, retrainTrainingDataQueue } = require("../services/jobService.js");
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
@@ -15,6 +16,7 @@ const {
   filterAndDedupeWebUrls,
   isScrapableWebUrl,
   normalizeWebUrl,
+  mightBeSpaShell,
 } = require("../utils/webUrlUtils.js");
 
 const MAX_DISCOVERED_URLS = 1500;
@@ -81,7 +83,24 @@ async bulkInsertUrls(userId,agentId, urls) {
   }
 }
 
-  async extractUrlsFromSitemap(sitemapUrl) {
+  // Collects same-origin, scrapable <a href> links from an HTML document.
+  extractSameOriginLinks(html, origin) {
+    const $ = cheerio.load(html);
+    const sameOrigin = new Set();
+    $("a[href]").each((_, el) => {
+      const href = ($(el).attr("href") || "").trim();
+      if (!href) return;
+      try {
+        const absolute = new URL(href, origin).toString();
+        if (!absolute.startsWith(origin)) return;
+        if (!isScrapableWebUrl(absolute)) return;
+        sameOrigin.add(normalizeWebUrl(absolute));
+      } catch (_) {}
+    });
+    return sameOrigin;
+  }
+
+  async extractUrlsFromSitemap(sitemapUrl, userId = null) {
     try {
       // Auto-add https:// prefix if protocol is missing
       if (sitemapUrl && typeof sitemapUrl === 'string') {
@@ -123,7 +142,7 @@ async bulkInsertUrls(userId,agentId, urls) {
 
             for (const smUrl of discoveredSitemaps) {
               try {
-                const found = await this.extractUrlsFromSitemap(smUrl);
+                const found = await this.extractUrlsFromSitemap(smUrl, userId);
                 urls.push(...found);
                 if (urls.length >= 1500) break;
               } catch (e) {
@@ -152,7 +171,7 @@ async bulkInsertUrls(userId,agentId, urls) {
           if (urls.length >= 1500) break;
           const candidate = `${origin}${path}`;
           try {
-            const found = await this.extractUrlsFromSitemap(candidate);
+            const found = await this.extractUrlsFromSitemap(candidate, userId);
             urls.push(...found);
           } catch (e) {
             // ignore and try next
@@ -169,18 +188,40 @@ async bulkInsertUrls(userId,agentId, urls) {
             validateStatus: (status) => status < 500,
           });
           if (htmlResponse.status === 200 && typeof htmlResponse.data === "string") {
-            const $ = cheerio.load(htmlResponse.data);
-            const sameOrigin = new Set();
-            $("a[href]").each((_, el) => {
-              const href = ($(el).attr("href") || "").trim();
-              if (!href) return;
+            let sameOrigin = this.extractSameOriginLinks(htmlResponse.data, origin);
+
+            // No sitemap + a plain HTTP GET only returns the pre-render shell for SPAs
+            // (React/Vue/Angular/Next) — there are no real <a href> links in the raw
+            // HTML until client-side JS runs. Render the homepage with a real browser
+            // and re-extract links from the fully hydrated DOM instead.
+            const looksUnrendered =
+              mightBeSpaShell(htmlResponse.data) || sameOrigin.size === 0;
+
+            if (looksUnrendered) {
+              console.log(
+                `No links found in raw homepage HTML (possible SPA), rendering with browser: ${sitemapUrl}`,
+              );
               try {
-                const absolute = new URL(href, origin).toString();
-                if (!absolute.startsWith(origin)) return;
-                if (!isScrapableWebUrl(absolute)) return;
-                sameOrigin.add(normalizeWebUrl(absolute));
-              } catch (_) {}
-            });
+                const rendered = await browserScraper.scrapeWebpage(sitemapUrl, {
+                  timeout: 20000,
+                  userId,
+                });
+                if (rendered?.rawHtml) {
+                  const renderedLinks = this.extractSameOriginLinks(rendered.rawHtml, origin);
+                  if (renderedLinks.size > 0) {
+                    console.log(
+                      `Found ${renderedLinks.size} same-origin links after browser render: ${sitemapUrl}`,
+                    );
+                    sameOrigin = renderedLinks;
+                  }
+                }
+              } catch (renderErr) {
+                console.warn(
+                  `Browser render of homepage failed for ${sitemapUrl}: ${renderErr.message}`,
+                );
+              }
+            }
+
             urls = finalizeDiscoveredUrls(Array.from(sameOrigin), 500);
 
             if (urls.length > 0) {
@@ -248,7 +289,7 @@ async bulkInsertUrls(userId,agentId, urls) {
             break;
           }
           try {
-            const nestedUrls = await this.extractUrlsFromSitemap(nestedSitemapUrl);
+            const nestedUrls = await this.extractUrlsFromSitemap(nestedSitemapUrl, userId);
             urls.push(...nestedUrls);
             console.log(`Successfully extracted ${nestedUrls.length} URLs from nested sitemap: ${nestedSitemapUrl}`);
             if (urls.length >= 1500) {
@@ -603,7 +644,7 @@ async bulkInsertUrls(userId,agentId, urls) {
 
       let urls = [];
       if (sitemapUrl) {
-        urls = await this.extractUrlsFromSitemap(sitemapUrl);
+        urls = await this.extractUrlsFromSitemap(sitemapUrl, userId);
         await Agent.updateOne({ _id: agentId }, { $set: {isSitemapAdded: true} });
         urls = finalizeDiscoveredUrls(urls);
         console.log(`Found ${urls.length} URLs in sitemap`);
