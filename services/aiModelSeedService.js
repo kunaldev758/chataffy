@@ -64,7 +64,7 @@ const DEFAULT_MODELS = [
     provider: "openai",
     status: "active",
     // brief-chat is canonical; brief-chat kept for legacy lookups
-    categories: ["brief-chat", "brief-chat"],
+    categories: ["brief-chat"],
     inputCost: 2.0,
     outputCost: 8.0,
     cacheCost: 0.5,
