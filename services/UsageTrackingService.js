@@ -339,6 +339,7 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
 
   const byAgent = {};
   const totals = emptyUsageTotals();
+  const embeddingTotals = emptyUsageTotals();
 
   const ensureAgent = (key) => {
     if (!byAgent[key]) {
@@ -380,13 +381,14 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
     addInto(totals, usage);
     if (type === 'embedding') {
       addInto(agentBucket.embeddingUsage, usage);
+      addInto(embeddingTotals, usage);
     } else {
       // Chat / brief-chat / intent / open-source — keep separate from training embeddings
       addInto(agentBucket.openAIUsage, usage);
     }
   }
 
-  return { byAgent, totals };
+  return { byAgent, totals, embeddingTotals };
 }
 
 /**

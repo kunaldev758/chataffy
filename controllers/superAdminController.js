@@ -604,6 +604,7 @@ module.exports.getClientAgents = async (req, res) => {
         aiAgents: aiAgentsWithUsage,
         humanAgents,
         openAIUsageTotal: openAIGrouped?.totals || empty,
+        embeddingUsageTotal: openAIGrouped?.embeddingTotals || empty,
       },
     });
   } catch (error) {
