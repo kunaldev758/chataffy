@@ -1369,11 +1369,22 @@ module.exports.deleteAiModelCategory = async (req, res) => {
       return res.status(404).json({ message: "Category not found" });
     }
 
-    // Remove this category from all AiModels that reference it
-    await AiModel.updateMany(
-      { categories: categoryId },
-      { $pull: { categories: categoryId } }
-    );
+    // Remove this category from all AiModels that reference it and set their status to inactive if they have no other categories
+// Step 1: Remove the category from all models
+await AiModel.updateMany(
+  { categories: categoryId },
+  {
+    $pull: { categories: categoryId }
+  }
+);
+
+// Step 2: Mark models as inactive if they have no categories left
+await AiModel.updateMany(
+  { categories: { $size: 0 } },
+  {
+    $set: { status: "inactive" }
+  }
+);
 
     // Delete the category
     await AiModelsCategory.findByIdAndDelete(categoryId);
