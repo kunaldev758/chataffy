@@ -612,14 +612,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
   return metadata;
 };
 
-<<<<<<< HEAD
-const processWebPage = async (
-  url,
-  sourceCode,
-  footerCache = {},
-  { userId = null, agentId = null } = {},
-) => {
-=======
 const FOOTER_SELECTORS =
   "footer, [role='contentinfo'], #footer, #colophon, .site-footer, .page-footer";
 const HEADER_SELECTORS = [
@@ -666,7 +658,6 @@ function extractChromeHtml($, selectors) {
 }
 
 const processWebPage = async (url, sourceCode, chromeCache = {}) => {
->>>>>>> c17b10d277933cf67f0d00b54582db985ab248b0
   try {
     const $ = cheerio.load(sourceCode);
     const webPageURL = url;
@@ -1041,12 +1032,7 @@ new Worker(
           const processResult = await processWebPage(
             url,
             sourceCode,
-<<<<<<< HEAD
-            footerCache,
-            { userId, agentId },
-=======
             chromeCache,
->>>>>>> c17b10d277933cf67f0d00b54582db985ab248b0
           );
           if (!processResult.content) {
             await TrainingModel.create({
@@ -1776,12 +1762,7 @@ new Worker(
           const processResult = await processWebPage(
             url,
             rawHtml,
-<<<<<<< HEAD
-            footerCache,
-            { userId, agentId },
-=======
             chromeCache,
->>>>>>> c17b10d277933cf67f0d00b54582db985ab248b0
           );
 
           if (!processResult?.content) {
