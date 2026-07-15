@@ -12,6 +12,7 @@ const DEFAULT_CATEGORIES = [
   "brief-chat", // legacy typo alias used by existing query paths
   "micro-classifier",
   "website-classifier",
+  "content-classifier",
 ];
 
 /**
@@ -32,7 +33,7 @@ const DEFAULT_MODELS = [
     model: "gpt-4.1-nano",
     provider: "openai",
     status: "active",
-    categories: ["intent"],
+    categories: ["intent", "content-classifier"],
     inputCost: 0.1,
     outputCost: 0.4,
     cacheCost: 0.025,

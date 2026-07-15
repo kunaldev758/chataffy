@@ -1454,6 +1454,7 @@ async bulkInsertUrls(userId,agentId, urls) {
           metadata: {
             title: title,
             type: "snippet",
+            source_type: "manual_upload",
             user_id: userId,
             agent_id: agentId,
             // plan: plan.name,
@@ -1519,6 +1520,11 @@ async bulkInsertUrls(userId,agentId, urls) {
               fileName: file.filename,
               originalFileName: file.originalname,
               type: "file",
+              source_type: String(file.originalname || "")
+                .toLowerCase()
+                .endsWith(".pdf")
+                ? "pdf"
+                : "manual_upload",
               user_id: userId,
               agent_id: agentId,
               // plan: plan.name,
@@ -1734,6 +1740,8 @@ async bulkInsertUrls(userId,agentId, urls) {
             question: question,
             answer: answer,
             type: "faq",
+            source_type: "manual_upload",
+            entity_type: "faq",
             user_id: userId,
             agent_id: agentId,
           },

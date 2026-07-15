@@ -35,6 +35,19 @@ const CATEGORY_ENV_FALLBACKS = {
     model: process.env.LLAMA_MICRO_MODEL || "llama-3.1-8b-instant",
     timeoutMs: Number(process.env.LLAMA_MICRO_TIMEOUT_MS) || 2000,
   },
+  "content-classifier": {
+    provider:
+      process.env.CONTENT_CLASSIFIER_PROVIDER ||
+      (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
+        ? "gemini"
+        : "openai"),
+    model:
+      process.env.CONTENT_CLASSIFIER_MODEL ||
+      process.env.GEMINI_MODEL ||
+      process.env.OPENAI_ROUTER_MODEL ||
+      "gpt-4.1-nano",
+    timeoutMs: Number(process.env.CONTENT_CLASSIFIER_TIMEOUT_MS) || 30000,
+  },
   "website-classifier": {
     provider: process.env.LLAMA_WEBSITE_TYPE_PROVIDER || "groq",
     model: process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant",
@@ -211,6 +224,7 @@ exports.usageTypeForCategory = (category) => {
     cat === "open-source" ||
     cat === "micro-classifier" ||
     cat === "website-classifier" ||
+    cat === "content-classifier" ||
     cat === "greeting"
   ) {
     return "open-source";

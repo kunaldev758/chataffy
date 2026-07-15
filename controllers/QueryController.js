@@ -25,6 +25,7 @@ const {
   isGibberishOrAccidentalMessage,
 } = require("../services/LightweightResponseService");
 const { generateContactResponse } = require("../services/LlamaContactService");
+const { filterByConfidenceAwareThreshold } = require("../utils/retrievalConfidence");
 const {
   generateGreeting,
   generateAccidentalReply,
@@ -1457,6 +1458,15 @@ class QuestionAnsweringSystem {
         catalogMatches = mergedMatches;
       }
 
+      // Prefer ingest-labeled product/listing chunks when available
+      const typedCatalog = catalogMatches.filter((m) => {
+        const et = String(m.payload?.entity_type || "").toLowerCase();
+        return et === "product" || et === "listing";
+      });
+      if (typedCatalog.length >= 2) {
+        catalogMatches = typedCatalog;
+      }
+
       if (
         !forcedCatalog &&
         !hasGoodSemantic &&
@@ -2476,6 +2486,7 @@ ${answerInstructions}`;
 
       const buildFilter = (withSizeBoost = false) => {
         const must = [];
+        const must_not = [];
         if (userId) {
           must.push({
             key: "user_id",
@@ -2488,7 +2499,15 @@ ${answerInstructions}`;
             match: { any: sizeTokens },
           });
         }
-        return must.length > 0 ? { must } : undefined;
+        // Soft-deleted / inactive URLs (legacy points without field still match)
+        must_not.push({
+          key: "is_active",
+          match: { value: false },
+        });
+        const filter = {};
+        if (must.length) filter.must = must;
+        if (must_not.length) filter.must_not = must_not;
+        return Object.keys(filter).length ? filter : undefined;
       };
 
       if (userId) {
@@ -3092,9 +3111,9 @@ ${answerInstructions}`;
         queryAttributes,
       });
 
-      console.log("queryResponse data is : ", queryResponse);
+      console.log("queryResponse data is : ", queryResponse[0]);
 
-      console.log("Effective : ", effectiveSubIntent);
+      console.log("Effective sub-intent : ", effectiveSubIntent);
 
       if (effectiveSubIntent) {
         const specialized = await this.trySpecializedRetrieval({
@@ -3112,7 +3131,7 @@ ${answerInstructions}`;
           queryAttributes,
         });
 
-        console.log("Specialized retrieval result: ", specialized);
+        // console.log("Specialized retrieval result: ", specialized);
         if (specialized) {
           const specializedResult = await this.generateAnswerFromMatches({
             question,
@@ -3221,11 +3240,12 @@ ${answerInstructions}`;
       }
 
       // Filter matches by score threshold (bypass for explicit catalog list queries)
+      // Low ingest classification_confidence raises the per-match bar.
       let relevantMatches = catalogListQuery
         ? this.selectCatalogMatches(queryResponse, queryAttributes, {
             strictSize: sizedCatalogQuery,
           }).slice(0, Math.max(requestedTopK * 2, 15))
-        : queryResponse.filter((match) => match.score >= effectiveThreshold);
+        : filterByConfidenceAwareThreshold(queryResponse, effectiveThreshold);
 
       if (catalogListQuery && relevantMatches.length > 0) {
         console.log(
@@ -3274,8 +3294,9 @@ ${answerInstructions}`;
             2,
           )}...`,
         );
-        const fallbackMatches = queryResponse.filter(
-          (match) => match.score >= fallbackThreshold,
+        const fallbackMatches = filterByConfidenceAwareThreshold(
+          queryResponse,
+          fallbackThreshold,
         );
         if (fallbackMatches.length > 0) {
           relevantMatches = fallbackMatches;

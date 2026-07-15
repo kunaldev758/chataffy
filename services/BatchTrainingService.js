@@ -1,6 +1,10 @@
 require("dotenv").config();
 const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter");
 const QdrantVectorStoreManager = require("./QdrantService");
+const {
+  classifyPageForIngest,
+  extractHeadingPath,
+} = require("./PageContentClassifierService");
 
 class BatchTrainingService {
   constructor() {
@@ -26,7 +30,7 @@ class BatchTrainingService {
 
 
   async processDocumentAndTrain(documents, userId, agentId, qdrantIndexName, options = {}) {
-    const { onProgress } = options;
+    const { onProgress, websiteLanguage } = options;
     try {
       const splitter = new RecursiveCharacterTextSplitter({
         chunkSize: this.CHUNK_SIZE * this.CHARS_PER_TOKEN,
@@ -40,18 +44,38 @@ class BatchTrainingService {
 
       for (let docIndex = 0; docIndex < documents.length; docIndex++) {
         const doc = documents[docIndex];
+
+        // Page-level classify once (detection → optional Gemini/OpenAI) before chunking
+        let pageMetadata = { ...(doc.metadata || {}) };
+        try {
+          pageMetadata = await classifyPageForIngest(doc, {
+            userId,
+            agentId,
+            websiteLanguage,
+          });
+          console.log(
+            `[BatchTraining] Classified page: entity=${pageMetadata.entity_type} conf=${pageMetadata.classification_confidence} signal=${pageMetadata.classification_signal} source=${pageMetadata.source_type} url=${(pageMetadata.url || "").substring(0, 80)}`,
+          );
+        } catch (classifyErr) {
+          console.warn(
+            `[BatchTraining] Page classification failed, continuing with heuristics: ${classifyErr.message}`,
+          );
+        }
+
         const chunks = await splitter.createDocuments([doc.content]);
         chunkCountPerUrl[doc?.originalUrl] = chunks.length;
 
         const enhancedChunks = chunks.map((chunk, index) => ({
           ...chunk,
           metadata: {
-            ...doc.metadata,
-            user_id: userId?.toString(), // Ensure user_id is always a string for Qdrant filtering
+            ...pageMetadata,
+            user_id: userId?.toString(),
             agent_id: agentId?.toString(),
             chunk_index: index,
             total_chunks: chunks.length,
-            created_at: new Date().toISOString(),
+            heading_path: extractHeadingPath(chunk.pageContent || ""),
+            created_at: pageMetadata.created_at || new Date().toISOString(),
+            updated_at: pageMetadata.updated_at || new Date().toISOString(),
           },
         }));
 

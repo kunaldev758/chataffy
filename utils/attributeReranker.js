@@ -16,6 +16,9 @@ function payloadText(match) {
 function payloadSizes(match) {
   const p = match.payload || match;
   const fromPayload = (p.sizes || []).map(normalizeSize);
+  const fromAttrs = Array.isArray(p.attributes?.sizes)
+    ? p.attributes.sizes.map(normalizeSize)
+    : [];
   const fromTerms = (p.search_terms || [])
     .filter((t) => /\dmm$/i.test(String(t)))
     .map(normalizeSize);
@@ -24,16 +27,19 @@ function payloadSizes(match) {
   for (const m of text.matchAll(SIZE_PATTERN)) {
     fromText.push(normalizeSize(m[0]));
   }
-  return [...new Set([...fromPayload, ...fromTerms, ...fromText])];
+  return [...new Set([...fromPayload, ...fromAttrs, ...fromTerms, ...fromText])];
 }
 
 function payloadCollections(match) {
   const p = match.payload || match;
   const fromPayload = (p.collections || []).map((c) => c.toLowerCase());
+  const fromAttrs = Array.isArray(p.attributes?.collections)
+    ? p.attributes.collections.map((c) => String(c).toLowerCase())
+    : [];
   const text = payloadText(match);
   const hints = [];
   if (/\bsuper\s*natural\b/i.test(text)) hints.push("super natural");
-  return [...new Set([...fromPayload, ...hints])];
+  return [...new Set([...fromPayload, ...fromAttrs, ...hints])];
 }
 
 function countKeywordHits(text, keywords) {
@@ -177,6 +183,15 @@ function rerankByAttributes(candidates, attributes, options = {}) {
   const subIntent = options.subIntent || attributes.subIntent || null;
   const { sizes, collections, keywords } = attributes;
 
+  let routeBias = "semantic";
+  if (subIntent === "IN_PAGE_LIST" || attributes.flags?.isCatalogQuery) {
+    routeBias = "catalog";
+  } else if (subIntent === "CONTACT_INFO" || attributes.flags?.wantsContact) {
+    routeBias = "contact";
+  }
+
+  const { entityTypeBoost } = require("./retrievalConfidence");
+
   const reranked = candidates.map((match) => {
     const baseScore = match.score ?? 0;
     const text = payloadText(match);
@@ -198,6 +213,13 @@ function rerankByAttributes(candidates, attributes, options = {}) {
     bonus += Math.min(textHits * 0.03, 0.12);
     bonus += urlBonus(url, attributes, subIntent);
     bonus -= typePenalty(text, url, attributes, subIntent);
+    bonus += entityTypeBoost(match.payload?.entity_type, routeBias);
+
+    // Prefer higher ingest confidence slightly when scores are close
+    const conf = match.payload?.classification_confidence;
+    if (typeof conf === "number") {
+      bonus += (conf - 0.5) * 0.04;
+    }
 
     const rerankScore = baseScore + bonus;
 

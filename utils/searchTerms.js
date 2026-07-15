@@ -91,9 +91,11 @@ function extractSearchTerms({ text = "", title = "", url = "" } = {}) {
 
 /**
  * Structured attributes for Qdrant payload (re-ranking + filtering).
- * @param {{ text?: string, title?: string, url?: string, source_type?: string }} fields
+ * Note: provenance belongs in `source_type` (html_crawl/pdf/…);
+ * semantic type belongs in `entity_type` (set by content classifier).
+ * @param {{ text?: string, title?: string, url?: string }} fields
  */
-function extractPayloadAttributes({ text = "", title = "", url = "", source_type } = {}) {
+function extractPayloadAttributes({ text = "", title = "", url = "" } = {}) {
   const combined = `${title} ${url} ${text}`;
   const sizes = extractSizeTokens(combined).map((s) =>
     s.replace(/\s/g, "").toLowerCase()
@@ -104,21 +106,9 @@ function extractPayloadAttributes({ text = "", title = "", url = "", source_type
     collections.push("Super Natural");
   }
 
-  const urlLower = (url || "").toLowerCase();
-  let inferredType = source_type || "page";
-  if (/\/products?\/|\/collections?\/|\/shop\b|\/catalog\b/i.test(urlLower)) {
-    inferredType = "product";
-  } else if (
-    /contact|about-us|about\b|footer/i.test(urlLower) ||
-    /footer\s+links/i.test(combined)
-  ) {
-    inferredType = "contact";
-  }
-
   return {
     sizes: [...new Set(sizes)],
     collections: [...new Set(collections)],
-    source_type: inferredType,
   };
 }
 

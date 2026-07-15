@@ -25,6 +25,9 @@ const PAYLOAD_INDEX_SCHEMAS = {
   url: "keyword",
   title: "keyword",
   source_type: "keyword",
+  entity_type: "keyword",
+  is_active: "bool",
+  sizes: "keyword",
   type: "integer",
 };
 
@@ -225,7 +228,10 @@ class QdrantVectorStoreManager {
         if (metadata.user_id) {
           metadata.user_id = metadata.user_id.toString();
         }
-        
+        if (metadata.agent_id) {
+          metadata.agent_id = metadata.agent_id.toString();
+        }
+
         const pageContent = doc.pageContent || "";
         const title = metadata.title || "";
         const url = metadata.url || "";
@@ -233,8 +239,47 @@ class QdrantVectorStoreManager {
           text: pageContent,
           title,
           url,
-          source_type: metadata.source_type,
         });
+
+        // Preserve page-level classifier fields; only fill gaps with heuristics.
+        const existingTerms = Array.isArray(metadata.search_terms)
+          ? metadata.search_terms
+          : [];
+        const heuristicTerms = extractSearchTerms({
+          text: pageContent,
+          title,
+          url,
+        });
+        const search_terms = [
+          ...new Set(
+            [...existingTerms, ...heuristicTerms].map((t) =>
+              String(t).toLowerCase().trim(),
+            ),
+          ),
+        ].slice(0, 80);
+
+        const sizes =
+          Array.isArray(metadata.sizes) && metadata.sizes.length
+            ? metadata.sizes
+            : payloadAttrs.sizes;
+        const collections =
+          Array.isArray(metadata.collections) && metadata.collections.length
+            ? metadata.collections
+            : payloadAttrs.collections;
+
+        const attributes =
+          metadata.attributes && typeof metadata.attributes === "object"
+            ? {
+                ...metadata.attributes,
+                ...(sizes.length ? { sizes } : {}),
+                ...(collections.length ? { collections } : {}),
+              }
+            : {
+                ...(sizes.length ? { sizes } : {}),
+                ...(collections.length ? { collections } : {}),
+              };
+
+        const now = new Date().toISOString();
 
         return {
           id: uuidv4(),
@@ -242,15 +287,26 @@ class QdrantVectorStoreManager {
           payload: {
             ...metadata,
             text: pageContent,
-            search_terms: extractSearchTerms({
-              text: pageContent,
-              title,
-              url,
-            }),
-            sizes: payloadAttrs.sizes,
-            collections: payloadAttrs.collections,
-            source_type: payloadAttrs.source_type,
-            created_at: new Date().toISOString(),
+            search_terms,
+            sizes,
+            collections,
+            attributes,
+            // Provenance (html_crawl | pdf | manual_upload | …) — not entity semantics
+            source_type: metadata.source_type || "html_crawl",
+            entity_type: metadata.entity_type || "general",
+            entity_name: metadata.entity_name || null,
+            classification_confidence:
+              typeof metadata.classification_confidence === "number"
+                ? metadata.classification_confidence
+                : null,
+            classification_reason: metadata.classification_reason || null,
+            heading_path: metadata.heading_path || "",
+            content_hash: metadata.content_hash || null,
+            language: metadata.language || null,
+            is_active:
+              metadata.is_active === undefined ? true : Boolean(metadata.is_active),
+            created_at: metadata.created_at || now,
+            updated_at: metadata.updated_at || now,
           },
         };
       });
