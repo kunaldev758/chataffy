@@ -13,6 +13,7 @@ const TurndownService = require("turndown");
 const QdrantVectorStoreManager = require("./QdrantService");
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
 const {
+  isHomepageUrl,
   isScrapableWebUrl,
 } = require("../utils/webUrlUtils.js");
 const { detectWebsiteLanguage } = require("../utils/websiteLanguage");
@@ -126,6 +127,31 @@ function enrichFooterHtml(footerHTML) {
   });
 
   return $.root().html() || footerHTML;
+}
+
+function isInlineBufferImageUrl(value) {
+  return (
+    typeof value === "string" && /^(data:|blob:)/i.test(value.trim())
+  );
+}
+
+/** Drop inline data/blob image payloads from scraped text before Qdrant indexing. */
+function stripInlineBufferImageContent(text) {
+  if (!text) return text;
+
+  const inlineImageUrlPattern = String.raw`\b(?:data|blob):[^\s)\]"]+`;
+
+  return text
+    .replace(/!\[[^\]]*]\((?:data|blob):[^)]+\)/gi, "")
+    .replace(
+      new RegExp(`Image\\s*\\([^)]*\\):\\s*${inlineImageUrlPattern}`, "gi"),
+      (match) => {
+        const altMatch = match.match(/^Image\s*\(([^)]*)\)/i);
+        return altMatch?.[1]?.trim() ? `Image (${altMatch[1].trim()})` : "";
+      },
+    )
+    .replace(new RegExp(`Image:\\s*${inlineImageUrlPattern}`, "gi"), "")
+    .replace(new RegExp(inlineImageUrlPattern, "gi"), "");
 }
 
 // Helper function to extract website metadata from HTML
@@ -586,16 +612,67 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
   return metadata;
 };
 
+<<<<<<< HEAD
 const processWebPage = async (
   url,
   sourceCode,
   footerCache = {},
   { userId = null, agentId = null } = {},
 ) => {
+=======
+const FOOTER_SELECTORS =
+  "footer, [role='contentinfo'], #footer, #colophon, .site-footer, .page-footer";
+const HEADER_SELECTORS = [
+  "header",
+  "[role='banner']",
+  "#header",
+  ".site-header",
+  "#masthead",
+  ".page-header",
+  "[class*='site-header']",
+  "nav",
+  "[role='navigation']",
+  "#nav",
+  "#navigation",
+  ".navigation",
+  ".navbar",
+  ".nav-bar",
+  ".main-nav",
+  ".main-menu",
+  ".top-nav",
+  ".top-bar",
+  ".menu-bar",
+  "#menu",
+].join(", ");
+
+function getDomainChromeState(chromeCache, domain) {
+  if (!chromeCache[domain]) {
+    chromeCache[domain] = { headerCaptured: false, footerCaptured: false };
+  }
+  return chromeCache[domain];
+}
+
+/** Capture top-level chrome nodes (skip nested duplicates), return HTML string. */
+function extractChromeHtml($, selectors) {
+  const topLevel = $(selectors)
+    .toArray()
+    .filter((el) => $(el).parents(selectors).length === 0);
+
+  if (!topLevel.length) return "";
+  return topLevel
+    .map((el) => $.html(el))
+    .join("\n")
+    .trim();
+}
+
+const processWebPage = async (url, sourceCode, chromeCache = {}) => {
+>>>>>>> c17b10d277933cf67f0d00b54582db985ab248b0
   try {
     const $ = cheerio.load(sourceCode);
     const webPageURL = url;
     const domain = new URL(webPageURL).hostname;
+    const isHomepage = isHomepageUrl(webPageURL);
+    const chromeState = getDomainChromeState(chromeCache, domain);
 
     // ---- Metadata ----
     const title = $("title").text().trim() || webPageURL;
@@ -608,30 +685,7 @@ const processWebPage = async (
     ).remove();
     $(".ad, .advertisement, .popup, .modal").remove();
 
-    // ---- Shared header/nav/footer chrome ----
-    const isPageLevelChrome = (el) =>
-      $(el).closest("article, main").length === 0;
-
-    let footerHTML = "";
-    const footer = $("footer, [role='contentinfo']")
-      .filter((_, el) => isPageLevelChrome(el))
-      .first();
-    if (footer.length) {
-      const footerText = footer.text().trim();
-      if (footerText && !footerCache[domain]) {
-        footerCache[domain] = true;
-        footerHTML = footer.html();
-      }
-    }
-
-    $(
-      "header, footer, nav, [role='banner'], [role='contentinfo'], [role='navigation']",
-    ).each((_, el) => {
-      if (!isPageLevelChrome(el)) return;
-      $(el).remove();
-    });
-
-    // ---- Convert relative URLs ----
+    // Resolve relative URLs before extracting chrome so stored links are absolute
     $("a, img").each((_, el) => {
       const attr = $(el).is("a") ? "href" : "src";
       const val = $(el).attr(attr);
@@ -640,14 +694,41 @@ const processWebPage = async (
       }
     });
 
-    // ---- Convert images to descriptive text ----
-    $("img").each((_, el) => {
-      const src = $(el).attr("src");
-      const alt = $(el).attr("alt")?.trim();
-      if (src) {
-        const altText = alt ? ` (${alt})` : "";
-        $(el).replaceWith(`<p>Image${altText}: ${src}</p>`);
+    // ---- Site chrome: scrape header + footer once per domain, homepage only ----
+    let headerHTML = "";
+    let footerHTML = "";
+
+    if (isHomepage) {
+      if (!chromeState.headerCaptured) {
+        headerHTML = extractChromeHtml($, HEADER_SELECTORS);
+        if (headerHTML) chromeState.headerCaptured = true;
       }
+      if (!chromeState.footerCaptured) {
+        footerHTML = extractChromeHtml($, FOOTER_SELECTORS);
+        if (footerHTML) chromeState.footerCaptured = true;
+      }
+    }
+
+    // Always strip shared chrome from page body so it never repeats in Qdrant
+    $(HEADER_SELECTORS).remove();
+    $(FOOTER_SELECTORS).remove();
+
+    // ---- Convert remote images to descriptive text; skip inline buffer images ----
+    $("img").each((_, el) => {
+      const src = $(el).attr("src")?.trim();
+      const alt = $(el).attr("alt")?.trim();
+
+      if (!src || isInlineBufferImageUrl(src)) {
+        if (alt) {
+          $(el).replaceWith(`<p>Image (${alt})</p>`);
+        } else {
+          $(el).remove();
+        }
+        return;
+      }
+
+      const altText = alt ? ` (${alt})` : "";
+      $(el).replaceWith(`<p>Image${altText}: ${src}</p>`);
     });
 
     // ---- Convert anchor-only links ----
@@ -675,7 +756,13 @@ const processWebPage = async (
 
     let markdown = turndownService.turndown($("body").html() || "");
 
-    // Append footer content once per domain
+    // Attach header/footer only on the homepage pass that captured them
+    if (headerHTML) {
+      const enrichedHeader = enrichFooterHtml(headerHTML);
+      const headerMarkdown = turndownService.turndown(enrichedHeader);
+      markdown = `---\n**Header / Nav (from ${domain})**\n${headerMarkdown}\n\n---\n\n${markdown}`;
+    }
+
     if (footerHTML) {
       const enrichedFooter = enrichFooterHtml(footerHTML);
       const footerMarkdown = turndownService.turndown(enrichedFooter);
@@ -684,15 +771,15 @@ const processWebPage = async (
 
     // ---- Clean whitespace (preserve structure) ----
     // Replace multiple spaces with single space, but preserve newlines
-    const cleanContent = markdown
-      .replace(/[ \t]+/g, " ") // Replace multiple spaces/tabs with single space
-      .replace(/\n{3,}/g, "\n\n") // Replace 3+ newlines with double newline
-      .trim();
+    const cleanContent = stripInlineBufferImageContent(
+      markdown
+        .replace(/[ \t]+/g, " ") // Replace multiple spaces/tabs with single space
+        .replace(/\n{3,}/g, "\n\n") // Replace 3+ newlines with double newline
+        .trim(),
+    );
 
     // Extract website metadata (from homepage-like URLs or we'll extract from first URL)
     let websiteMetadata = null;
-    const urlPath = new URL(url).pathname;
-    const isHomepage = urlPath === "/" || urlPath === "";
 
     // Always extract metadata (we'll decide whether to use it based on homepage status)
     const $meta = cheerio.load(sourceCode);
@@ -827,7 +914,7 @@ new Worker(
 
       let scrapedDocs = [];
       let currentDataSize = 0;
-      const footerCache = {};
+      const chromeCache = {};
       let metadataExtracted = false; // Track if metadata has been extracted
       let metadataFromHomepage = false;
       let stoppedForStorageLimit = false;
@@ -954,8 +1041,12 @@ new Worker(
           const processResult = await processWebPage(
             url,
             sourceCode,
+<<<<<<< HEAD
             footerCache,
             { userId, agentId },
+=======
+            chromeCache,
+>>>>>>> c17b10d277933cf67f0d00b54582db985ab248b0
           );
           if (!processResult.content) {
             await TrainingModel.create({
@@ -1594,7 +1685,7 @@ new Worker(
         agent: await Agent.findOne({ _id: agentId }),
       });
 
-      const footerCache = {};
+      const chromeCache = {};
       const pendingRetrainItems = [];
       const qdrantManager = new QdrantVectorStoreManager(qdrantIndexName);
       let successCount = 0;
@@ -1685,8 +1776,12 @@ new Worker(
           const processResult = await processWebPage(
             url,
             rawHtml,
+<<<<<<< HEAD
             footerCache,
             { userId, agentId },
+=======
+            chromeCache,
+>>>>>>> c17b10d277933cf67f0d00b54582db985ab248b0
           );
 
           if (!processResult?.content) {
