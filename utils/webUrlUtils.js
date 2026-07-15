@@ -45,6 +45,25 @@ function getPathExtension(pathname) {
   return base.slice(dot + 1).toLowerCase();
 }
 
+function isHomepageUrl(url) {
+  if (!url || typeof url !== "string") return false;
+
+  try {
+    let path = new URL(url).pathname || "/";
+    if (path.length > 1 && path.endsWith("/")) {
+      path = path.slice(0, -1);
+    }
+    if (path === "/" || path === "") return true;
+    // Common homepage entry points
+    return /^\/index\.(html?|php|aspx)$/i.test(path);
+  } catch {
+    return (
+      /\/$/.test(url) &&
+      !url.replace(/^https?:\/\/[^/]+/, "").includes("/", 1)
+    );
+  }
+}
+
 function isScrapableWebUrl(url) {
   if (!url || typeof url !== "string") return false;
 
@@ -154,6 +173,7 @@ function looksLikeUnrenderedSpa($) {
 
 module.exports = {
   NON_HTML_EXTENSIONS,
+  isHomepageUrl,
   isScrapableWebUrl,
   canonicalUrlKey,
   normalizeWebUrl,
