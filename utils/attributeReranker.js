@@ -221,6 +221,19 @@ function rerankByAttributes(candidates, attributes, options = {}) {
       bonus += (conf - 0.5) * 0.04;
     }
 
+    // Boost when query entity_name overlaps payload entity_name / title
+    const qEntity = (attributes.entity_name || "").toLowerCase().trim();
+    if (qEntity) {
+      const pEntity = String(match.payload?.entity_name || "")
+        .toLowerCase()
+        .trim();
+      if (pEntity && (pEntity === qEntity || pEntity.includes(qEntity) || qEntity.includes(pEntity))) {
+        bonus += 0.14;
+      } else if (title.includes(qEntity) || text.includes(qEntity)) {
+        bonus += 0.08;
+      }
+    }
+
     const rerankScore = baseScore + bonus;
 
     return {

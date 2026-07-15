@@ -1,7 +1,7 @@
 /**
  * Unified entity / attribute extraction for the retrieval pipeline.
  * Consolidates sizes, collections, keywords, and intent flags from
- * normalization, context expansion, and routing.
+ * normalization, context expansion, routing, and LLM product attributes.
  */
 
 const {
@@ -12,6 +12,10 @@ const {
   extractCollectionHints,
 } = require("./queryContextExpansion");
 const { ROUTES, isRagRoute } = require("../services/QueryRouter");
+const {
+  normalizeProductAttributes,
+  isProductRelatedQuery,
+} = require("./productQueryFilters");
 
 const RETRIEVAL_STOP_WORDS = new Set([
   "the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "with",
@@ -51,6 +55,10 @@ function extractQueryAttributes({
     topics = {},
   } = queryExpansion || {};
 
+  const llmProduct = normalizeProductAttributes(
+    routing.productAttributes || {},
+  );
+
   const keywordSource = routing.rewrittenQuery || retrievalQuery;
 
   const sizes = [
@@ -59,6 +67,7 @@ function extractQueryAttributes({
       ...(currentSizes || []),
       ...(topics.sizes || []),
       ...extractSizeTokens(keywordSource),
+      ...(llmProduct.sizes || []),
     ]),
   ];
 
@@ -68,6 +77,7 @@ function extractQueryAttributes({
       ...extractCollectionHints(retrievalQuery),
       ...extractCollectionHints(keywordSource),
       ...(topics.collections || []),
+      ...(llmProduct.collections || []),
     ]),
   ];
 
@@ -78,6 +88,11 @@ function extractQueryAttributes({
     return [compact, numOnly].filter((k) => k.length > 2);
   });
 
+  const entityName = llmProduct.entity_name || null;
+  const entityNameTokens = entityName
+    ? tokenizeKeywords(entityName)
+    : [];
+
   const keywords = [
     ...new Set([
       ...tokenizeKeywords(keywordSource),
@@ -86,6 +101,9 @@ function extractQueryAttributes({
       ...sizeKeywords,
       ...morphologyHints,
       ...collections.map((c) => c.toLowerCase()),
+      ...(llmProduct.keywords || []),
+      ...entityNameTokens,
+      ...(llmProduct.color ? [llmProduct.color] : []),
     ]),
   ].filter((k) => k.length > 2);
 
@@ -96,9 +114,21 @@ function extractQueryAttributes({
     subIntent === "CONTACT_INFO" ||
     /\b(social\s*media|phone|email|address|hours|contact)\b/i.test(q);
   const wantsPrices =
-    /\b(price|prices|cost|pricing|how\s+much)\b/i.test(q);
+    /\b(price|prices|cost|pricing|how\s+much)\b/i.test(q) ||
+    llmProduct.price_min != null ||
+    llmProduct.price_max != null;
 
-  return {
+  const flags = {
+    wantsProductLinks,
+    isCatalogQuery,
+    wantsHomepage,
+    wantsContact,
+    wantsPrices,
+    wasExpanded: queryExpansion?.wasExpanded || false,
+    isProductQuery: false,
+  };
+
+  const attributes = {
     normalizedQuestion,
     retrievalQuery,
     keywordSource,
@@ -108,28 +138,32 @@ function extractQueryAttributes({
     sizes,
     collections,
     keywords,
+    entity_name: entityName,
+    color: llmProduct.color,
+    price_min: llmProduct.price_min,
+    price_max: llmProduct.price_max,
     route: routing.route || ROUTES.SEMANTIC_RAG,
     subIntent,
     userLanguage: routing.userLanguage || "en",
-    flags: {
-      wantsProductLinks,
-      isCatalogQuery,
-      wantsHomepage,
-      wantsContact,
-      wantsPrices,
-      wasExpanded: queryExpansion?.wasExpanded || false,
-    },
+    flags,
   };
+
+  flags.isProductQuery = isProductRelatedQuery(attributes, routing);
+
+  return attributes;
 }
 
 function needsKeywordRetrieval(attributes) {
   if (!attributes) return false;
-  const { flags, sizes, keywords } = attributes;
+  const { flags, sizes, keywords, entity_name, collections } = attributes;
   return (
     flags?.isCatalogQuery ||
     flags?.wasExpanded ||
+    flags?.isProductQuery ||
     sizes.length > 0 ||
     flags?.wantsProductLinks ||
+    Boolean(entity_name) ||
+    (collections && collections.length > 0) ||
     (keywords?.length > 0 && flags?.wantsHomepage)
   );
 }

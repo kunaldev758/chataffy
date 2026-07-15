@@ -26,8 +26,10 @@ const PAYLOAD_INDEX_SCHEMAS = {
   title: "keyword",
   source_type: "keyword",
   entity_type: "keyword",
+  entity_name: "keyword",
   is_active: "bool",
   sizes: "keyword",
+  collections: "keyword",
   type: "integer",
 };
 

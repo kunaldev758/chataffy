@@ -47,6 +47,11 @@ const {
   isExplicitSizedCatalogQuery,
 } = require("../utils/queryAttributes");
 const {
+  buildProductFilterTiers,
+  productFilterIndexFields,
+  isProductRelatedQuery,
+} = require("../utils/productQueryFilters");
+const {
   rerankByAttributes,
   logRerankStats,
   filterMatchesBySizes,
@@ -1186,7 +1191,13 @@ class QuestionAnsweringSystem {
         await getQuestionEmbedding(),
         semanticTopK,
         userIdString,
-        { sizes: queryAttributes?.sizes },
+        {
+          sizes: queryAttributes?.sizes,
+          collections: queryAttributes?.collections,
+          entityName: queryAttributes?.entity_name,
+          isProductQuery: isProductRelatedQuery(queryAttributes),
+          queryAttributes,
+        },
       ),
       runKeyword
         ? this.structuralFetchByKeywords(
@@ -2478,80 +2489,64 @@ ${answerInstructions}`;
         }
       }
 
-      // First try with user_id filter
+      // Progressive product filters: strict → soft → tenant-only
       let searchResult = [];
       const sizeTokens = (options.sizes || [])
-        .map((s) => s.replace(/\s/g, "").toLowerCase())
+        .map((s) => String(s).replace(/\s/g, "").toLowerCase())
         .filter(Boolean);
+      const isProductQuery =
+        options.isProductQuery === true ||
+        isProductRelatedQuery(options.queryAttributes || {});
 
-      const buildFilter = (withSizeBoost = false) => {
-        const must = [];
-        const must_not = [];
-        if (userId) {
-          must.push({
-            key: "user_id",
-            match: { value: userId.toString() },
-          });
+      const filterTiers = buildProductFilterTiers({
+        userId,
+        sizes: options.sizes || sizeTokens,
+        collections: options.collections || [],
+        entityName: options.entityName || null,
+        isProductQuery,
+      });
+
+      const ensureIndexes = async (fields) => {
+        for (const fieldName of fields) {
+          try {
+            await this.qdrantClient.createPayloadIndex(collectionName, {
+              field_name: fieldName,
+              field_schema: "keyword",
+            });
+          } catch (e) {
+            if (!e.message?.includes("already exists")) {
+              console.warn(
+                `[QueryController] ${fieldName} index: ${e.message}`,
+              );
+            }
+          }
         }
-        if (withSizeBoost && sizeTokens.length > 0) {
-          must.push({
-            key: "sizes",
-            match: { any: sizeTokens },
-          });
-        }
-        // Soft-deleted / inactive URLs (legacy points without field still match)
-        must_not.push({
-          key: "is_active",
-          match: { value: false },
-        });
-        const filter = {};
-        if (must.length) filter.must = must;
-        if (must_not.length) filter.must_not = must_not;
-        return Object.keys(filter).length ? filter : undefined;
       };
 
       if (userId) {
         try {
-          if (sizeTokens.length > 0) {
-            try {
-              await this.qdrantClient.createPayloadIndex(collectionName, {
-                field_name: "sizes",
-                field_schema: "keyword",
-              });
-            } catch (e) {
-              if (!e.message?.includes("already exists")) {
-                console.warn(`[QueryController] sizes index: ${e.message}`);
-              }
-            }
-          }
+          await ensureIndexes(productFilterIndexFields(filterTiers));
 
-          const sizedFilter = buildFilter(sizeTokens.length > 0);
-          if (sizedFilter) {
+          for (const tier of filterTiers) {
             searchResult = await this.qdrantClient.search(collectionName, {
               vector: queryEmbedding,
               limit: topK,
               with_payload: true,
-              filter: sizedFilter,
+              filter: tier.filter,
             });
             console.log(
-              `[QueryController] Query with size filter [${sizeTokens.join(", ")}] returned ${searchResult.length} results`,
+              `[QueryController] Query filter tier "${tier.name}" returned ${searchResult.length} results` +
+                (sizeTokens.length
+                  ? ` (sizes=[${sizeTokens.join(", ")}])`
+                  : "") +
+                (options.entityName ? ` (entity=${options.entityName})` : "") +
+                (isProductQuery ? " [product]" : ""),
             );
-          }
-
-          if (searchResult.length === 0) {
-            searchResult = await this.qdrantClient.search(collectionName, {
-              vector: queryEmbedding,
-              limit: topK,
-              with_payload: true,
-              filter: buildFilter(false),
-            });
-            console.log(
-              `[QueryController] Query with user_id filter returned ${searchResult.length} results`,
-            );
+            if (searchResult.length > 0) break;
           }
         } catch (filterError) {
           console.warn(
-            `[QueryController] Error with user_id filter: ${filterError.message}`,
+            `[QueryController] Error with progressive product filters: ${filterError.message}`,
           );
         }
       }
@@ -3029,9 +3024,11 @@ ${answerInstructions}`;
         subIntent: effectiveSubIntent,
       });
 
-      // console.log(
-      //   `[QueryController] Attributes: sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length} flags=${JSON.stringify(queryAttributes.flags)}`
-      // );
+      if (queryAttributes.flags?.isProductQuery) {
+        console.log(
+          `[QueryController] Product query attrs: entity=${queryAttributes.entity_name || "-"} sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] color=${queryAttributes.color || "-"}`,
+        );
+      }
 
       // const embeddingQuery = queryAttributes.embeddingQuery;
       // if (embeddingQuery !== retrievalQuery) {

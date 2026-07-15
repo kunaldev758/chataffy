@@ -281,7 +281,16 @@ function buildRouteResult({
   confidence = 1,
   rewrittenQuery = null,
   source = "rules",
+  isProductQuery = false,
+  productAttributes = null,
 }) {
+  const inferredProduct =
+    isProductQuery ||
+    subIntent === SUB_INTENTS.IN_PAGE_LIST ||
+    Boolean(productAttributes?.entity_name) ||
+    (productAttributes?.sizes || []).length > 0 ||
+    (productAttributes?.collections || []).length > 0;
+
   return {
     route,
     subIntent,
@@ -289,6 +298,99 @@ function buildRouteResult({
     confidence,
     rewrittenQuery,
     source,
+    isProductQuery: inferredProduct,
+    productAttributes: productAttributes || null,
+  };
+}
+
+function parseRouterProductAttributes(parsed = {}, subIntent = null) {
+  const rawAttrs =
+    parsed.attributes && typeof parsed.attributes === "object"
+      ? parsed.attributes
+      : parsed.productAttributes && typeof parsed.productAttributes === "object"
+        ? parsed.productAttributes
+        : null;
+
+  const sizes = [];
+  const collections = [];
+  const keywords = [];
+  let entity_name = null;
+  let color = null;
+  let price_min = null;
+  let price_max = null;
+
+  if (rawAttrs) {
+    if (typeof rawAttrs.entity_name === "string" && rawAttrs.entity_name.trim()) {
+      entity_name = rawAttrs.entity_name.trim();
+    } else if (
+      typeof rawAttrs.entityName === "string" &&
+      rawAttrs.entityName.trim()
+    ) {
+      entity_name = rawAttrs.entityName.trim();
+    }
+
+    if (Array.isArray(rawAttrs.sizes)) {
+      for (const s of rawAttrs.sizes) {
+        const t = String(s || "")
+          .replace(/\s/g, "")
+          .toLowerCase()
+          .trim();
+        if (t) sizes.push(t);
+      }
+    }
+    if (Array.isArray(rawAttrs.collections)) {
+      for (const c of rawAttrs.collections) {
+        const t = String(c || "").trim();
+        if (t) collections.push(t);
+      }
+    }
+    if (Array.isArray(rawAttrs.keywords)) {
+      for (const k of rawAttrs.keywords) {
+        const t = String(k || "")
+          .trim()
+          .toLowerCase();
+        if (t.length > 1) keywords.push(t);
+      }
+    }
+    if (typeof rawAttrs.color === "string" && rawAttrs.color.trim()) {
+      color = rawAttrs.color.trim().toLowerCase();
+    }
+    if (typeof rawAttrs.price_min === "number") price_min = rawAttrs.price_min;
+    if (typeof rawAttrs.price_max === "number") price_max = rawAttrs.price_max;
+  }
+
+  const explicitProduct =
+    parsed.isProductQuery === true || parsed.isProductRelated === true;
+
+  const hasAttrs =
+    entity_name ||
+    sizes.length > 0 ||
+    collections.length > 0 ||
+    color ||
+    price_min != null ||
+    price_max != null ||
+    keywords.length > 0;
+
+  const isProductQuery =
+    explicitProduct ||
+    subIntent === SUB_INTENTS.IN_PAGE_LIST ||
+    Boolean(hasAttrs);
+
+  if (!isProductQuery && !hasAttrs) {
+    return { isProductQuery: false, productAttributes: null };
+  }
+
+  return {
+    isProductQuery,
+    productAttributes: {
+      entity_name,
+      sizes: [...new Set(sizes)],
+      collections: [...new Set(collections)],
+      color,
+      price_min,
+      price_max,
+      keywords: [...new Set(keywords)].slice(0, 20),
+    },
   };
 }
 
@@ -456,6 +558,11 @@ function parseRouterJson(content, question = "") {
       finalRoute = ROUTES.SEMANTIC_RAG;
     }
 
+    const { isProductQuery, productAttributes } = parseRouterProductAttributes(
+      parsed,
+      subIntent,
+    );
+
     return buildRouteResult({
       route: finalRoute,
       subIntent,
@@ -463,6 +570,8 @@ function parseRouterJson(content, question = "") {
       confidence,
       rewrittenQuery,
       source: "llm_router",
+      isProductQuery,
+      productAttributes,
     });
   } catch {
     return buildRouteResult({
@@ -578,6 +687,20 @@ Detect userLanguage: ISO 639-1 code for the language the visitor WROTE IN (e.g. 
 
 If userLanguage differs from the website language (${websiteLanguage}), provide rewrittenQuery: translate the user's core search intent into the website language (${websiteLanguage}) so it can be used for both embedding similarity search and keyword matching. Preserve product names, brand names, numbers, and measurements as-is. If the languages already match, rewrittenQuery can be null.
 
+Product attribute extraction (same call — no extra request):
+When the message is about products, catalog items, a named product, sizes/styles, shopping, or product pricing, set isProductQuery=true and fill attributes. Otherwise isProductQuery=false and attributes=null.
+attributes shape:
+{
+  "entity_name": "specific product/listing name if mentioned, else null",
+  "sizes": ["14mm"],
+  "collections": ["collection or category names"],
+  "color": "color if mentioned else null",
+  "price_min": null,
+  "price_max": null,
+  "keywords": ["extra recall terms in the website language"]
+}
+Use attributes for filters — do NOT invent sizes/prices/names that the user did not imply. Prefer website-language keywords when translating.
+
 Use conversation history for short follow-ups like "yes", "tell me", "what about pricing?".
 
 Respond with JSON only:
@@ -587,7 +710,9 @@ Respond with JSON only:
   "userLanguage": "en",
   "confidence": 0.85,
   "rewrittenQuery": null,
-  "isTrulyOffTopic": false
+  "isTrulyOffTopic": false,
+  "isProductQuery": false,
+  "attributes": null
 }`;
 
   // const userContent = [
@@ -704,4 +829,5 @@ module.exports = {
   isPureGreeting,
   isLiveAgentRequest,
   formatRecentChatForRouter,
+  parseRouterProductAttributes,
 };
