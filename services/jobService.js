@@ -657,8 +657,18 @@ function extractChromeHtml($, selectors) {
     .trim();
 }
 
-const processWebPage = async (url, sourceCode, chromeCache = {}) => {
+const processWebPage = async (
+  url,
+  sourceCode,
+  chromeCache = {},
+  usageContext = {},
+) => {
   try {
+    const {
+      userId = null,
+      agentId = null,
+      conversationId = null,
+    } = usageContext;
     const $ = cheerio.load(sourceCode);
     const webPageURL = url;
     const domain = new URL(webPageURL).hostname;
@@ -783,8 +793,9 @@ const processWebPage = async (url, sourceCode, chromeCache = {}) => {
         description: metaDescription,
         pageContent: cleanContent,
         schemaTypes: websiteMetadata._schemaTypes || [],
-        // userId,
-        // agentId,
+        userId,
+        agentId,
+        conversationId,
       });
 
       if (llamaType?.company_type) {
@@ -1033,6 +1044,7 @@ new Worker(
             url,
             sourceCode,
             chromeCache,
+            { userId, agentId, conversationId: null },
           );
           if (!processResult.content) {
             await TrainingModel.create({
@@ -1763,6 +1775,7 @@ new Worker(
             url,
             rawHtml,
             chromeCache,
+            { userId, agentId, conversationId: null },
           );
 
           if (!processResult?.content) {

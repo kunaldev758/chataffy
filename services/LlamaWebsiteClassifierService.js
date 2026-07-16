@@ -1,4 +1,9 @@
 const axios = require("axios");
+const { logOpenAIUsage, computeTokenCosts } = require("./UsageTrackingService");
+const {
+  getResolvedModelConfig,
+  usageTypeForCategory,
+} = require("./aiModelService");
 
 const WEBSITE_TYPES = [
   "E-commerce Website",
@@ -147,7 +152,17 @@ async function callOllama({ model, prompt, baseUrl, timeoutMs, system }) {
     },
     { timeout: timeoutMs },
   );
-  return String(res.data?.message?.content || res.data?.response || "").trim();
+  const text = String(res.data?.message?.content || res.data?.response || "").trim();
+  const usage =
+    res.data?.eval_count != null
+      ? {
+          prompt_tokens: res.data.prompt_eval_count || 0,
+          completion_tokens: res.data.eval_count || 0,
+          total_tokens:
+            (res.data.prompt_eval_count || 0) + (res.data.eval_count || 0),
+        }
+      : null;
+  return { text, usage };
 }
 
 async function callGroq({ model, prompt, apiKey, timeoutMs, system }) {
@@ -169,7 +184,9 @@ async function callGroq({ model, prompt, apiKey, timeoutMs, system }) {
       headers: { Authorization: `Bearer ${apiKey}` },
     },
   );
-  return String(res.data?.choices?.[0]?.message?.content || "").trim();
+  const text = String(res.data?.choices?.[0]?.message?.content || "").trim();
+  const usage = res.data?.usage || null;
+  return { text, usage };
 }
 
 async function classifyWebsiteType({
@@ -178,6 +195,9 @@ async function classifyWebsiteType({
   description,
   pageContent,
   schemaTypes = [],
+  userId = null,
+  agentId = null,
+  conversationId = null,
 }) {
   if (!isWebsiteTypeClassifierEnabled()) return null;
 
@@ -199,18 +219,34 @@ async function classifyWebsiteType({
   });
 
   let raw = "";
+  let callUsage = null;
+  let callModel = process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
   try {
     if (provider === "groq") {
       const apiKey = process.env.GROQ_API_KEY;
       if (!apiKey) return null;
-      const model =
-        process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
-      raw = await callGroq({ model, prompt, apiKey, timeoutMs, system });
+      callModel = process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
+      const result = await callGroq({
+        model: callModel,
+        prompt,
+        apiKey,
+        timeoutMs,
+        system,
+      });
+      raw = result.text;
+      callUsage = result.usage;
     } else {
       const baseUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
-      const model =
-        process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
-      raw = await callOllama({ model, prompt, baseUrl, timeoutMs, system });
+      callModel = process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
+      const result = await callOllama({
+        model: callModel,
+        prompt,
+        baseUrl,
+        timeoutMs,
+        system,
+      });
+      raw = result.text;
+      callUsage = result.usage;
     }
   } catch (error) {
     console.warn(
@@ -218,6 +254,44 @@ async function classifyWebsiteType({
       error.message,
     );
     return null;
+  }
+
+  if (callUsage && userId) {
+    let cfg = null;
+    try {
+      cfg = await getResolvedModelConfig("website-classifier", ["open-source"]);
+    } catch {
+      cfg = null;
+    }
+    const inputTokens = callUsage.prompt_tokens || callUsage.input_tokens || 0;
+    const outputTokens =
+      callUsage.completion_tokens || callUsage.output_tokens || 0;
+    const cacheTokens = callUsage?.prompt_tokens_details?.cached_tokens ?? 0;
+    const costs = computeTokenCosts({
+      inputTokens,
+      outputTokens,
+      cacheTokens,
+      inputCostPerMillion: cfg?.inputCost || 0,
+      outputCostPerMillion: cfg?.outputCost || 0,
+      cacheCostPerMillion: cfg?.cacheCost || 0,
+    });
+
+    logOpenAIUsage({
+      userId,
+      agentId,
+      conversationId,
+      model: callModel,
+      type: usageTypeForCategory("website-classifier"),
+      inputTokens,
+      outputTokens,
+      cacheTokens,
+      totalTokens: callUsage.total_tokens || inputTokens + outputTokens,
+      ...costs,
+    }).catch((err) =>
+      console.warn(
+        `[LlamaWebsiteClassifier] Error logging usage: ${err.message}`,
+      ),
+    );
   }
 
   const parsed = extractJsonFromText(raw);
