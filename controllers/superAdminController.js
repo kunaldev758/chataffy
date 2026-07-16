@@ -1258,8 +1258,8 @@ function validateAiModel({
   }
 
   const resolvedProvider = String(provider || "openai").toLowerCase();
-  if (!["openai", "ollama", "groq"].includes(resolvedProvider)) {
-    return { success: false, message: "Provider must be openai, ollama, or groq" };
+  if (!["openai", "groq"].includes(resolvedProvider)) {
+    return { success: false, message: "Provider must be openai or groq" };
   }
 
   const cfg = providerConfig && typeof providerConfig === "object" ? providerConfig : {};
@@ -1276,7 +1276,7 @@ function validateAiModel({
     }
   }
 
-  // baseUrl / apiKey are optional overrides (env wins at runtime for local vs prod)
+  // apiKey is an optional override (env wins at runtime for local vs prod)
   const normalizedConfig = {
     apiKey: String(cfg.apiKey || "").trim(),
     baseUrl: String(cfg.baseUrl || "").trim(),

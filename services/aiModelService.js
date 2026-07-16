@@ -161,11 +161,8 @@ exports.getResolvedModelConfig = async (
     Number(fallback.timeoutMs) ||
     30000;
 
-  // Env wins for infra URLs/keys so local vs production stay correct.
-  let baseUrl =
-    process.env.grok_BASE_URL ||
-    cfg.baseUrl ||
-    "http://127.0.0.1:11434";
+  // Env wins for API keys so local vs production stay correct.
+  const baseUrl = String(cfg.baseUrl || "").trim();
 
   let apiKey = "";
   if (provider === "groq") {

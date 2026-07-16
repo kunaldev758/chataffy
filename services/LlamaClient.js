@@ -9,8 +9,8 @@ const {
 } = require("./aiModelService");
 
 /**
- * Resolve Llama/open-source config from DB (greeting → micro-classifier fallback),
- * with env used for OLLAMA_BASE_URL / GROQ_API_KEY so local vs production stay correct.
+ * Resolve Llama/open-source config from DB (greeting → micro-classifier fallback).
+ * GROQ_API_KEY from env wins so local vs production stay correct.
  */
 async function getLlamaConfig(feature = "greeting") {
   // Lightweight reply features share greeting / micro-classifier model config.
@@ -22,18 +22,12 @@ async function getLlamaConfig(feature = "greeting") {
     "off_topic",
   ]);
 
-
-  console.log("feature in the get lamma config check : ",feature);
-
-const primary =
-  feature === "website"
-    ? "website-classifier"
-    : lightweightFeatures.has(feature)
-      ? "micro-classifier"
-      : "micro-classifier";
-
-
-  console.log("primary check :",primary)
+  const primary =
+    feature === "website"
+      ? "website-classifier"
+      : lightweightFeatures.has(feature)
+        ? "micro-classifier"
+        : "micro-classifier";
 
   const fallbacks =
     primary === "greeting"
@@ -44,14 +38,10 @@ const primary =
 
   const cfg = await getResolvedModelConfig(primary, fallbacks);
 
-
-  console.log("cfg check : ",cfg)
-
   return {
-    provider: cfg.provider === "groq" ? "groq" : "ollama",
+    provider: cfg.provider === "groq" ? "groq" : null,
     model: cfg.model,
     apiKey: cfg.apiKey,
-    baseUrl: cfg.baseUrl,
     timeoutMs: cfg.timeoutMs,
     inputCost: cfg.inputCost,
     outputCost: cfg.outputCost,
@@ -137,9 +127,8 @@ async function isLlamaFeatureEnabled(feature = "greeting") {
 
   try {
     const cfg = await getLlamaConfig(feature);
-    if (cfg.fromDb) return true;
+    if (cfg.fromDb && cfg.provider === "groq") return true;
     if (cfg.provider === "groq") return Boolean(cfg.apiKey);
-    // ollama without DB: only if explicitly enabled via env above
     return false;
   } catch {
     return false;
@@ -148,36 +137,6 @@ async function isLlamaFeatureEnabled(feature = "greeting") {
 
 async function isLlamaConfigured(feature = "greeting") {
   return isLlamaFeatureEnabled(feature);
-}
-
-async function callOllama({ model, prompt, baseUrl, timeoutMs, system }) {
-  const url = `${baseUrl.replace(/\/+$/, "")}/api/chat`;
-  const messages = [];
-  if (system) messages.push({ role: "system", content: system });
-  messages.push({ role: "user", content: prompt });
-
-  const res = await axios.post(
-    url,
-    {
-      model,
-      messages,
-      stream: false,
-      options: { temperature: 0.4 },
-    },
-    { timeout: timeoutMs }
-  );
-
-  const text = String(res.data?.message?.content || res.data?.response || "").trim();
-  const usage =
-    res.data?.eval_count != null
-      ? {
-          prompt_tokens: res.data.prompt_eval_count || 0,
-          completion_tokens: res.data.eval_count || 0,
-          total_tokens:
-            (res.data.prompt_eval_count || 0) + (res.data.eval_count || 0),
-        }
-      : null;
-  return { text, usage };
 }
 
 async function callGroq({
@@ -223,39 +182,17 @@ async function completeLlama({
   if (!(await isLlamaFeatureEnabled(feature))) return null;
 
   const cfg = await getLlamaConfig(feature);
+  if (cfg.provider !== "groq" || !cfg.apiKey) return null;
+
   try {
-    let result;
-    if (cfg.provider === "groq") {
-      if (!cfg.apiKey) return null;
-      result = await callGroq({
-        model: cfg.model,
-        prompt,
-        apiKey: cfg.apiKey,
-        timeoutMs: cfg.timeoutMs,
-        system,
-        maxTokens,
-      });
-    } else {
-      result = await callOllama({
-        model: cfg.model,
-        prompt,
-        baseUrl: cfg.baseUrl,
-        timeoutMs: cfg.timeoutMs,
-        system,
-      });
-    }
-
-
-    console.log("result check : ",result);
-
-    console.log(`[LlamaClient] ${cfg.provider}`,{
+    const result = await callGroq({
       model: cfg.model,
       prompt,
+      apiKey: cfg.apiKey,
+      timeoutMs: cfg.timeoutMs,
       system,
-      text: result.text,
-      usage: result.usage,
-
-    })
+      maxTokens,
+    });
 
     if (result.text && userId) {
       const usage =
@@ -272,9 +209,7 @@ async function completeLlama({
 
     return result.text;
   } catch (error) {
-
-    console.log("result check : ",error);
-    console.warn(`[LlamaClient] ${cfg.provider} call failed:`, error.message);
+    console.warn(`[LlamaClient] groq call failed:`, error.message);
     return null;
   }
 }

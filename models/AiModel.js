@@ -7,7 +7,7 @@ const aiModelsCategoriesSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-const PROVIDERS = ["openai", "ollama", "groq"];
+const PROVIDERS = ["openai", "groq"];
 
 const aiModelSchema = new mongoose.Schema(
   {
@@ -42,8 +42,8 @@ const aiModelSchema = new mongoose.Schema(
 
     /**
      * Provider-specific connection settings.
-     * baseUrl / apiKey are optional overrides — env vars win for local vs production:
-     *   OLLAMA_BASE_URL, GROQ_API_KEY, OPENAI_API_KEY
+     * apiKey is an optional override — env vars win for local vs production:
+     *   GROQ_API_KEY, OPENAI_API_KEY
      */
     providerConfig: {
       apiKey: { type: String, default: "" },

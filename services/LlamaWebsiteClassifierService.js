@@ -136,35 +136,6 @@ function buildClassifierPrompt({
   ].join("\n");
 }
 
-async function callOllama({ model, prompt, baseUrl, timeoutMs, system }) {
-  const url = `${baseUrl.replace(/\/+$/, "")}/api/chat`;
-  const messages = [];
-  if (system) messages.push({ role: "system", content: system });
-  messages.push({ role: "user", content: prompt });
-
-  const res = await axios.post(
-    url,
-    {
-      model,
-      messages,
-      stream: false,
-      options: { temperature: 0 },
-    },
-    { timeout: timeoutMs },
-  );
-  const text = String(res.data?.message?.content || res.data?.response || "").trim();
-  const usage =
-    res.data?.eval_count != null
-      ? {
-          prompt_tokens: res.data.prompt_eval_count || 0,
-          completion_tokens: res.data.eval_count || 0,
-          total_tokens:
-            (res.data.prompt_eval_count || 0) + (res.data.eval_count || 0),
-        }
-      : null;
-  return { text, usage };
-}
-
 async function callGroq({ model, prompt, apiKey, timeoutMs, system }) {
   const url = "https://api.groq.com/openai/v1/chat/completions";
   const messages = [];
@@ -204,8 +175,13 @@ async function classifyWebsiteType({
   const provider = String(
     process.env.LLAMA_WEBSITE_TYPE_PROVIDER ||
       process.env.LLAMA_MICRO_PROVIDER ||
-      "grok",
+      "groq",
   ).toLowerCase();
+  if (provider !== "groq") return null;
+
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return null;
+
   const timeoutMs = Number(process.env.LLAMA_WEBSITE_TYPE_TIMEOUT_MS) || 30000;
   const system =
     "You are a website classification assistant. Return valid JSON only.";
@@ -220,34 +196,18 @@ async function classifyWebsiteType({
 
   let raw = "";
   let callUsage = null;
-  let callModel = process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
+  const callModel =
+    process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
   try {
-    if (provider === "groq") {
-      const apiKey = process.env.GROQ_API_KEY;
-      if (!apiKey) return null;
-      callModel = process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
-      const result = await callGroq({
-        model: callModel,
-        prompt,
-        apiKey,
-        timeoutMs,
-        system,
-      });
-      raw = result.text;
-      callUsage = result.usage;
-    } else {
-      const baseUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
-      callModel = process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
-      const result = await callOllama({
-        model: callModel,
-        prompt,
-        baseUrl,
-        timeoutMs,
-        system,
-      });
-      raw = result.text;
-      callUsage = result.usage;
-    }
+    const result = await callGroq({
+      model: callModel,
+      prompt,
+      apiKey,
+      timeoutMs,
+      system,
+    });
+    raw = result.text;
+    callUsage = result.usage;
   } catch (error) {
     console.warn(
       "[LlamaWebsiteClassifier] classification failed:",

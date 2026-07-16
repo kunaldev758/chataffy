@@ -17,7 +17,7 @@ const DEFAULT_CATEGORIES = [
 /**
  * @type {Array<{
  *   model: string,
- *   provider: 'openai' | 'ollama' | 'groq',
+ *   provider: 'openai' | 'groq',
  *   status: 'active' | 'inactive',
  *   categories: string[],
  *   inputCost: number,

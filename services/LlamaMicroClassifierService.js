@@ -49,31 +49,6 @@ function buildClassifierPrompt({ message, websiteLanguage, visitorLocale }) {
   ].join("\n");
 }
 
-async function callOllama({ model, prompt, baseUrl, timeoutMs }) {
-  const url = `${baseUrl.replace(/\/+$/, "")}/api/generate`;
-  const res = await axios.post(
-    url,
-    {
-      model,
-      prompt,
-      stream: false,
-      options: { temperature: 0 },
-    },
-    { timeout: timeoutMs }
-  );
-  const text = String(res.data?.response || "").trim();
-  const usage =
-    res.data?.eval_count != null
-      ? {
-          prompt_tokens: res.data.prompt_eval_count || 0,
-          completion_tokens: res.data.eval_count || 0,
-          total_tokens:
-            (res.data.prompt_eval_count || 0) + (res.data.eval_count || 0),
-        }
-      : null;
-  return { text, usage };
-}
-
 async function callGroq({ model, prompt, apiKey, timeoutMs }) {
   const url = "https://api.groq.com/openai/v1/chat/completions";
   const res = await axios.post(
@@ -97,9 +72,9 @@ async function callGroq({ model, prompt, apiKey, timeoutMs }) {
 }
 
 /**
- * Optional micro-classifier using an open-weight Llama model via Ollama or Groq.
+ * Optional micro-classifier using Groq.
  * Config resolved from AiModel category `micro-classifier` (env fallback).
- * OLLAMA_BASE_URL / GROQ_API_KEY from env win for local vs production.
+ * GROQ_API_KEY from env wins for local vs production.
  */
 async function classifyShortText({
   message,
@@ -121,7 +96,8 @@ async function classifyShortText({
   if (explicitEnabled === "false") return null;
   if (explicitEnabled !== "true" && !cfg.fromDb) return null;
 
-  const provider = cfg.provider === "groq" ? "groq" : "ollama";
+  if (cfg.provider !== "groq" || !cfg.apiKey) return null;
+
   const timeoutMs = cfg.timeoutMs || 2000;
   const prompt = buildClassifierPrompt({
     message,
@@ -133,26 +109,14 @@ async function classifyShortText({
   let callUsage = null;
   const callModel = cfg.model;
   try {
-    if (provider === "groq") {
-      if (!cfg.apiKey) return null;
-      const result = await callGroq({
-        model: callModel,
-        prompt,
-        apiKey: cfg.apiKey,
-        timeoutMs,
-      });
-      raw = result.text;
-      callUsage = result.usage;
-    } else {
-      const result = await callOllama({
-        model: callModel,
-        prompt,
-        baseUrl: cfg.baseUrl,
-        timeoutMs,
-      });
-      raw = result.text;
-      callUsage = result.usage;
-    }
+    const result = await callGroq({
+      model: callModel,
+      prompt,
+      apiKey: cfg.apiKey,
+      timeoutMs,
+    });
+    raw = result.text;
+    callUsage = result.usage;
   } catch {
     return null;
   }
@@ -196,7 +160,7 @@ async function classifyShortText({
     userLanguage: normalizeLang(parsed.userLanguage) || null,
     confidence,
     raw,
-    provider,
+    provider: "groq",
   };
 }
 
