@@ -793,14 +793,9 @@ const processWebPage = async (
         description: metaDescription,
         pageContent: cleanContent,
         schemaTypes: websiteMetadata._schemaTypes || [],
-<<<<<<< HEAD
         userId,
         agentId,
         conversationId,
-=======
-        // userId,
-        // agentId,
->>>>>>> f7fb8ea9ec7945fbbc952d4ae6902ee8816d5208
       });
 
       if (llamaType?.company_type) {
