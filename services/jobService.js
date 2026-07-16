@@ -783,8 +783,8 @@ const processWebPage = async (url, sourceCode, chromeCache = {}) => {
         description: metaDescription,
         pageContent: cleanContent,
         schemaTypes: websiteMetadata._schemaTypes || [],
-        userId,
-        agentId,
+        // userId,
+        // agentId,
       });
 
       if (llamaType?.company_type) {
