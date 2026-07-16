@@ -119,7 +119,7 @@ exports.getModelForCategory = async (category) => {
 /**
  * Resolve a usable runtime config for a category.
  * DB active model wins for model name / provider / costs / timeout;
- * env wins for infrastructure (grok_BASE_URL, GROQ_API_KEY, OPENAI_API_KEY).
+ * env wins for API keys (GROQ_API_KEY, OPENAI_API_KEY).
  * Falls back to env defaults when no active DB model exists.
  *
  * @param {string} category
