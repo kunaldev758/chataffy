@@ -100,7 +100,11 @@ async bulkInsertUrls(userId,agentId, urls) {
     return sameOrigin;
   }
 
-  async extractUrlsFromSitemap(sitemapUrl, userId = null) {
+  async extractUrlsFromSitemap(sitemapUrl, userId = null, options = {}) {
+    const { visitedUrls = null, allowWebsiteDiscovery = true } = options;
+    const visited = visitedUrls || new Set();
+    const childOptions = { visitedUrls: visited, allowWebsiteDiscovery: false };
+
     try {
       // Auto-add https:// prefix if protocol is missing
       if (sitemapUrl && typeof sitemapUrl === 'string') {
@@ -109,6 +113,19 @@ async bulkInsertUrls(userId,agentId, urls) {
           sitemapUrl = `https://${trimmedUrl}`;
         }
       }
+
+      let normalizedInput;
+      try {
+        normalizedInput = normalizeWebUrl(sitemapUrl);
+      } catch (_) {
+        return [];
+      }
+
+      if (visited.has(normalizedInput)) {
+        console.log(`Skipping already-processed sitemap URL: ${sitemapUrl}`);
+        return [];
+      }
+      visited.add(normalizedInput);
 
       // If a website URL (not a sitemap) is provided, try to discover sitemaps or fallback to homepage links
       let urls = [];
@@ -122,7 +139,7 @@ async bulkInsertUrls(userId,agentId, urls) {
         // Not a valid URL; continue to existing logic which will handle and return []
       }
 
-      if (isWebsiteUrl && origin) {
+      if (isWebsiteUrl && origin && allowWebsiteDiscovery) {
         console.log(`Website URL provided. Attempting discovery for: ${sitemapUrl}`);
 
         // 1) robots.txt -> look for Sitemap: entries
@@ -142,7 +159,7 @@ async bulkInsertUrls(userId,agentId, urls) {
 
             for (const smUrl of discoveredSitemaps) {
               try {
-                const found = await this.extractUrlsFromSitemap(smUrl, userId);
+                const found = await this.extractUrlsFromSitemap(smUrl, userId, childOptions);
                 urls.push(...found);
                 if (urls.length >= 1500) break;
               } catch (e) {
@@ -166,12 +183,13 @@ async bulkInsertUrls(userId,agentId, urls) {
           "/sitemap1.xml",
           "/sitemap/sitemap.xml",
           "/sitemap/news.xml",
+          "/xmlsitemap.php",
         ];
         for (const path of commonSitemapPaths) {
           if (urls.length >= 1500) break;
           const candidate = `${origin}${path}`;
           try {
-            const found = await this.extractUrlsFromSitemap(candidate, userId);
+            const found = await this.extractUrlsFromSitemap(candidate, userId, childOptions);
             urls.push(...found);
           } catch (e) {
             // ignore and try next
@@ -289,7 +307,11 @@ async bulkInsertUrls(userId,agentId, urls) {
             break;
           }
           try {
-            const nestedUrls = await this.extractUrlsFromSitemap(nestedSitemapUrl, userId);
+            const nestedUrls = await this.extractUrlsFromSitemap(
+              nestedSitemapUrl,
+              userId,
+              childOptions,
+            );
             urls.push(...nestedUrls);
             console.log(`Successfully extracted ${nestedUrls.length} URLs from nested sitemap: ${nestedSitemapUrl}`);
             if (urls.length >= 1500) {
