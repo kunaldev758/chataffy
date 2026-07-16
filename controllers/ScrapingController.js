@@ -159,14 +159,136 @@ async bulkInsertUrls(userId,agentId, urls) {
         }
 
         // 2) Try common sitemap locations
+        // const commonSitemapPaths = [
+        //   "/sitemap.xml",
+        //   "/sitemap_index.xml",
+        //   "/sitemap-index.xml",
+        //   "/sitemap1.xml",
+        //   "/sitemap/sitemap.xml",
+        //   "/sitemap/news.xml",
+        //   "/xmlsitemap.php",
+        // ];
+
         const commonSitemapPaths = [
-          "/sitemap.xml",
-          "/sitemap_index.xml",
-          "/sitemap-index.xml",
-          "/sitemap1.xml",
-          "/sitemap/sitemap.xml",
-          "/sitemap/news.xml",
-        ];
+  // Standard
+  "/sitemap.xml",
+  "/sitemap.xml.gz",
+
+  // Sitemap indexes
+  "/sitemap_index.xml",
+  "/sitemap-index.xml",
+  "/sitemapindex.xml",
+  "/sitemap-index.xml.gz",
+  "/sitemap_index.xml.gz",
+
+  // Numbered
+  "/sitemap1.xml",
+  "/sitemap2.xml",
+  "/sitemap-1.xml",
+  "/sitemap-2.xml",
+
+  // Common folders
+  "/sitemap/sitemap.xml",
+  "/sitemap/index.xml",
+  "/sitemaps/sitemap.xml",
+  "/sitemaps/index.xml",
+
+  // XML sitemap generators
+  "/xmlsitemap.php",
+  "/sitemap.php",
+  "/sitemap.xml.php",
+
+  // WordPress SEO plugins
+  "/post-sitemap.xml",
+  "/page-sitemap.xml",
+  "/category-sitemap.xml",
+  "/tag-sitemap.xml",
+  "/author-sitemap.xml",
+  "/news-sitemap.xml",
+  "/video-sitemap.xml",
+  "/image-sitemap.xml",
+  "/product-sitemap.xml",
+  "/portfolio-sitemap.xml",
+  "/post_tag-sitemap.xml",
+  "/local-sitemap.xml",
+
+  // Yoast / RankMath / AIOSEO indexes
+  "/sitemap_index.xml",
+  "/news-sitemap.xml",
+
+  // Google News
+  "/sitemap-news.xml",
+  "/news.xml",
+  "/sitemap/news.xml",
+
+  // Images
+  "/image-sitemap.xml",
+  "/images-sitemap.xml",
+  "/sitemap-images.xml",
+
+  // Videos
+  "/video-sitemap.xml",
+  "/videos-sitemap.xml",
+
+  // Products / Ecommerce
+  "/product-sitemap.xml",
+  "/products-sitemap.xml",
+  "/product-sitemap1.xml",
+  "/catalog-sitemap.xml",
+
+  // Categories
+  "/category-sitemap.xml",
+  "/categories-sitemap.xml",
+
+  // Blogs
+  "/blog-sitemap.xml",
+  "/blog/sitemap.xml",
+
+  // Pages
+  "/page-sitemap.xml",
+  "/pages-sitemap.xml",
+
+  // Posts
+  "/post-sitemap.xml",
+  "/posts-sitemap.xml",
+
+  // Tags
+  "/tag-sitemap.xml",
+  "/tags-sitemap.xml",
+
+  // Authors
+  "/author-sitemap.xml",
+
+  // Archives
+  "/archive-sitemap.xml",
+
+  // Custom CMS
+  "/sitemap-main.xml",
+  "/main-sitemap.xml",
+  "/master-sitemap.xml",
+  "/site-sitemap.xml",
+  "/site-map.xml",
+  "/sitemapindex.xml",
+
+  // Compressed
+  "/sitemap.gz",
+  "/sitemap.xml.gz",
+  "/sitemap-index.gz",
+
+  // Regional / language
+  "/en/sitemap.xml",
+  "/fr/sitemap.xml",
+  "/de/sitemap.xml",
+  "/es/sitemap.xml",
+
+  // Misc
+  "/feeds/sitemap.xml",
+  "/rss-sitemap.xml",
+  "/dynamic-sitemap.xml",
+  "/sitemap-all.xml",
+  "/sitemap_latest.xml",
+  "/sitemap_static.xml",
+];
         for (const path of commonSitemapPaths) {
           if (urls.length >= 1500) break;
           const candidate = `${origin}${path}`;
