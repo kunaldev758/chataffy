@@ -3055,23 +3055,68 @@ ${answerInstructions}`;
           if (!embeddingResponse) {
             throw new Error("Failed to generate question embedding.");
           }
-          // Handle response object with usage or direct embedding
+          // LangChain embedQuery returns a number[]; some wrappers may return { embedding, usage }
           questionEmbedding = embeddingResponse.embedding || embeddingResponse;
-          
-          // Log embedding API usage if available
-          if (embeddingResponse.usage) {
-            try {
-              this.logOpenAIChatUsage({
+
+          // Always log embedding usage. LangChain does not expose token usage on embedQuery,
+          // so fall back to a char/4 estimate (same approach as ReviseAnswer).
+          try {
+            const usage = embeddingResponse.usage;
+            let inputTokens = 0;
+            if (usage) {
+              inputTokens =
+                usage.prompt_tokens ||
+                usage.input_tokens ||
+                usage.total_tokens ||
+                0;
+            }
+            if (!inputTokens) {
+              const text =
+                typeof embeddingQuery === "string"
+                  ? embeddingQuery
+                  : String(embeddingQuery || "");
+              inputTokens = text.length > 0 ? Math.ceil(text.length / 4) : 0;
+            }
+
+            if (inputTokens > 0) {
+              const modelRecord = await getResolvedModelConfig("embedding").catch(
+                () => null
+              );
+              const embeddingModelName =
+                embeddingResponse.model ||
+                modelRecord?.model ||
+                this.currentModelName ||
+                "text-embedding-3-small";
+              const costs = computeTokenCosts({
+                inputTokens,
+                outputTokens: 0,
+                cacheTokens: 0,
+                inputCostPerMillion: modelRecord?.inputCost || 0,
+                outputCostPerMillion: 0,
+                cacheCostPerMillion: 0,
+              });
+
+              logOpenAIUsage({
                 userId,
                 agentId,
                 conversationId,
-                usage: embeddingResponse.usage,
-                modelName: embeddingResponse.model || "embedding",
-                type: "embedding"
+                model: embeddingModelName,
+                type: "embedding",
+                inputTokens,
+                outputTokens: 0,
+                cacheTokens: 0,
+                totalTokens: inputTokens,
+                ...costs,
+              }).catch((logErr) => {
+                console.warn(
+                  `[QueryController] Error logging embedding usage: ${logErr.message}`
+                );
               });
-            } catch (logError) {
-              console.warn(`[QueryController] Error logging embedding usage: ${logError.message}`);
             }
+          } catch (logError) {
+            console.warn(
+              `[QueryController] Error logging embedding usage: ${logError.message}`
+            );
           }
         }
         return questionEmbedding;

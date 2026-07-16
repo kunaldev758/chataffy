@@ -100,7 +100,11 @@ async bulkInsertUrls(userId,agentId, urls) {
     return sameOrigin;
   }
 
-  async extractUrlsFromSitemap(sitemapUrl, userId = null) {
+  async extractUrlsFromSitemap(sitemapUrl, userId = null, options = {}) {
+    const { visitedUrls = null, allowWebsiteDiscovery = true } = options;
+    const visited = visitedUrls || new Set();
+    const childOptions = { visitedUrls: visited, allowWebsiteDiscovery: false };
+
     try {
       // Auto-add https:// prefix if protocol is missing
       if (sitemapUrl && typeof sitemapUrl === 'string') {
@@ -109,6 +113,19 @@ async bulkInsertUrls(userId,agentId, urls) {
           sitemapUrl = `https://${trimmedUrl}`;
         }
       }
+
+      let normalizedInput;
+      try {
+        normalizedInput = normalizeWebUrl(sitemapUrl);
+      } catch (_) {
+        return [];
+      }
+
+      if (visited.has(normalizedInput)) {
+        console.log(`Skipping already-processed sitemap URL: ${sitemapUrl}`);
+        return [];
+      }
+      visited.add(normalizedInput);
 
       // If a website URL (not a sitemap) is provided, try to discover sitemaps or fallback to homepage links
       let urls = [];
@@ -122,7 +139,7 @@ async bulkInsertUrls(userId,agentId, urls) {
         // Not a valid URL; continue to existing logic which will handle and return []
       }
 
-      if (isWebsiteUrl && origin) {
+      if (isWebsiteUrl && origin && allowWebsiteDiscovery) {
         console.log(`Website URL provided. Attempting discovery for: ${sitemapUrl}`);
 
         // 1) robots.txt -> look for Sitemap: entries
@@ -142,7 +159,7 @@ async bulkInsertUrls(userId,agentId, urls) {
 
             for (const smUrl of discoveredSitemaps) {
               try {
-                const found = await this.extractUrlsFromSitemap(smUrl, userId);
+                const found = await this.extractUrlsFromSitemap(smUrl, userId, childOptions);
                 urls.push(...found);
                 if (urls.length >= 1500) break;
               } catch (e) {
@@ -170,130 +187,19 @@ async bulkInsertUrls(userId,agentId, urls) {
         // ];
 
         const commonSitemapPaths = [
-  // Standard
-  "/sitemap.xml",
-  "/sitemap.xml.gz",
-
-  // Sitemap indexes
-  "/sitemap_index.xml",
-  "/sitemap-index.xml",
-  "/sitemapindex.xml",
-  "/sitemap-index.xml.gz",
-  "/sitemap_index.xml.gz",
-
-  // Numbered
-  "/sitemap1.xml",
-  "/sitemap2.xml",
-  "/sitemap-1.xml",
-  "/sitemap-2.xml",
-
-  // Common folders
-  "/sitemap/sitemap.xml",
-  "/sitemap/index.xml",
-  "/sitemaps/sitemap.xml",
-  "/sitemaps/index.xml",
-
-  // XML sitemap generators
-  "/xmlsitemap.php",
-  "/sitemap.php",
-  "/sitemap.xml.php",
-
-  // WordPress SEO plugins
-  "/post-sitemap.xml",
-  "/page-sitemap.xml",
-  "/category-sitemap.xml",
-  "/tag-sitemap.xml",
-  "/author-sitemap.xml",
-  "/news-sitemap.xml",
-  "/video-sitemap.xml",
-  "/image-sitemap.xml",
-  "/product-sitemap.xml",
-  "/portfolio-sitemap.xml",
-  "/post_tag-sitemap.xml",
-  "/local-sitemap.xml",
-
-  // Yoast / RankMath / AIOSEO indexes
-  "/sitemap_index.xml",
-  "/news-sitemap.xml",
-
-  // Google News
-  "/sitemap-news.xml",
-  "/news.xml",
-  "/sitemap/news.xml",
-
-  // Images
-  "/image-sitemap.xml",
-  "/images-sitemap.xml",
-  "/sitemap-images.xml",
-
-  // Videos
-  "/video-sitemap.xml",
-  "/videos-sitemap.xml",
-
-  // Products / Ecommerce
-  "/product-sitemap.xml",
-  "/products-sitemap.xml",
-  "/product-sitemap1.xml",
-  "/catalog-sitemap.xml",
-
-  // Categories
-  "/category-sitemap.xml",
-  "/categories-sitemap.xml",
-
-  // Blogs
-  "/blog-sitemap.xml",
-  "/blog/sitemap.xml",
-
-  // Pages
-  "/page-sitemap.xml",
-  "/pages-sitemap.xml",
-
-  // Posts
-  "/post-sitemap.xml",
-  "/posts-sitemap.xml",
-
-  // Tags
-  "/tag-sitemap.xml",
-  "/tags-sitemap.xml",
-
-  // Authors
-  "/author-sitemap.xml",
-
-  // Archives
-  "/archive-sitemap.xml",
-
-  // Custom CMS
-  "/sitemap-main.xml",
-  "/main-sitemap.xml",
-  "/master-sitemap.xml",
-  "/site-sitemap.xml",
-  "/site-map.xml",
-  "/sitemapindex.xml",
-
-  // Compressed
-  "/sitemap.gz",
-  "/sitemap.xml.gz",
-  "/sitemap-index.gz",
-
-  // Regional / language
-  "/en/sitemap.xml",
-  "/fr/sitemap.xml",
-  "/de/sitemap.xml",
-  "/es/sitemap.xml",
-
-  // Misc
-  "/feeds/sitemap.xml",
-  "/rss-sitemap.xml",
-  "/dynamic-sitemap.xml",
-  "/sitemap-all.xml",
-  "/sitemap_latest.xml",
-  "/sitemap_static.xml",
-];
+          "/sitemap.xml",
+          "/sitemap_index.xml",
+          "/sitemap-index.xml",
+          "/sitemap1.xml",
+          "/sitemap/sitemap.xml",
+          "/sitemap/news.xml",
+          "/xmlsitemap.php",
+        ];
         for (const path of commonSitemapPaths) {
           if (urls.length >= 1500) break;
           const candidate = `${origin}${path}`;
           try {
-            const found = await this.extractUrlsFromSitemap(candidate, userId);
+            const found = await this.extractUrlsFromSitemap(candidate, userId, childOptions);
             urls.push(...found);
           } catch (e) {
             // ignore and try next
@@ -411,7 +317,11 @@ async bulkInsertUrls(userId,agentId, urls) {
             break;
           }
           try {
-            const nestedUrls = await this.extractUrlsFromSitemap(nestedSitemapUrl, userId);
+            const nestedUrls = await this.extractUrlsFromSitemap(
+              nestedSitemapUrl,
+              userId,
+              childOptions,
+            );
             urls.push(...nestedUrls);
             console.log(`Successfully extracted ${nestedUrls.length} URLs from nested sitemap: ${nestedSitemapUrl}`);
             if (urls.length >= 1500) {

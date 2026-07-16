@@ -339,6 +339,7 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
 
   const byAgent = {};
   const totals = emptyUsageTotals();
+  const embeddingTotals = emptyUsageTotals();
 
   const ensureAgent = (key) => {
     if (!byAgent[key]) {
@@ -377,16 +378,29 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
       totalRequests: row.totalRequests || 0,
     };
     const agentBucket = ensureAgent(key);
-    addInto(totals, usage);
     if (type === 'embedding') {
       addInto(agentBucket.embeddingUsage, usage);
+      addInto(embeddingTotals, usage);
     } else {
       // Chat / brief-chat / intent / open-source — keep separate from training embeddings
       addInto(agentBucket.openAIUsage, usage);
+      addInto(totals, usage);
     }
   }
 
-  return { byAgent, totals };
+  // Align summary totals with component sums (input + output + cache)
+  const alignTotals = (u) => {
+    u.totalTokens = u.inputTokens + u.outputTokens + u.cacheTokens;
+    u.totalCost = u.inputCost + u.outputCost + u.cacheCost;
+  };
+  alignTotals(totals);
+  alignTotals(embeddingTotals);
+  for (const bucket of Object.values(byAgent)) {
+    alignTotals(bucket.openAIUsage);
+    alignTotals(bucket.embeddingUsage);
+  }
+
+  return { byAgent, totals, embeddingTotals };
 }
 
 /**
