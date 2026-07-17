@@ -112,7 +112,7 @@ function logLlamaUsage({
     agentId,
     conversationId,
     model: cfg.model,
-    type: usageTypeForCategory(cfg.category || "open-source"),
+    type: usageTypeForCategory(cfg.category || "micro-classifier"),
     inputTokens: usage.prompt_tokens || 0,
     outputTokens: usage.completion_tokens || 0,
     cacheTokens: 0,

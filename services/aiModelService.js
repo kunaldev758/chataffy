@@ -20,11 +20,7 @@ const CATEGORY_ENV_FALLBACKS = {
     provider: "openai",
     model: process.env.OPENAI_CHAT_MODEL_BRIEF || "gpt-4.1-mini",
   },
-  // typo alias used in existing DB rows
-  "breif-chat": {
-    provider: "openai",
-    model: process.env.OPENAI_CHAT_MODEL_BRIEF || "gpt-4.1-mini",
-  },
+
   embedding: {
     provider: "openai",
     model: process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small",
@@ -197,23 +193,14 @@ exports.getResolvedModelConfig = async (
 };
 
 /**
- * Map a fine-grained category to the OpenAIUsage `type` enum.
+ * Normalize an AiModel category for OpenAIUsage.type storage.
+ * Categories are dynamic — only applies known typo aliases.
  */
 exports.usageTypeForCategory = (category) => {
-  const cat = String(category || "").toLowerCase();
-  if (cat === "embedding") return "embedding";
-  if (cat === "intent") return "intent";
-  if (cat === "brief-chat" || cat === "breif-chat") return "brief-chat";
-  if (
-    cat === "open-source" ||
-    cat === "micro-classifier" ||
-    cat === "website-classifier" ||
-    cat === "greeting"
-  ) {
-    return "open-source";
-  }
-  // chat and any other chat-like category
-  return "chat";
+  const cat = String(category || "chat").trim().toLowerCase();
+  return cat || "chat";
 };
 
 exports.CATEGORY_ENV_FALLBACKS = CATEGORY_ENV_FALLBACKS;
+
+

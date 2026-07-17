@@ -61,7 +61,7 @@ async function logOpenAIUsage({
       agentId,
       conversationId,
       model,
-      type,
+      type: usageTypeForCategory(type),
       inputTokens,
       outputTokens,
       cacheTokens,
@@ -243,11 +243,8 @@ async function getOpenAIUsageByType(userId, { startDate, endDate } = {}) {
     inputCost: 0,   outputCost: 0,   cacheCost: 0,   totalCost: 0,
   });
 
-  // Pull known types straight from the schema's own enum — this is the
-  // actual field we're grouping on, so it's the correct source of truth.
-  const knownTypes = OpenAIUsage.schema.path('type').enumValues;
-  const byType = Object.fromEntries(knownTypes.map((t) => [t, emptyType()]));
-
+  // Dynamic categories — only include types that actually have usage rows.
+  const byType = {};
   const totals = emptyType();
 
   for (const row of rows) {
@@ -289,13 +286,24 @@ function emptyUsageTotals() {
   };
 }
 
-/** Types that count toward chat conversation usage (not website-training embeddings). */
-const CHAT_USAGE_TYPES = ['chat', 'brief-chat', 'intent', 'open-source'];
-const CONVERSATION_USAGE_TYPES = [...CHAT_USAGE_TYPES, 'embedding'];
+/**
+ * Embedding is the only type bucketed separately for training metrics.
+ * All other dynamic categories count as LLM / chat-side usage.
+ */
+function isEmbeddingUsageType(type) {
+  return usageTypeForCategory(type) === 'embedding';
+}
 
 function isChatUsageType(type) {
-  return CHAT_USAGE_TYPES.includes(type);
+  return !isEmbeddingUsageType(type);
 }
+
+/** @deprecated Prefer isChatUsageType — categories are dynamic. */
+const CHAT_USAGE_TYPES = [];
+/** Embedding is the only reserved training bucket. */
+const TRAINING_USAGE_TYPES = ['embedding'];
+/** @deprecated Conversation queries no longer filter by a fixed type allowlist. */
+const CONVERSATION_USAGE_TYPES = [];
 
 function toObjectIdOrValue(id) {
   if (id == null || id === '') return id;
@@ -378,11 +386,10 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
       totalRequests: row.totalRequests || 0,
     };
     const agentBucket = ensureAgent(key);
-    if (type === 'embedding') {
+    if (isEmbeddingUsageType(type)) {
       addInto(agentBucket.embeddingUsage, usage);
       addInto(embeddingTotals, usage);
     } else {
-      // Chat / brief-chat / intent / open-source — keep separate from training embeddings
       addInto(agentBucket.openAIUsage, usage);
       addInto(totals, usage);
     }
@@ -406,7 +413,7 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
 /**
  * Aggregate OpenAI usage per conversation for one agent (chatbot).
  * Returns chat metrics plus embedding input tokens/cost when logged with that conversationId.
- * Chat includes brief-chat / intent / open-source (same thread cost as premium "chat").
+ * Any non-embedding category counts toward chat-side totals (categories are dynamic).
  */
 async function getOpenAIUsageGroupedByConversation(
   userId,
@@ -415,7 +422,6 @@ async function getOpenAIUsageGroupedByConversation(
 ) {
   const match = {
     conversationId: { $ne: null, $exists: true },
-    type: { $in: CONVERSATION_USAGE_TYPES },
   };
   if (userId) match.userId = toObjectIdOrValue(userId);
   if (agentId) match.agentId = toObjectIdOrValue(agentId);
@@ -474,7 +480,7 @@ async function getOpenAIUsageGroupedByConversation(
     const type = row._id?.type;
     const conv = ensureConv(convId);
 
-    if (type === 'embedding') {
+    if (isEmbeddingUsageType(type)) {
       conv.embeddingInputTokens += row.inputTokens || 0;
       conv.embeddingInputCost += row.inputCost || 0;
       conv.embeddingTotalTokens += row.totalTokens || 0;
@@ -526,9 +532,7 @@ async function getOpenAIUsageForConversation(
   conversationId,
   { startDate, endDate } = {}
 ) {
-  const match = {
-    type: { $in: CONVERSATION_USAGE_TYPES },
-  };
+  const match = {};
   if (userId) match.userId = toObjectIdOrValue(userId);
   if (conversationId) match.conversationId = toObjectIdOrValue(conversationId);
   if (startDate || endDate) {
@@ -562,7 +566,7 @@ async function getOpenAIUsageForConversation(
   };
 
   for (const row of rows) {
-    if (row._id === 'embedding') {
+    if (isEmbeddingUsageType(row._id)) {
       result.embeddingInputTokens += row.inputTokens || 0;
       result.embeddingInputCost += row.inputCost || 0;
     } else if (isChatUsageType(row._id)) {
@@ -591,8 +595,13 @@ module.exports = {
   getOpenAIUsageGroupedByConversation,
   getOpenAIUsageForConversation,
   emptyUsageTotals,
+  isChatUsageType,
+  isEmbeddingUsageType,
   CHAT_USAGE_TYPES,
   CONVERSATION_USAGE_TYPES,
+  TRAINING_USAGE_TYPES,
   logQdrantUsage,
   getQdrantUsage
 };
+
+
