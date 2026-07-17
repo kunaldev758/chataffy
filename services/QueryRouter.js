@@ -14,6 +14,8 @@ const {
   formatStateForRouter,
   topicsFromRagState,
   hasCatalogThreadFromState,
+  isAwaitingFollowUp,
+  normalizeRagState,
 } = require("./conversationStateService");
 const { normalizeQueryText } = require("../utils/queryNormalization");
 const { isContactIntentQuestion } = require("../utils/contactIntentDetection");
@@ -114,16 +116,26 @@ const LIVE_AGENT_PHRASES = [
 ];
 
 const FOLLOW_UP_ACCEPTANCE =
-  /^(okay\s+)?(tell\s+me|yes|yeah|yep|sure|go\s+ahead|please\s+do|do\s+it|ok|okay|continue|proceed)[\s!.?]*$/i;
+  /^(okay\s+)?(tell\s+me|yes|yeah|yep|yup|sure|go\s+ahead|please\s+do|do\s+it|ok|okay|continue|proceed|please|alright|all\s+right)[\s!.?]*$/i;
 
-// Only these three sources are language-agnostic and unambiguous enough to
-// skip the LLM classifier entirely. Structural sub-intent (pricing, links,
-// contact) and follow-up detection are removed from trusted sources so they
-// always fall through to the LLM for multilingual accuracy.
+/** Pure thanks / closure — stay on ACKNOWLEDGEMENT even after a soft offer. */
+const PURE_THANKS =
+  /^(thanks|thank\s+you|thx|ty|got\s+it|understood|perfect|great|awesome|cool|merci|gracias|ありがとう|धन्यवाद)[\s!.]*$/i;
+
+/**
+ * Soft offers that invite the user to continue (HTML stripped before match).
+ * Used to set ragState.awaiting and to accept short affirmatives as follow-ups.
+ */
+const SOFT_OFFER_PATTERN =
+  /let me know|further details?|more details?|further information|more information|feel free|anything else|any other questions?|if you (?:need|want|have|d like)|want to know(?:\s+more)?|just ask|tell me if|would you like|need (?:any )?more|happy to (?:help|share|provide|tell)|here if you|more about|should you (?:need|want)|don'?t hesitate/i;
+
+// Only these sources are unambiguous enough to skip the LLM classifier.
+// Follow-up acceptance is included when awaitingFollowUp / soft-offer is explicit.
 const TRUSTED_RULE_SOURCES = new Set([
   "rules_greeting",
   "rules_live_agent",
   "rules_accidental",
+  "rules_follow_up_acceptance",
 ]);
 
 /**
@@ -261,17 +273,93 @@ function formatRecentChatForRouter(messages, limit = 4) {
     .join("\n");
 }
 
-function detectFollowUpAcceptance(question, chatMessages) {
-  const q = (question || "").trim();
-  if (!FOLLOW_UP_ACCEPTANCE.test(q)) return false;
-  if (!chatMessages || chatMessages.length === 0) return false;
+function stripHtmlForOfferDetection(text) {
+  return String(text || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getLastAssistantMessage(chatMessages) {
+  if (!chatMessages || chatMessages.length === 0) return "";
   const lastAi = [...chatMessages]
     .reverse()
     .find((m) => m.sender_type === "ai" || m.sender_type === "bot");
-  if (!lastAi?.message) return false;
-  return /\?|want to know|just ask|tell me if|would you like/i.test(
-    lastAi.message
+  return lastAi?.message || "";
+}
+
+/**
+ * True when the assistant reply invites more detail / continuation.
+ */
+function detectSoftOffer(assistantMessage) {
+  const plain = stripHtmlForOfferDetection(assistantMessage);
+  if (!plain || plain.length < 8) return false;
+  return SOFT_OFFER_PATTERN.test(plain);
+}
+
+function isShortAffirmative(question) {
+  const q = (question || "").trim();
+  if (!q || q.length > 40) return false;
+  if (PURE_THANKS.test(q)) return false;
+  return FOLLOW_UP_ACCEPTANCE.test(q);
+}
+
+function isPureThanks(question) {
+  return PURE_THANKS.test((question || "").trim());
+}
+
+function rewriteFromConversationState(conversationState) {
+  const state = normalizeRagState(conversationState);
+  return (
+    (state.lastStandaloneQuery && state.lastStandaloneQuery.trim()) ||
+    (state.topic && state.topic.trim()) ||
+    null
   );
+}
+
+/**
+ * Force SEMANTIC_RAG + rewrite when the user accepts a soft offer / awaiting follow-up.
+ */
+function applyFollowUpAcceptanceOverride(
+  result,
+  question,
+  { chatMessages = [], conversationState = null } = {}
+) {
+  if (!isShortAffirmative(question)) return result;
+  if (isPureThanks(question)) return result;
+
+  const awaiting = isAwaitingFollowUp(conversationState);
+  const lastOffer = detectSoftOffer(getLastAssistantMessage(chatMessages));
+  if (!awaiting && !lastOffer) return result;
+
+  const fallbackRewrite = rewriteFromConversationState(conversationState);
+  const rewrittenQuery = result?.rewrittenQuery || fallbackRewrite;
+
+  return buildRouteResult({
+    route: ROUTES.SEMANTIC_RAG,
+    subIntent: null,
+    userLanguage: result?.userLanguage || "en",
+    confidence: Math.max(result?.confidence || 0, 0.92),
+    rewrittenQuery,
+    followUp: true,
+    needsRewrite: Boolean(rewrittenQuery),
+    rewriteReason: rewrittenQuery
+      ? result?.rewriteReason && result.rewriteReason !== "NONE"
+        ? result.rewriteReason
+        : "ELLIPSIS"
+      : null,
+    source:
+      result?.source && String(result.source).startsWith("llm")
+        ? "llm_router_follow_up_override"
+        : "rules_follow_up_acceptance",
+  });
+}
+
+function detectFollowUpAcceptance(question, chatMessages, conversationState) {
+  if (!isShortAffirmative(question)) return false;
+  if (isAwaitingFollowUp(conversationState)) return true;
+  return detectSoftOffer(getLastAssistantMessage(chatMessages));
 }
 
 function detectUserLanguageFromQuestion(question) {
@@ -347,14 +435,25 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
     };
   }
 
-  if (detectFollowUpAcceptance(normalizedQuestion, chatMessages)) {
+  if (
+    detectFollowUpAcceptance(
+      normalizedQuestion,
+      chatMessages,
+      conversationState
+    )
+  ) {
+    const rewrittenQuery = rewriteFromConversationState(conversationState);
     return {
       confident: true,
       result: buildRouteResult({
         route: ROUTES.SEMANTIC_RAG,
         userLanguage,
-        confidence: 0.9,
-        source: "rules_follow_up",
+        confidence: 0.93,
+        rewrittenQuery,
+        followUp: true,
+        needsRewrite: Boolean(rewrittenQuery),
+        rewriteReason: rewrittenQuery ? "ELLIPSIS" : null,
+        source: "rules_follow_up_acceptance",
       }),
     };
   }
@@ -544,7 +643,11 @@ Classify the visitor message into exactly one route:
 - GREETING: simple hello/hi with no real question
 - LIVE_AGENT: wants a human agent, representative, or live support
 - ACCIDENTAL: random characters, keyboard mash, or test input with no real meaning
-- ACKNOWLEDGEMENT: pure social acknowledgement with NO new question or intent (e.g. "ok", "thanks", "got it", "understood", "great", "merci", "ありがとう", "धन्यवाद", "gracias"). Use chat history to resolve ambiguity — "ok" after a bot offer/question = SEMANTIC_RAG (follow-up acceptance), "ok"/"thanks" after a bot answer = ACKNOWLEDGEMENT. ANY new question, request, or new topic = SEMANTIC_RAG, not ACKNOWLEDGEMENT.
+- ACKNOWLEDGEMENT: pure social acknowledgement with NO new question or intent (e.g. "thanks", "got it", "understood", "merci", "ありがとう", "धन्यवाद", "gracias"). Use chat history and conversation state to resolve ambiguity:
+  - Soft closes that invite more detail ("let me know", "feel free", "anything else", "if you need further details", questions ending with an offer) count as OFFERS, not finished answers.
+  - Short affirmatives ("ok", "yes", "sure", "go ahead") after an offer OR when conversation state has awaiting: follow_up = SEMANTIC_RAG (follow-up acceptance) with rewrittenQuery from the last query/topic.
+  - "thanks" / gratitude after a finished answer = ACKNOWLEDGEMENT.
+  - ANY new question, request, or new topic = SEMANTIC_RAG, not ACKNOWLEDGEMENT.
 - HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), homepage product catalog with prices, or contact/social profiles
 - SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
 
@@ -564,7 +667,7 @@ If isIdentityQuestion or isBusinessQuestion is true, route MUST be SEMANTIC_RAG 
 
 Detect userLanguage: ISO 639-1 code for the language the visitor WROTE IN (e.g. en, es, fr, de, zh, ja, ko, ar, hi, ru, pt, th, vi, tr). Do NOT guess language from script alone.
 
-Conversation state summarizes the active topic and entities from prior turns. Use it to resolve short follow-ups, pronouns, and elliptical questions (e.g. "how much?", "send the link", "what about pricing?").
+Conversation state summarizes the active topic and entities from prior turns. Use it to resolve short follow-ups, pronouns, and elliptical questions (e.g. "how much?", "send the link", "what about pricing?"). When awaiting: follow_up is set, treat short affirmatives as continuing that topic.
 
 When the message depends on conversation state OR userLanguage differs from website language (${websiteLanguage}), provide rewrittenQuery: a self-contained search query in ${websiteLanguage} suitable for embedding similarity search and keyword matching. Preserve product names, brand names, numbers, and measurements. If the message is already a clear standalone query in ${websiteLanguage}, rewrittenQuery can be null.
 
@@ -698,9 +801,9 @@ async function routeQuery(question, options = {}) {
   }
 
   const conversationStateSnippet = formatStateForRouter(conversationState);
-  const chatHistorySnippet = conversationStateSnippet
-    ? ""
-    : formatRecentChatForRouter(chatMessages);
+  // Always include recent turns so soft offers / last assistant lines are visible
+  // even when ragState already summarizes the topic.
+  const chatHistorySnippet = formatRecentChatForRouter(chatMessages);
 
   console.log("conversation state for LLM routing:", conversationStateSnippet);
   console.log("chat history snippet for LLM routing:", chatHistorySnippet);
@@ -709,13 +812,18 @@ async function routeQuery(question, options = {}) {
     `[QueryRouter] LLM routing (rules deferred: ${ruleOutcome.confident ? ruleOutcome.result?.source : "no_match"}) for: ${question.substring(0, 80)}`
   );
 
-  return llmRoute(question, {
+  const llmResult = await llmRoute(question, {
     chatHistorySnippet,
     conversationStateSnippet,
     websiteLanguage,
     openaiClient,
     logOpenAIUsage,
     routerModel,
+  });
+
+  return applyFollowUpAcceptanceOverride(llmResult, question, {
+    chatMessages,
+    conversationState,
   });
 }
 
@@ -733,4 +841,8 @@ module.exports = {
   isPureGreeting,
   isLiveAgentRequest,
   formatRecentChatForRouter,
+  detectSoftOffer,
+  isShortAffirmative,
+  detectFollowUpAcceptance,
+  applyFollowUpAcceptanceOverride,
 };

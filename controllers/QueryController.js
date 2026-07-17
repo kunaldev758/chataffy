@@ -19,6 +19,7 @@ const {
   ROUTES,
   isLiveAgentRequest,
   isPureGreeting,
+  detectSoftOffer,
 } = require("../services/QueryRouter");
 const {
   buildAcknowledgementResponse,
@@ -74,6 +75,7 @@ const {
   buildAckRagState,
   shouldClearRagState,
   shouldClearEntitiesOnly,
+  AWAITING_FOLLOW_UP,
 } = require("../services/conversationStateService");
 const Conversation = require("../models/Conversation");
 
@@ -470,6 +472,7 @@ class QuestionAnsweringSystem {
       matches = [],
       isOffTopic = false,
       clear = false,
+      assistantAnswer = null,
     } = {},
   ) {
     if (!conversationId) return;
@@ -488,6 +491,10 @@ class QuestionAnsweringSystem {
         return;
       }
 
+      const awaiting = detectSoftOffer(assistantAnswer)
+        ? AWAITING_FOLLOW_UP
+        : null;
+
       if (shouldClearEntitiesOnly(routing, isOffTopic)) {
         await saveRagState(
           conversationId,
@@ -499,6 +506,7 @@ class QuestionAnsweringSystem {
             queryAttributes,
             matches: [],
             clearEntities: true,
+            awaiting: null,
           }),
         );
         return;
@@ -513,6 +521,7 @@ class QuestionAnsweringSystem {
           baseForEmbedding,
           queryAttributes,
           matches,
+          awaiting,
         }),
       );
     } catch (error) {
@@ -3281,6 +3290,7 @@ ${answerInstructions}`;
             baseForEmbedding,
             queryAttributes,
             matches: specialized.matches,
+            assistantAnswer: specializedResult.answer,
           });
 
           return {
@@ -3332,6 +3342,7 @@ ${answerInstructions}`;
           baseForEmbedding,
           queryAttributes,
           matches: forcedCatalog.matches,
+          assistantAnswer: forcedResult.answer,
         });
 
         return {
@@ -3695,6 +3706,7 @@ ${answerInstructions}`;
         queryAttributes,
         matches: contextMatchesForSources,
         isOffTopic: isOffTopicForState,
+        assistantAnswer: finalAnswer,
       });
       const sources = this.matchesToSources(contextMatchesForSources);
 

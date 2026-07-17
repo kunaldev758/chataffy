@@ -6,6 +6,9 @@ const {
 
 const NON_RAG_CLEAR_ROUTES = new Set(["GREETING", "LIVE_AGENT", "ACCIDENTAL"]);
 
+/** Set on ragState.awaiting when the assistant ends with a soft offer for more detail. */
+const AWAITING_FOLLOW_UP = "follow_up";
+
 function createEmptyRagState() {
   return {
     lastIntent: null,
@@ -21,6 +24,10 @@ function createEmptyRagState() {
     turn: 0,
     updatedAt: null,
   };
+}
+
+function isAwaitingFollowUp(state) {
+  return normalizeRagState(state).awaiting === AWAITING_FOLLOW_UP;
 }
 
 function normalizeRagState(raw) {
@@ -158,6 +165,7 @@ function buildUpdatedRagState({
   queryAttributes = {},
   matches = [],
   clearEntities = false,
+  awaiting = null,
 }) {
   const current = normalizeRagState(currentState);
   const standalone =
@@ -184,7 +192,7 @@ function buildUpdatedRagState({
     }),
     entities,
     lastStandaloneQuery: standalone || current.lastStandaloneQuery,
-    awaiting: null,
+    awaiting: awaiting || null,
     turn: current.turn + 1,
     updatedAt: new Date(),
   };
@@ -197,6 +205,8 @@ function buildAckRagState(currentState, routing = {}) {
   return {
     ...current,
     lastIntent: routing.route || current.lastIntent,
+    // Thanks / pure ack ends the soft-offer window
+    awaiting: null,
     turn: current.turn + 1,
     updatedAt: new Date(),
   };
@@ -243,8 +253,10 @@ async function clearRagState(conversationId) {
 }
 
 module.exports = {
+  AWAITING_FOLLOW_UP,
   createEmptyRagState,
   normalizeRagState,
+  isAwaitingFollowUp,
   formatStateForRouter,
   topicsFromRagState,
   hasCatalogThreadFromState,
