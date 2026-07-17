@@ -1,4 +1,3 @@
-const axios = require("axios");
 const { normalizeLanguageCode } = require("../utils/websiteLanguage");
 const {
   logOpenAIUsage,
@@ -8,6 +7,10 @@ const {
   getResolvedModelConfig,
   usageTypeForCategory,
 } = require("./aiModelService");
+const {
+  providerChatComplete,
+  isSupportedChatProvider,
+} = require("./providerChatComplete");
 
 function safeJsonParse(text) {
   try {
@@ -49,32 +52,9 @@ function buildClassifierPrompt({ message, websiteLanguage, visitorLocale }) {
   ].join("\n");
 }
 
-async function callGroq({ model, prompt, apiKey, timeoutMs }) {
-  const url = "https://api.groq.com/openai/v1/chat/completions";
-  const res = await axios.post(
-    url,
-    {
-      model,
-      temperature: 0,
-      messages: [
-        { role: "system", content: "Return JSON only." },
-        { role: "user", content: prompt },
-      ],
-    },
-    {
-      timeout: timeoutMs,
-      headers: { Authorization: `Bearer ${apiKey}` },
-    }
-  );
-  const text = String(res.data?.choices?.[0]?.message?.content || "").trim();
-  const usage = res.data?.usage || null;
-  return { text, usage };
-}
-
 /**
- * Optional micro-classifier using Groq.
+ * Optional micro-classifier (openai or groq).
  * Config resolved from AiModel category `micro-classifier` (env fallback).
- * GROQ_API_KEY from env wins for local vs production.
  */
 async function classifyShortText({
   message,
@@ -96,7 +76,7 @@ async function classifyShortText({
   if (explicitEnabled === "false") return null;
   if (explicitEnabled !== "true" && !cfg.fromDb) return null;
 
-  if (cfg.provider !== "groq" || !cfg.apiKey) return null;
+  if (!isSupportedChatProvider(cfg.provider) || !cfg.apiKey) return null;
 
   const timeoutMs = cfg.timeoutMs || 2000;
   const prompt = buildClassifierPrompt({
@@ -109,11 +89,14 @@ async function classifyShortText({
   let callUsage = null;
   const callModel = cfg.model;
   try {
-    const result = await callGroq({
+    const result = await providerChatComplete({
+      provider: cfg.provider,
       model: callModel,
       prompt,
       apiKey: cfg.apiKey,
       timeoutMs,
+      system: "Return JSON only.",
+      temperature: 0,
     });
     raw = result.text;
     callUsage = result.usage;
@@ -160,7 +143,7 @@ async function classifyShortText({
     userLanguage: normalizeLang(parsed.userLanguage) || null,
     confidence,
     raw,
-    provider: "groq",
+    provider: cfg.provider,
   };
 }
 

@@ -1,4 +1,3 @@
-const axios = require("axios");
 const {
   logOpenAIUsage,
   computeTokenCosts,
@@ -7,13 +6,16 @@ const {
   getResolvedModelConfig,
   usageTypeForCategory,
 } = require("./aiModelService");
+const {
+  providerChatComplete,
+  isSupportedChatProvider,
+} = require("./providerChatComplete");
 
 /**
- * Resolve Llama/open-source config from DB (greeting → micro-classifier fallback).
- * GROQ_API_KEY from env wins so local vs production stay correct.
+ * Resolve config from DB (micro-classifier / website-classifier / open-source).
+ * Supports openai and groq; API keys from env win for local vs production.
  */
 async function getLlamaConfig(feature = "greeting") {
-  // Lightweight reply features share greeting / micro-classifier model config.
   const lightweightFeatures = new Set([
     "greeting",
     "contact",
@@ -37,9 +39,10 @@ async function getLlamaConfig(feature = "greeting") {
         : ["open-source"];
 
   const cfg = await getResolvedModelConfig(primary, fallbacks);
+  const provider = isSupportedChatProvider(cfg.provider) ? cfg.provider : null;
 
   return {
-    provider: cfg.provider === "groq" ? "groq" : null,
+    provider,
     model: cfg.model,
     apiKey: cfg.apiKey,
     timeoutMs: cfg.timeoutMs,
@@ -109,7 +112,7 @@ function logLlamaUsage({
     agentId,
     conversationId,
     model: cfg.model,
-    type: usageTypeForCategory(cfg.category || "open-source"),
+    type: usageTypeForCategory(cfg.category || "micro-classifier"),
     inputTokens: usage.prompt_tokens || 0,
     outputTokens: usage.completion_tokens || 0,
     cacheTokens: 0,
@@ -127,9 +130,9 @@ async function isLlamaFeatureEnabled(feature = "greeting") {
 
   try {
     const cfg = await getLlamaConfig(feature);
-    if (cfg.fromDb && cfg.provider === "groq") return true;
-    if (cfg.provider === "groq") return Boolean(cfg.apiKey);
-    return false;
+    if (!cfg.provider) return false;
+    if (cfg.fromDb) return Boolean(cfg.apiKey);
+    return Boolean(cfg.apiKey);
   } catch {
     return false;
   }
@@ -137,37 +140,6 @@ async function isLlamaFeatureEnabled(feature = "greeting") {
 
 async function isLlamaConfigured(feature = "greeting") {
   return isLlamaFeatureEnabled(feature);
-}
-
-async function callGroq({
-  model,
-  prompt,
-  apiKey,
-  timeoutMs,
-  system,
-  maxTokens = 120,
-}) {
-  const url = "https://api.groq.com/openai/v1/chat/completions";
-  const messages = [];
-  if (system) messages.push({ role: "system", content: system });
-  messages.push({ role: "user", content: prompt });
-
-  const res = await axios.post(
-    url,
-    {
-      model,
-      temperature: 0.4,
-      max_tokens: maxTokens,
-      messages,
-    },
-    {
-      timeout: timeoutMs,
-      headers: { Authorization: `Bearer ${apiKey}` },
-    }
-  );
-  const text = String(res.data?.choices?.[0]?.message?.content || "").trim();
-  const usage = res.data?.usage || null;
-  return { text, usage };
 }
 
 async function completeLlama({
@@ -182,16 +154,18 @@ async function completeLlama({
   if (!(await isLlamaFeatureEnabled(feature))) return null;
 
   const cfg = await getLlamaConfig(feature);
-  if (cfg.provider !== "groq" || !cfg.apiKey) return null;
+  if (!cfg.provider || !cfg.apiKey) return null;
 
   try {
-    const result = await callGroq({
+    const result = await providerChatComplete({
+      provider: cfg.provider,
       model: cfg.model,
       prompt,
       apiKey: cfg.apiKey,
       timeoutMs: cfg.timeoutMs,
       system,
       maxTokens,
+      temperature: 0.4,
     });
 
     if (result.text && userId) {
@@ -209,7 +183,10 @@ async function completeLlama({
 
     return result.text;
   } catch (error) {
-    console.warn(`[LlamaClient] groq call failed:`, error.message);
+    console.warn(
+      `[LlamaClient] ${cfg.provider} call failed:`,
+      error.message,
+    );
     return null;
   }
 }

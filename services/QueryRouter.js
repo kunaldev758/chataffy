@@ -1,6 +1,9 @@
 require("dotenv").config();
-const { OpenAI } = require("openai");
 const { getResolvedModelConfig } = require("./aiModelService");
+const {
+  providerChatComplete,
+  isSupportedChatProvider,
+} = require("./providerChatComplete");
 const { normalizeLanguageCode, detectLanguageFromText } = require("../utils/websiteLanguage");
 const {
   detectCatalogFollowUp,
@@ -474,9 +477,6 @@ function parseRouterJson(content, question = "") {
 }
 
 async function llmRoute(question, options = {}) {
-
-
-  console.log("llm route get called : ",question)
   const {
     chatHistorySnippet = "",
     websiteLanguage = "en",
@@ -485,71 +485,25 @@ async function llmRoute(question, options = {}) {
     routerModel = null,
   } = options;
 
-  const client =
-    openaiClient ||
-    new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-    console.log("llm route get called with client : ",client)
-
   let modelName = routerModel;
-  if (!modelName) {
-    try {
-      const cfg = await getResolvedModelConfig("intent");
+  let provider = "openai";
+  let apiKey = process.env.OPENAI_API_KEY || "";
+  let timeoutMs = 30000;
 
-      console.log("cfg for intent model: ",cfg)
-      modelName = cfg.model;
-    } catch {
+  try {
+    const cfg = await getResolvedModelConfig("intent");
+    if (!modelName) modelName = cfg.model;
+    if (isSupportedChatProvider(cfg.provider)) {
+      provider = cfg.provider;
+      apiKey = cfg.apiKey || apiKey;
+      timeoutMs = cfg.timeoutMs || timeoutMs;
+    }
+  } catch {
+    if (!modelName) {
       modelName = process.env.OPENAI_ROUTER_MODEL || ROUTER_MODEL;
     }
   }
 
-//   const systemPrompt = `You are a query router for a multilingual customer-support chatbot.
-
-// Classify the visitor message into exactly one route:
-// - GREETING: simple hello/hi with no real question
-// - LIVE_AGENT: wants a human agent, representative, or live support
-// - ACCIDENTAL: random characters, keyboard mash, or test input with no real meaning
-// - HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), a product catalog with prices, or contact/social profiles
-// - SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
-
-// IMPORTANT RULES:
-// 1. Prefer SEMANTIC_RAG for pricing questions about a SPECIFIC named product (e.g. "Premium Drone Kit pricing", "what does the Pro Plan cost?"). Use HYBRID/IN_PAGE_LIST only when the user wants a general product/price LIST.
-// 2. Real questions in any language (Japanese, Russian, Spanish, Hindi, Arabic, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
-// 3. Short follow-ups ("yes", "tell me more", "what about pricing?") should use chat history to infer intent — most resolve to SEMANTIC_RAG.
-// 4. Only use HYBRID for explicit listing/navigation/contact requests.
-
-// For HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
-
-// - CONTACT_INFO: phone, email, address, hours, social media — ANY language:
-//     EN "what's your phone number", ES "¿cuál es su teléfono?",
-//     FR "quel est votre numéro?", DE "Telefonnummer bitte",
-//     JA "電話番号は？/ 連絡先を教えてください", RU "как с вами связаться?",
-//     HI "आपका फ़ोन नंबर क्या है?"
-
-// - IN_PAGE_LIST: user wants a LIST of products/items WITH prices — ANY language:
-//     EN "show me all products with prices", ES "muéstrame los productos con precios",
-//     FR "montrez-moi la liste des prix", DE "Preisliste anzeigen",
-//     JA "価格一覧を見せてください", RU "покажи все товары с ценами",
-//     HI "सभी उत्पादों की कीमतें दिखाओ"
-//     NOTE: "Premium Drone Kit pricing" = SEMANTIC_RAG (specific product, not a list)
-
-// - PAGE_LINKS: user wants URLs/links to site pages — ANY language:
-//     EN "show me all pages / list your collections",
-//     DE "alle Seiten zeigen", FR "montrez-moi les pages",
-//     JA "全ページのリンクを教えて", ES "muéstrame todos los enlaces"
-
-// Detect userLanguage: ISO 639-1 code for the language the visitor wrote in (e.g. en, de, hi, ja, ar, zh).
-
-// If route is HYBRID and userLanguage differs from website language (${websiteLanguage}), provide rewrittenQuery: translate the core search keywords into the website language for keyword matching. Otherwise rewrittenQuery can be null.
-
-// Respond with JSON only:
-// {
-//   "route": "SEMANTIC_RAG",
-//   "subIntent": null,
-//   "userLanguage": "en",
-//   "confidence": 0.85,
-//   "rewrittenQuery": null
-// }`;
   const systemPrompt = `You are a query router for a multilingual customer-support chatbot.
 
 Classify the visitor message into exactly one route:
@@ -598,30 +552,55 @@ Respond with JSON only:
   //   `User message: ${question}`,
   // ].join("\n\n");
 
-    const userContent = [
+  const userContent = [
     `Website language: ${websiteLanguage}`,
     `User message: ${question}`,
   ].join("\n\n");
 
   try {
-    const response = await client.chat.completions.create({
-      model: modelName,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
-      ],
-      temperature: 0,
-      response_format: { type: "json_object" },
-    });
+    let content;
+    let usage = null;
+
+    // Prefer injected OpenAI client when provider is openai (tests / callers)
+    if (provider === "openai" && openaiClient) {
+      const response = await openaiClient.chat.completions.create({
+        model: modelName,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContent },
+        ],
+        temperature: 0,
+        response_format: { type: "json_object" },
+      });
+      content = response.choices[0]?.message?.content;
+      usage = response.usage || null;
+    } else {
+      if (!apiKey) {
+        throw new Error(`Missing API key for intent provider: ${provider}`);
+      }
+      const result = await providerChatComplete({
+        provider,
+        model: modelName,
+        apiKey,
+        timeoutMs,
+        system: systemPrompt,
+        prompt: userContent,
+        temperature: 0,
+      });
+      content = result.text;
+      usage = result.usage;
+    }
 
     console.log("[QueryRouter] LLM routing response:", {
       question: question.substring(0, 80),
-      content: response.choices[0]?.message?.content,
+      provider,
+      model: modelName,
+      content,
     });
-    if (logOpenAIUsage && response?.usage) {
+    if (logOpenAIUsage && usage) {
       try {
         await logOpenAIUsage({
-          usage: response.usage,
+          usage,
           modelName,
           type: "intent",
         });
@@ -632,7 +611,7 @@ Respond with JSON only:
       }
     }
 
-    return parseRouterJson(response.choices[0]?.message?.content);
+    return parseRouterJson(content);
   } catch (error) {
     console.error("[QueryRouter] LLM routing failed:", error.message);
     return buildRouteResult({

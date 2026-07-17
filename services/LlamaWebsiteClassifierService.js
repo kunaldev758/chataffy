@@ -1,9 +1,12 @@
-const axios = require("axios");
 const { logOpenAIUsage, computeTokenCosts } = require("./UsageTrackingService");
 const {
   getResolvedModelConfig,
   usageTypeForCategory,
 } = require("./aiModelService");
+const {
+  providerChatComplete,
+  isSupportedChatProvider,
+} = require("./providerChatComplete");
 
 const WEBSITE_TYPES = [
   "E-commerce Website",
@@ -136,30 +139,10 @@ function buildClassifierPrompt({
   ].join("\n");
 }
 
-async function callGroq({ model, prompt, apiKey, timeoutMs, system }) {
-  const url = "https://api.groq.com/openai/v1/chat/completions";
-  const messages = [];
-  if (system) messages.push({ role: "system", content: system });
-  messages.push({ role: "user", content: prompt });
-
-  const res = await axios.post(
-    url,
-    {
-      model,
-      temperature: 0,
-      max_tokens: 200,
-      messages,
-    },
-    {
-      timeout: timeoutMs,
-      headers: { Authorization: `Bearer ${apiKey}` },
-    },
-  );
-  const text = String(res.data?.choices?.[0]?.message?.content || "").trim();
-  const usage = res.data?.usage || null;
-  return { text, usage };
-}
-
+/**
+ * Classify website type using the active superadmin model for
+ * `website-classifier` (openai or groq; env fallback when no DB model).
+ */
 async function classifyWebsiteType({
   url,
   title,
@@ -172,20 +155,17 @@ async function classifyWebsiteType({
 }) {
   if (!isWebsiteTypeClassifierEnabled()) return null;
 
-  const provider = String(
-    process.env.LLAMA_WEBSITE_TYPE_PROVIDER ||
-      process.env.LLAMA_MICRO_PROVIDER ||
-      "groq",
-  ).toLowerCase();
-  if (provider !== "groq") return null;
+  let cfg;
+  try {
+    cfg = await getResolvedModelConfig("website-classifier", ["open-source"]);
+  } catch {
+    return null;
+  }
 
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) return null;
+  if (!isSupportedChatProvider(cfg.provider) || !cfg.apiKey) return null;
 
-  const timeoutMs = Number(process.env.LLAMA_WEBSITE_TYPE_TIMEOUT_MS) || 30000;
   const system =
     "You are a website classification assistant. Return valid JSON only.";
-
   const prompt = buildClassifierPrompt({
     url,
     title,
@@ -196,15 +176,16 @@ async function classifyWebsiteType({
 
   let raw = "";
   let callUsage = null;
-  const callModel =
-    process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant";
   try {
-    const result = await callGroq({
-      model: callModel,
+    const result = await providerChatComplete({
+      provider: cfg.provider,
+      model: cfg.model,
       prompt,
-      apiKey,
-      timeoutMs,
+      apiKey: cfg.apiKey,
+      timeoutMs: cfg.timeoutMs || 30000,
       system,
+      temperature: 0,
+      maxTokens: 200,
     });
     raw = result.text;
     callUsage = result.usage;
@@ -217,12 +198,6 @@ async function classifyWebsiteType({
   }
 
   if (callUsage && userId) {
-    let cfg = null;
-    try {
-      cfg = await getResolvedModelConfig("website-classifier", ["open-source"]);
-    } catch {
-      cfg = null;
-    }
     const inputTokens = callUsage.prompt_tokens || callUsage.input_tokens || 0;
     const outputTokens =
       callUsage.completion_tokens || callUsage.output_tokens || 0;
@@ -231,16 +206,16 @@ async function classifyWebsiteType({
       inputTokens,
       outputTokens,
       cacheTokens,
-      inputCostPerMillion: cfg?.inputCost || 0,
-      outputCostPerMillion: cfg?.outputCost || 0,
-      cacheCostPerMillion: cfg?.cacheCost || 0,
+      inputCostPerMillion: cfg.inputCost || 0,
+      outputCostPerMillion: cfg.outputCost || 0,
+      cacheCostPerMillion: cfg.cacheCost || 0,
     });
 
     logOpenAIUsage({
       userId,
       agentId,
       conversationId,
-      model: callModel,
+      model: cfg.model,
       type: usageTypeForCategory("website-classifier"),
       inputTokens,
       outputTokens,
@@ -269,8 +244,8 @@ async function classifyWebsiteType({
     company_type: companyType,
     industry: normalizeIndustry(parsed.industry) || "",
     confidence,
-    source: "llama_website_classifier",
-    provider,
+    source: "website_classifier",
+    provider: cfg.provider,
     raw,
   };
 }

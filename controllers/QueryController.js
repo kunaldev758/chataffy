@@ -380,26 +380,14 @@ class QuestionAnsweringSystem {
       return;
     }
 
-    // type may be usage enum or a category name
-    const category =
-      type === "open-source"
-        ? "open-source"
-        : type === "embedding"
-          ? "embedding"
-          : type === "intent"
-            ? "intent"
-            : type === "brief-chat" || type === "breif-chat"
-              ? "brief-chat"
-              : "chat";
+    // `type` is the AiModel category (dynamic). Only normalize typos.
+    const category = usageTypeForCategory(type);
 
     let cfg = null;
     try {
+      // Typo alias only — no static category allowlist
       const fallbackCategories =
-        category === "chat"
-          ? ["brief-chat", "breif-chat"]
-          : category === "brief-chat"
-            ? ["breif-chat", "chat"]
-            : [];
+        category === "brief-chat" ? ["breif-chat"] : [];
       cfg = await getResolvedModelConfig(category, fallbackCategories);
     } catch (error) {
       console.warn(
@@ -425,7 +413,7 @@ class QuestionAnsweringSystem {
       agentId,
       conversationId,
       model: modelName || cfg?.model,
-      type: usageTypeForCategory(category),
+      type: category,
       inputTokens: promptTokens,
       outputTokens: completionTokens,
       cacheTokens: cacheTokens,
