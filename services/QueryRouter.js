@@ -10,6 +10,11 @@ const {
   isProductLinkRequest,
   expandQueryForRetrieval,
 } = require("../utils/queryContextExpansion");
+const {
+  formatStateForRouter,
+  topicsFromRagState,
+  hasCatalogThreadFromState,
+} = require("./conversationStateService");
 const { normalizeQueryText } = require("../utils/queryNormalization");
 const { isContactIntentQuestion } = require("../utils/contactIntentDetection");
 const {
@@ -283,6 +288,9 @@ function buildRouteResult({
   userLanguage = "en",
   confidence = 1,
   rewrittenQuery = null,
+  followUp = false,
+  needsRewrite = false,
+  rewriteReason = null,
   source = "rules",
 }) {
   return {
@@ -291,13 +299,17 @@ function buildRouteResult({
     userLanguage: normalizeLanguageCode(userLanguage) || "en",
     confidence,
     rewrittenQuery,
+    followUp,
+    needsRewrite,
+    rewriteReason,
     source,
   };
 }
 
-function applyRuleEngine(question, { chatMessages } = {}) {
+function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
   const normalizedQuestion = normalizeQueryText(question);
   const userLanguage = detectUserLanguageFromQuestion(normalizedQuestion);
+  const stateTopics = topicsFromRagState(conversationState);
 
   if (isPureGreeting(normalizedQuestion)) {
     return {
@@ -361,10 +373,16 @@ function applyRuleEngine(question, { chatMessages } = {}) {
     };
   }
 
-  if (detectCatalogFollowUp(normalizedQuestion, chatMessages)) {
+  if (
+    detectCatalogFollowUp(normalizedQuestion, chatMessages, {
+      stateTopics,
+      hasStateCatalogThread: hasCatalogThreadFromState(conversationState),
+    })
+  ) {
     const { retrievalQuery } = expandQueryForRetrieval(
       normalizedQuestion,
-      chatMessages
+      chatMessages,
+      { stateTopics },
     );
     const subIntent = isProductLinkRequest(normalizedQuestion)
       ? SUB_INTENTS.PAGE_LINKS
@@ -382,6 +400,9 @@ function applyRuleEngine(question, { chatMessages } = {}) {
         userLanguage,
         confidence: 0.9,
         rewrittenQuery: retrievalQuery !== normalizedQuestion ? retrievalQuery : null,
+        followUp: true,
+        needsRewrite: retrievalQuery !== normalizedQuestion,
+        rewriteReason: retrievalQuery !== normalizedQuestion ? "CATALOG_EXPAND" : null,
         source: "rules_catalog_follow_up",
       }),
     };
@@ -433,6 +454,15 @@ function parseRouterJson(content, question = "") {
         ? parsed.rewrittenQuery.trim()
         : null;
 
+    const followUp = Boolean(parsed.followUp);
+    const needsRewrite = Boolean(parsed.needsRewrite) || Boolean(rewrittenQuery);
+    const rewriteReason =
+      typeof parsed.rewriteReason === "string" && parsed.rewriteReason.trim()
+        ? parsed.rewriteReason.trim().toUpperCase()
+        : rewrittenQuery
+          ? "TRANSLATE"
+          : null;
+
     if (
       resolvedRoute === ROUTES.STRUCTURAL ||
       resolvedRoute === ROUTES.HYBRID
@@ -465,6 +495,9 @@ function parseRouterJson(content, question = "") {
       userLanguage,
       confidence,
       rewrittenQuery,
+      followUp,
+      needsRewrite,
+      rewriteReason,
       source: "llm_router",
     });
   } catch {
@@ -479,6 +512,7 @@ function parseRouterJson(content, question = "") {
 async function llmRoute(question, options = {}) {
   const {
     chatHistorySnippet = "",
+    conversationStateSnippet = "",
     websiteLanguage = "en",
     openaiClient = null,
     logOpenAIUsage = null,
@@ -530,9 +564,13 @@ If isIdentityQuestion or isBusinessQuestion is true, route MUST be SEMANTIC_RAG 
 
 Detect userLanguage: ISO 639-1 code for the language the visitor WROTE IN (e.g. en, es, fr, de, zh, ja, ko, ar, hi, ru, pt, th, vi, tr). Do NOT guess language from script alone.
 
-If userLanguage differs from the website language (${websiteLanguage}), provide rewrittenQuery: translate the user's core search intent into the website language (${websiteLanguage}) so it can be used for both embedding similarity search and keyword matching. Preserve product names, brand names, numbers, and measurements as-is. If the languages already match, rewrittenQuery can be null.
+Conversation state summarizes the active topic and entities from prior turns. Use it to resolve short follow-ups, pronouns, and elliptical questions (e.g. "how much?", "send the link", "what about pricing?").
 
-Use conversation history for short follow-ups like "yes", "tell me", "what about pricing?".
+When the message depends on conversation state OR userLanguage differs from website language (${websiteLanguage}), provide rewrittenQuery: a self-contained search query in ${websiteLanguage} suitable for embedding similarity search and keyword matching. Preserve product names, brand names, numbers, and measurements. If the message is already a clear standalone query in ${websiteLanguage}, rewrittenQuery can be null.
+
+Set followUp=true when the message continues the same topic from conversation state.
+Set needsRewrite=true when rewrittenQuery is provided or the message cannot be searched without resolving context.
+Set rewriteReason to one of: PRONOUN, ELLIPSIS, TRANSLATE, CATALOG_EXPAND, NONE.
 
 Respond with JSON only:
 {
@@ -541,21 +579,26 @@ Respond with JSON only:
   "userLanguage": "en",
   "confidence": 0.85,
   "rewrittenQuery": null,
+  "followUp": false,
+  "needsRewrite": false,
+  "rewriteReason": "NONE",
   "isTrulyOffTopic": false
 }`;
 
-  // const userContent = [
-  //   `Website language: ${websiteLanguage}`,
-  //   chatHistorySnippet
-  //     ? `Recent conversation:\n${chatHistorySnippet}`
-  //     : "Recent conversation: (none)",
-  //   `User message: ${question}`,
-  // ].join("\n\n");
+  const userContentParts = [`Website language: ${websiteLanguage}`];
 
-  const userContent = [
-    `Website language: ${websiteLanguage}`,
-    `User message: ${question}`,
-  ].join("\n\n");
+  if (conversationStateSnippet) {
+    userContentParts.push(`Conversation state:\n${conversationStateSnippet}`);
+  } else {
+    userContentParts.push("Conversation state: (none)");
+  }
+
+  if (chatHistorySnippet) {
+    userContentParts.push(`Recent conversation:\n${chatHistorySnippet}`);
+  }
+
+  userContentParts.push(`User message: ${question}`);
+  const userContent = userContentParts.join("\n\n");
 
   try {
     let content;
@@ -611,6 +654,8 @@ Respond with JSON only:
       }
     }
 
+    console.log("parsed content data check : ",parseRouterJson(content));
+
     return parseRouterJson(content);
   } catch (error) {
     console.error("[QueryRouter] LLM routing failed:", error.message);
@@ -628,6 +673,7 @@ Respond with JSON only:
 async function routeQuery(question, options = {}) {
   const {
     chatMessages = [],
+    conversationState = null,
     websiteLanguage = "en",
     openaiClient = null,
     logOpenAIUsage,
@@ -636,14 +682,14 @@ async function routeQuery(question, options = {}) {
 
   const ruleOutcome = applyRuleEngine(question, {
     chatMessages,
+    conversationState,
     websiteLanguage,
   });
 
   console.log("[QueryRouter] Rule engine outcome:", {
     question: question.substring(0, 80),
-    route: ruleOutcome.result?.route || null, 
-
-  })
+    route: ruleOutcome.result?.route || null,
+  });
 
   console.log("shouldDeferToLlmRouter:", shouldDeferToLlmRouter(question, ruleOutcome));
 
@@ -651,9 +697,12 @@ async function routeQuery(question, options = {}) {
     return ruleOutcome.result;
   }
 
-  const chatHistorySnippet = formatRecentChatForRouter(chatMessages);
+  const conversationStateSnippet = formatStateForRouter(conversationState);
+  const chatHistorySnippet = conversationStateSnippet
+    ? ""
+    : formatRecentChatForRouter(chatMessages);
 
-
+  console.log("conversation state for LLM routing:", conversationStateSnippet);
   console.log("chat history snippet for LLM routing:", chatHistorySnippet);
 
   console.log(
@@ -661,7 +710,8 @@ async function routeQuery(question, options = {}) {
   );
 
   return llmRoute(question, {
-    // chatHistorySnippet,
+    chatHistorySnippet,
+    conversationStateSnippet,
     websiteLanguage,
     openaiClient,
     logOpenAIUsage,

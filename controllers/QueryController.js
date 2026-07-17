@@ -65,6 +65,17 @@ const {
   isContactIntentQuestion,
   isPrimarilyContactQuestion: detectPrimarilyContactQuestion,
 } = require("../utils/contactIntentDetection");
+const {
+  loadRagState,
+  saveRagState,
+  clearRagState,
+  topicsFromRagState,
+  buildUpdatedRagState,
+  buildAckRagState,
+  shouldClearRagState,
+  shouldClearEntitiesOnly,
+} = require("../services/conversationStateService");
+const Conversation = require("../models/Conversation");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -448,6 +459,69 @@ class QuestionAnsweringSystem {
     }
   }
 
+  async persistRagStateForTurn(
+    conversationId,
+    {
+      routing = {},
+      ragState,
+      retrievalQuery = null,
+      baseForEmbedding = null,
+      queryAttributes = {},
+      matches = [],
+      isOffTopic = false,
+      clear = false,
+    } = {},
+  ) {
+    if (!conversationId) return;
+
+    try {
+      if (clear || shouldClearRagState(routing)) {
+        await clearRagState(conversationId);
+        return;
+      }
+
+      if (routing.route === ROUTES.ACKNOWLEDGEMENT) {
+        await saveRagState(
+          conversationId,
+          buildAckRagState(ragState, routing),
+        );
+        return;
+      }
+
+      if (shouldClearEntitiesOnly(routing, isOffTopic)) {
+        await saveRagState(
+          conversationId,
+          buildUpdatedRagState({
+            currentState: ragState,
+            routing,
+            retrievalQuery,
+            baseForEmbedding,
+            queryAttributes,
+            matches: [],
+            clearEntities: true,
+          }),
+        );
+        return;
+      }
+
+      await saveRagState(
+        conversationId,
+        buildUpdatedRagState({
+          currentState: ragState,
+          routing,
+          retrievalQuery,
+          baseForEmbedding,
+          queryAttributes,
+          matches,
+        }),
+      );
+    } catch (error) {
+      console.warn(
+        `[QueryController] Failed to persist ragState for ${conversationId}: ${error.message}`,
+      );
+    }
+  }
+
   formatChatHistory(messages, currentQuestion = null, options = {}) {
     const historyLimit = options.historyLimit ?? CHAT_HISTORY_LIMIT;
     if (!messages || messages.length === 0) {
@@ -818,7 +892,7 @@ class QuestionAnsweringSystem {
       agentId: answerAgentId = null,
     } = answerOptions;
 
-    console.log("generate answer from matches : ", matches);
+    // console.log("generate answer from matches : ", matches);
 
     const effectiveMode =
       wantsProductUrls && responseMode === "brief" ? "list" : responseMode;
@@ -2721,6 +2795,8 @@ ${answerInstructions}`;
     try {
       // 1. Get Chat History
       const chatSession = await this.getChatHistory(conversationId);
+      const ragState = await loadRagState(conversationId);
+      const stateTopics = topicsFromRagState(ragState);
       const getChatHistoryFormatted = (historyLimit = CHAT_HISTORY_LIMIT) =>
         this.formatChatHistory(chatSession, question, { historyLimit });
 
@@ -2800,6 +2876,7 @@ ${answerInstructions}`;
       // Intent classification FIRST (rules → gpt-4.1-nano)
       const routing = await routeQuery(normalizedQuestion, {
         chatMessages: chatSession,
+        conversationState: ragState,
         websiteLanguage,
         openaiClient: openai,
         logOpenAIUsage: ({ usage, modelName, type }) =>
@@ -2814,7 +2891,7 @@ ${answerInstructions}`;
       });
 
       console.log(
-        `[QueryController] Route: ${routing.route} | subIntent: ${routing.subIntent} | userLang: ${routing.userLanguage} | confidence: ${routing.confidence} | source: ${routing.source}`,
+        `[QueryController] Route: ${routing.route} | subIntent: ${routing.subIntent} | userLang: ${routing.userLanguage} | confidence: ${routing.confidence} | followUp: ${routing.followUp} | needsRewrite: ${routing.needsRewrite} | rewriteReason: ${routing.rewriteReason || "none"} | source: ${routing.source}`,
       );
 
       const langOpts = { userLanguage: routing.userLanguage };
@@ -2865,6 +2942,13 @@ ${answerInstructions}`;
           conversationId,
           userId,
           agentId,
+        }).then(async (result) => {
+          await this.persistRagStateForTurn(conversationId, {
+            routing,
+            ragState,
+            clear: true,
+          });
+          return result;
         });
       }
 
@@ -2878,6 +2962,13 @@ ${answerInstructions}`;
           conversationId,
           userId,
           agentId,
+        }).then(async (result) => {
+          await this.persistRagStateForTurn(conversationId, {
+            routing,
+            ragState,
+            clear: true,
+          });
+          return result;
         });
       }
 
@@ -2891,6 +2982,13 @@ ${answerInstructions}`;
           conversationId,
           userId,
           agentId,
+        }).then(async (result) => {
+          await this.persistRagStateForTurn(conversationId, {
+            routing,
+            ragState,
+            clear: true,
+          });
+          return result;
         });
       }
 
@@ -2904,6 +3002,10 @@ ${answerInstructions}`;
           console.log(
             `[QueryController] Acknowledgement template (${routing.userLanguage}) — skipping retrieval`,
           );
+          await this.persistRagStateForTurn(conversationId, {
+            routing,
+            ragState,
+          });
           return {
             success: true,
             answer: templateResult.answer,
@@ -2925,6 +3027,10 @@ ${answerInstructions}`;
           { ...langOpts, forcePremium: false },
         );
         this.logAnswerUsage(userId, agentId, ackResult, conversationId);
+        await this.persistRagStateForTurn(conversationId, {
+          routing,
+          ragState,
+        });
         return {
           success: true,
           answer: ackResult.answer,
@@ -2936,7 +3042,7 @@ ${answerInstructions}`;
       const queryExpansion = expandQueryForRetrieval(
         normalizedQuestion,
         chatSession,
-        { sizes: queryNorm.sizes },
+        { sizes: queryNorm.sizes, stateTopics },
       );
       const {
         retrievalQuery,
@@ -3125,7 +3231,7 @@ ${answerInstructions}`;
         queryAttributes,
       });
 
-      console.log("queryResponse data is : ", queryResponse);
+      // console.log("queryResponse data is : ", queryResponse);
 
       console.log("Effective : ", effectiveSubIntent);
 
@@ -3145,7 +3251,7 @@ ${answerInstructions}`;
           queryAttributes,
         });
 
-        console.log("Specialized retrieval result: ", specialized);
+        // console.log("Specialized retrieval result: ", specialized);
         if (specialized) {
           const specializedResult = await this.generateAnswerFromMatches({
             question,
@@ -3167,6 +3273,15 @@ ${answerInstructions}`;
           });
 
           this.logAnswerUsage(userId, agentId, specializedResult, conversationId);
+
+          await this.persistRagStateForTurn(conversationId, {
+            routing,
+            ragState,
+            retrievalQuery,
+            baseForEmbedding,
+            queryAttributes,
+            matches: specialized.matches,
+          });
 
           return {
             success: true,
@@ -3209,6 +3324,15 @@ ${answerInstructions}`;
         });
 
         this.logAnswerUsage(userId, agentId, forcedResult, conversationId);
+
+        await this.persistRagStateForTurn(conversationId, {
+          routing,
+          ragState,
+          retrievalQuery,
+          baseForEmbedding,
+          queryAttributes,
+          matches: forcedCatalog.matches,
+        });
 
         return {
           success: true,
@@ -3559,6 +3683,19 @@ ${answerInstructions}`;
       }
 
       // 10. Sources = top unique pages from chunks used for generation (not full retrieval).
+      // Persist lightweight conversation state for query rewrite/retrieval in future turns.
+      const isOffTopicForState =
+        (Array.isArray(relevantMatches) && relevantMatches.length === 0) ||
+        Boolean(isIrrelevant);
+      await this.persistRagStateForTurn(conversationId, {
+        routing,
+        ragState,
+        retrievalQuery,
+        baseForEmbedding,
+        queryAttributes,
+        matches: contextMatchesForSources,
+        isOffTopic: isOffTopicForState,
+      });
       const sources = this.matchesToSources(contextMatchesForSources);
 
       return {

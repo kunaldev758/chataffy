@@ -51,6 +51,23 @@ const conversationSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    ragState: {
+      type: {
+        lastIntent: { type: String, default: null },
+        topic: { type: String, default: null },
+        entities: {
+          product: { type: String, default: null },
+          sizes: { type: [String], default: [] },
+          collection: { type: String, default: null },
+          productTerms: { type: [String], default: [] },
+        },
+        lastStandaloneQuery: { type: String, default: null },
+        awaiting: { type: String, default: null },
+        turn: { type: Number, default: 0 },
+        updatedAt: { type: Date, default: null },
+      },
+      default: null,
+    },
   },
   { timestamps: true }
 );

@@ -107,16 +107,45 @@ function extractTopicsFromHistory(chatMessages, limit = 8) {
   };
 }
 
+function mergeTopicsFromSources(chatMessages, stateTopics = null, limit = 8) {
+  const fromState = stateTopics || {
+    sizes: [],
+    collections: [],
+    productTerms: [],
+  };
+
+  const hasState =
+    (fromState.sizes?.length || 0) > 0 ||
+    (fromState.collections?.length || 0) > 0 ||
+    (fromState.productTerms?.length || 0) > 0;
+
+  // Prefer structured state once it's warm, and only fall back to mining
+  // recent chat text when state does not have enough signal yet.
+  const fromHistory = hasState
+    ? { sizes: [], collections: [], productTerms: [] }
+    : extractTopicsFromHistory(chatMessages, limit);
+
+  return {
+    sizes: [...new Set([...fromState.sizes, ...fromHistory.sizes])],
+    collections: [
+      ...new Set([...fromState.collections, ...fromHistory.collections]),
+    ],
+    productTerms: [
+      ...new Set([...fromState.productTerms, ...fromHistory.productTerms]),
+    ],
+  };
+}
+
 /**
  * Build a richer query string for embedding + keyword search.
  * @param {string} question - already normalized visitor message
  * @param {object[]} chatMessages
- * @param {{ sizes?: string[] }} [options]
+ * @param {{ sizes?: string[], stateTopics?: object }} [options]
  */
 function expandQueryForRetrieval(question, chatMessages = [], options = {}) {
   const q = normalizeQueryText(question);
   const wordCount = q.split(/\s+/).filter(Boolean).length;
-  const topics = extractTopicsFromHistory(chatMessages);
+  const topics = mergeTopicsFromSources(chatMessages, options.stateTopics);
 
   const parts = [q];
   const qLower = q.toLowerCase();
@@ -155,6 +184,7 @@ function expandQueryForRetrieval(question, chatMessages = [], options = {}) {
   const hasCatalogThread =
     allSizes.length > 0 ||
     topics.collections.length > 0 ||
+    topics.productTerms.length > 0 ||
     (chatMessages || []).some((m) =>
       /\b(mm|lash|lashes|collection|url|link|super\s*natural)\b/i.test(
         m.message || ""
@@ -178,20 +208,28 @@ function expandQueryForRetrieval(question, chatMessages = [], options = {}) {
   };
 }
 
-function detectCatalogFollowUp(question, chatMessages) {
+function detectCatalogFollowUp(question, chatMessages, options = {}) {
   const q = normalizeQueryText(question);
-  if (!q || !chatMessages?.length) return false;
+  if (!q) return false;
+
+  const stateTopics = options.stateTopics || null;
+  const hasStateCatalogThread = Boolean(options.hasStateCatalogThread);
+  const hasMessages = Boolean(chatMessages?.length);
+
+  if (!hasMessages && !hasStateCatalogThread) return false;
 
   if (isContactIntentQuestion(q)) return false;
 
   const wordCount = q.split(/\s+/).filter(Boolean).length;
   if (wordCount > 10) return false;
 
-  const topics = extractTopicsFromHistory(chatMessages);
+  const topics = mergeTopicsFromSources(chatMessages, stateTopics);
   const hasCatalogThread =
+    hasStateCatalogThread ||
     topics.sizes.length > 0 ||
     topics.collections.length > 0 ||
-    chatMessages.some((m) =>
+    topics.productTerms.length > 0 ||
+    (chatMessages || []).some((m) =>
       /\b(mm|lash|lashes|collection|super\s*natural|url|link)\b/i.test(
         m.message || ""
       )
@@ -217,6 +255,7 @@ module.exports = {
   isEcommerceCatalogQuery,
   extractSizeTokens,
   extractTopicsFromHistory,
+  mergeTopicsFromSources,
   extractCollectionHints,
   detectCatalogFollowUp,
 };
