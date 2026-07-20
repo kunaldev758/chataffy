@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const { buildQdrantChunkPayload } = require("./schema");
+const { applyEmbeddingPrefix } = require("./contextPrefix");
 
 function hashContent(text) {
   return crypto
@@ -9,8 +10,7 @@ function hashContent(text) {
 }
 
 /**
- * Normalize extracted page content into the Phase 0 common page schema.
- * Phase 1 defaults: pageType=generic, entity_type=general (no LLM / typed extract yet).
+ * Normalize extracted page content into the common page schema.
  */
 function normalizeToCommonSchema({
   url,
@@ -61,19 +61,57 @@ function normalizeToCommonSchema({
 }
 
 /**
- * Turn a normalized page into LangChain-style docs for QdrantService.upsertDocuments.
+ * Normalize chunk list to { text, heading_path }[].
+ * Accepts plain strings (legacy) or chunk objects.
+ */
+function normalizeChunkList(chunks) {
+  if (!Array.isArray(chunks)) return [];
+  return chunks
+    .map((c) => {
+      if (typeof c === "string") {
+        return { text: c, heading_path: "" };
+      }
+      if (c && typeof c === "object") {
+        return {
+          text: String(c.text || c.pageContent || "").trim(),
+          heading_path: c.heading_path || "",
+        };
+      }
+      return null;
+    })
+    .filter((c) => c && c.text);
+}
+
+/**
+ * Build LangChain-style docs for QdrantService.upsertDocuments.
+ * - pageContent / payload.text = clean chunk (NO prefix)
+ * - metadata.embeddingText = prefixed string for embed only
  */
 function pageToUpsertDocuments(page, chunks) {
-  const total = chunks.length;
-  return chunks.map((chunkText, index) => {
-    const payload = buildQdrantChunkPayload(page, chunkText, {
+  const normalized = normalizeChunkList(chunks);
+  const total = normalized.length;
+
+  return normalized.map((chunk, index) => {
+    const pageForChunk = {
+      ...page,
+      heading_path: chunk.heading_path || "",
+    };
+    const payload = buildQdrantChunkPayload(pageForChunk, chunk.text, {
       chunkIndex: index,
       totalChunks: total,
     });
+    const embeddingText = applyEmbeddingPrefix(chunk.text, page, {
+      heading_path: chunk.heading_path,
+    });
+
     const { text, ...metadata } = payload;
     return {
       pageContent: text,
-      metadata,
+      metadata: {
+        ...metadata,
+        heading_path: chunk.heading_path || "",
+        embeddingText,
+      },
     };
   });
 }
@@ -81,5 +119,6 @@ function pageToUpsertDocuments(page, chunks) {
 module.exports = {
   hashContent,
   normalizeToCommonSchema,
+  normalizeChunkList,
   pageToUpsertDocuments,
 };

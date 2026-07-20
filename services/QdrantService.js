@@ -32,6 +32,8 @@ const PAYLOAD_INDEX_SCHEMAS = {
   language: "keyword",
   is_active: "bool",
   content_hash: "keyword",
+  // Phase 4
+  heading_path: "keyword",
 };
 
 class QdrantVectorStoreManager {
@@ -155,7 +157,9 @@ class QdrantVectorStoreManager {
           enc = null;
         }
 
-        const contents = documents.map((doc) => doc.pageContent);
+        const contents = documents.map(
+          (doc) => doc.metadata?.embeddingText || doc.pageContent,
+        );
         // console.log(`Generating embeddings for ${contents.length} documents...`);
 
         // Batch embedding requests for efficiency
@@ -231,6 +235,8 @@ class QdrantVectorStoreManager {
         if (metadata.user_id) {
           metadata.user_id = metadata.user_id.toString();
         }
+        // embeddingText is embed-only — never store in payload
+        delete metadata.embeddingText;
         
         const pageContent = doc.pageContent || "";
         const title = metadata.title || "";

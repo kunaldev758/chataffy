@@ -21,6 +21,13 @@ const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
 const { checkCanonicalDuplicate } = require("./canonicalDedupe");
 const { extractProductContent } = require("./extractors/product");
 const { extractWithReadability } = require("./extractors/contentReadability");
+const {
+  structureAwareChunk,
+  splitByHeadings,
+  DEFAULT_CHUNK_CHARS,
+  DEFAULT_OVERLAP_CHARS,
+} = require("./chunking");
+const { buildContextPrefix, applyEmbeddingPrefix } = require("./contextPrefix");
 
 module.exports = {
   ...schema,
@@ -45,4 +52,10 @@ module.exports = {
   checkCanonicalDuplicate,
   extractProductContent,
   extractWithReadability,
+  structureAwareChunk,
+  splitByHeadings,
+  DEFAULT_CHUNK_CHARS,
+  DEFAULT_OVERLAP_CHARS,
+  buildContextPrefix,
+  applyEmbeddingPrefix,
 };

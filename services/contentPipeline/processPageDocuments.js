@@ -1,17 +1,21 @@
-const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter");
 const QdrantVectorStoreManager = require("../QdrantService");
 const Url = require("../../models/Url");
 const { normalizeToCommonSchema } = require("./normalizeSchema");
 const { upsertPageToQdrant } = require("./upsertPageToQdrant");
 const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
+const {
+  structureAwareChunk,
+  DEFAULT_CHUNK_CHARS,
+  DEFAULT_OVERLAP_CHARS,
+} = require("./chunking");
 
-const DEFAULT_CHUNK_SIZE = 500; // tokens
+const DEFAULT_CHUNK_SIZE = 500; // tokens (compat export)
 const DEFAULT_CHUNK_OVERLAP = 100;
 const CHARS_PER_TOKEN = 4;
 
 /**
- * Phase 1–2 multi-page train:
- * normalize → quality gate → content-hash skip → recursive chunk → delete-by-url → upsert.
+ * Phase 1–4 multi-page train:
+ * normalize → quality → hash skip → structure-aware chunk (+ embed prefix) → delete-by-url → upsert.
  */
 async function processPageDocuments(
   documents,
@@ -22,15 +26,16 @@ async function processPageDocuments(
 ) {
   const { onProgress } = options;
   const qualityThreshold = options.qualityThreshold ?? QUALITY_THRESHOLD;
-  const chunkSize = (options.chunkSize ?? DEFAULT_CHUNK_SIZE) * CHARS_PER_TOKEN;
+  const chunkSize =
+    options.chunkSizeChars ??
+    (options.chunkSize != null
+      ? options.chunkSize * CHARS_PER_TOKEN
+      : DEFAULT_CHUNK_CHARS);
   const chunkOverlap =
-    (options.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP) * CHARS_PER_TOKEN;
-
-  const splitter = new RecursiveCharacterTextSplitter({
-    chunkSize,
-    chunkOverlap,
-    separators: ["\n## ", "\n### ", "\n\n", "\n", ". ", " ", ""],
-  });
+    options.chunkOverlapChars ??
+    (options.chunkOverlap != null
+      ? options.chunkOverlap * CHARS_PER_TOKEN
+      : DEFAULT_OVERLAP_CHARS);
 
   const chunkCountPerUrl = {};
   const resultsByUrl = {};
@@ -128,8 +133,11 @@ async function processPageDocuments(
         continue;
       }
 
-      const lcDocs = await splitter.createDocuments([page.text]);
-      const chunks = lcDocs.map((d) => d.pageContent);
+      // --- Phase 4: structure-aware chunking ---
+      const chunks = await structureAwareChunk(page.text, {
+        chunkSize,
+        chunkOverlap,
+      });
       chunkCountPerUrl[url] = chunks.length;
       totalChunks += chunks.length;
 
