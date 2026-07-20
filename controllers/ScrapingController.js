@@ -36,6 +36,7 @@ const Widget = require("../models/Widget.js");
 const { findDuplicateWebsiteAgent } = require("../helpers/websiteDuplicateHelper.js");
 const fs = require("fs");
 const path = require("path");
+const { commonSitemapPaths } = require("../utils/scrapper/data.js");
 
 class ScrapingController {
   constructor() {
@@ -175,16 +176,6 @@ async bulkInsertUrls(userId,agentId, urls) {
           console.warn(`robots.txt check failed for ${origin}: ${e.message}`);
         }
 
-        // 2) Try common sitemap locations
-        const commonSitemapPaths = [
-          "/sitemap.xml",
-          "/sitemap_index.xml",
-          "/sitemap-index.xml",
-          "/sitemap1.xml",
-          "/sitemap/sitemap.xml",
-          "/sitemap/news.xml",
-          "/xmlsitemap.php",
-        ];
         for (const path of commonSitemapPaths) {
           if (urls.length >= 1500) break;
           const candidate = `${origin}${path}`;
