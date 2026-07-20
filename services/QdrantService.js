@@ -26,6 +26,12 @@ const PAYLOAD_INDEX_SCHEMAS = {
   title: "keyword",
   source_type: "keyword",
   type: "integer",
+  // Phase 0/1 pipeline fields
+  pageType: "keyword",
+  entity_type: "keyword",
+  language: "keyword",
+  is_active: "bool",
+  content_hash: "keyword",
 };
 
 class QdrantVectorStoreManager {

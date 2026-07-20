@@ -1,117 +1,86 @@
 require("dotenv").config();
-const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter");
 const QdrantVectorStoreManager = require("./QdrantService");
+const { processPageDocuments } = require("./contentPipeline");
 
 class BatchTrainingService {
   constructor() {
-    // Increased chunk size for better semantic context
-    // 500 tokens = ~2000 chars provides better context for embeddings
-    this.CHUNK_SIZE = 500; // tokens (increased from 300)
-    this.CHUNK_OVERLAP = 100; // tokens (increased from 50 for better continuity)
-    this.CHARS_PER_TOKEN = 4; // Rough estimate
+    this.CHUNK_SIZE = 500;
+    this.CHUNK_OVERLAP = 100;
+    this.CHARS_PER_TOKEN = 4;
   }
 
-  async deleteItemFromVectorStore(userId,agentId,url,type) {
-    try{
-      await vectorStore.deleteByFields({
-        user_id: userId,
-        agent_id: agentId,
-        url: url,
-        type: type,
+  async deleteItemFromVectorStore(userId, agentId, url, type, collectionName) {
+    try {
+      if (!collectionName) {
+        return { success: false, error: "Missing collection name" };
+      }
+      const vectorStore = new QdrantVectorStoreManager(collectionName);
+      return await vectorStore.deleteByFields({
+        user_id: userId?.toString(),
+        agent_id: agentId?.toString(),
+        url,
+        ...(type !== undefined && type !== null ? { type } : {}),
       });
-    } catch(error){
-      return error;
+    } catch (error) {
+      return { success: false, error: error.message };
     }
   }
 
-
-  async processDocumentAndTrain(documents, userId, agentId, qdrantIndexName, options = {}) {
+  /**
+   * Chunk + embed + upsert scraped docs.
+   * Phase 1: per-URL delete-then-upsert via contentPipeline (no stale chunk accumulation).
+   */
+  async processDocumentAndTrain(
+    documents,
+    userId,
+    agentId,
+    qdrantIndexName,
+    options = {},
+  ) {
     const { onProgress } = options;
     try {
-      const splitter = new RecursiveCharacterTextSplitter({
-        chunkSize: this.CHUNK_SIZE * this.CHARS_PER_TOKEN,
-        chunkOverlap: this.CHUNK_OVERLAP * this.CHARS_PER_TOKEN,
-        separators: ["\n## ", "\n### ", "\n\n", "\n", ". ", " ", ""]
-      });
-
-      let allChunks = [];
-      let chunkCountPerUrl = {};
-      const docTotal = documents.length;
-
-      for (let docIndex = 0; docIndex < documents.length; docIndex++) {
-        const doc = documents[docIndex];
-        const chunks = await splitter.createDocuments([doc.content]);
-        chunkCountPerUrl[doc?.originalUrl] = chunks.length;
-
-        const enhancedChunks = chunks.map((chunk, index) => ({
-          ...chunk,
-          metadata: {
-            ...doc.metadata,
-            user_id: userId?.toString(), // Ensure user_id is always a string for Qdrant filtering
-            agent_id: agentId?.toString(),
-            chunk_index: index,
-            total_chunks: chunks.length,
-            created_at: new Date().toISOString(),
-          },
-        }));
-
-        allChunks.push(...enhancedChunks);
-
-        if (onProgress) {
-          await onProgress({
-            phase: "training",
-            trainingProcessed: docIndex + 1,
-            trainingTotal: docTotal,
-            step: "chunking",
-          });
-        }
+      if (!documents || documents.length === 0) {
+        return {
+          success: true,
+          totalChunks: 0,
+          chunkCountPerUrl: {},
+          failedUrls: [],
+          resultsByUrl: {},
+        };
       }
 
-      const vectorStore = new QdrantVectorStoreManager(qdrantIndexName);
-      await vectorStore.createCollection();
-
-      const upsertResult = await vectorStore.upsertDocuments(allChunks, userId, {
+      const result = await processPageDocuments(
+        documents,
+        userId,
         agentId,
-        onProgress: onProgress
-          ? async (event) => {
-              if (event.step === "embedding") {
-                await onProgress({
-                  phase: "training",
-                  trainingProcessed: docTotal,
-                  trainingTotal: docTotal,
-                  embeddingProgress: event.embedded,
-                  embeddingTotal: event.total,
-                  step: "embedding",
-                });
-              } else if (event.step === "upserting") {
-                await onProgress({
-                  phase: "training",
-                  trainingProcessed: docTotal,
-                  trainingTotal: docTotal,
-                  embeddingProgress: event.total,
-                  embeddingTotal: event.total,
-                  upsertProgress: event.upserted,
-                  upsertTotal: event.total,
-                  step: "upserting",
-                });
-              }
-            }
-          : undefined,
+        qdrantIndexName,
+        {
+          onProgress,
+          chunkSize: this.CHUNK_SIZE,
+          chunkOverlap: this.CHUNK_OVERLAP,
+        },
+      );
+
+      console.log("Upsert result response", {
+        success: result.success,
+        totalChunks: result.totalChunks,
+        failedUrls: result.failedUrls,
       });
-      console.log("Upsert result response",upsertResult);
+
       return {
-        success: upsertResult?.success,
-        totalChunks: allChunks?.length,
-        chunkCountPerUrl,
-        failedUrls: upsertResult?.failedUrls || [],
-        storageMB: upsertResult?.storageMB,
-        estimatedCost: upsertResult?.estimatedCost
+        success: result.success,
+        totalChunks: result.totalChunks,
+        chunkCountPerUrl: result.chunkCountPerUrl,
+        failedUrls: result.failedUrls || [],
+        storageMB: result.storageMB,
+        estimatedCost: result.estimatedCost,
+        resultsByUrl: result.resultsByUrl || {},
       };
     } catch (error) {
-      return{
-        success:false,
-        error:error.message
-      }
+      return {
+        success: false,
+        error: error.message,
+      };
     }
   }
 }

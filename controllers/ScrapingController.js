@@ -60,6 +60,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       agentId: agentId,
       url: url,
       trainStatus: 0,
+      status: "discovered",
       createdAt: new Date(),
       updatedAt: new Date()
     }));

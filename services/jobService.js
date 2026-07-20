@@ -8,8 +8,6 @@ const batchTrainingService = require("./BatchTrainingService.js");
 const appEvents = require("../events.js");
 const cheerio = require("cheerio");
 const webScraper = require("./WebScraper.js");
-const urlModule = require("url");
-const TurndownService = require("turndown");
 const QdrantVectorStoreManager = require("./QdrantService");
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
 const {
@@ -21,6 +19,13 @@ const {
   classifyWebsiteType,
 } = require("./LlamaWebsiteClassifierService");
 const { websiteTypeDefinitions, industryKeywords } = require("../utils/jobService/data.js");
+const {
+  extractGenericMarkdown,
+  markUrlFetched,
+  markUrlProcessed,
+  markUrlFailed,
+  markUrlsQueued,
+} = require("./contentPipeline");
 
 const NON_HTML_SKIP_ERROR =
   "Non-HTML URL skipped. Use document upload for PDFs and other files.";
@@ -65,10 +70,7 @@ async function markWebUrlScrapeFailed({
     await Agent.updateOne({ _id: agentId }, { $inc: inc });
   }
 
-  await Url.updateOne(
-    { url, agentId },
-    { $set: { trainStatus: 2, error } },
-  );
+  await markUrlFailed(url, agentId, error);
 }
 
 const redisConfig =
@@ -87,72 +89,6 @@ function companyNameFromDomain(hostname) {
   const label = host.split(".")[0];
   if (!label || label.length < 2) return "";
   return label.charAt(0).toUpperCase() + label.slice(1);
-}
-
-const SOCIAL_PLATFORM_LABELS = [
-  { pattern: /facebook\.com/i, label: "Facebook" },
-  { pattern: /instagram\.com/i, label: "Instagram" },
-  { pattern: /twitter\.com|x\.com/i, label: "Twitter / X" },
-  { pattern: /youtube\.com/i, label: "YouTube" },
-  { pattern: /tiktok\.com/i, label: "TikTok" },
-  { pattern: /linkedin\.com/i, label: "LinkedIn" },
-  { pattern: /pinterest\.com/i, label: "Pinterest" },
-];
-
-/** Label icon-only footer links (e.g. social icons) so RAG can match platform names. */
-function enrichFooterHtml(footerHTML) {
-  if (!footerHTML) return footerHTML;
-  const $ = cheerio.load(footerHTML, { decodeEntities: true });
-
-  $("a").each((_, el) => {
-    const href = $(el).attr("href") || "";
-    if (!href) return;
-
-    for (const { pattern, label } of SOCIAL_PLATFORM_LABELS) {
-      if (pattern.test(href)) {
-        $(el).empty().text(`${label}: ${href}`);
-        return;
-      }
-    }
-
-    if (href.startsWith("mailto:")) {
-      const email = href.replace(/^mailto:/i, "").split("?")[0];
-      if (email) $(el).text(`Email: ${email}`);
-      return;
-    }
-
-    if (href.startsWith("tel:")) {
-      const phone = href.replace(/^tel:/i, "");
-      if (phone) $(el).text(`Phone: ${phone}`);
-    }
-  });
-
-  return $.root().html() || footerHTML;
-}
-
-function isInlineBufferImageUrl(value) {
-  return (
-    typeof value === "string" && /^(data:|blob:)/i.test(value.trim())
-  );
-}
-
-/** Drop inline data/blob image payloads from scraped text before Qdrant indexing. */
-function stripInlineBufferImageContent(text) {
-  if (!text) return text;
-
-  const inlineImageUrlPattern = String.raw`\b(?:data|blob):[^\s)\]"]+`;
-
-  return text
-    .replace(/!\[[^\]]*]\((?:data|blob):[^)]+\)/gi, "")
-    .replace(
-      new RegExp(`Image\\s*\\([^)]*\\):\\s*${inlineImageUrlPattern}`, "gi"),
-      (match) => {
-        const altMatch = match.match(/^Image\s*\(([^)]*)\)/i);
-        return altMatch?.[1]?.trim() ? `Image (${altMatch[1].trim()})` : "";
-      },
-    )
-    .replace(new RegExp(`Image:\\s*${inlineImageUrlPattern}`, "gi"), "")
-    .replace(new RegExp(inlineImageUrlPattern, "gi"), "");
 }
 
 // Helper function to extract website metadata from HTML
@@ -331,51 +267,6 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
   return metadata;
 };
 
-const FOOTER_SELECTORS =
-  "footer, [role='contentinfo'], #footer, #colophon, .site-footer, .page-footer";
-const HEADER_SELECTORS = [
-  "header",
-  "[role='banner']",
-  "#header",
-  ".site-header",
-  "#masthead",
-  ".page-header",
-  "[class*='site-header']",
-  "nav",
-  "[role='navigation']",
-  "#nav",
-  "#navigation",
-  ".navigation",
-  ".navbar",
-  ".nav-bar",
-  ".main-nav",
-  ".main-menu",
-  ".top-nav",
-  ".top-bar",
-  ".menu-bar",
-  "#menu",
-].join(", ");
-
-function getDomainChromeState(chromeCache, domain) {
-  if (!chromeCache[domain]) {
-    chromeCache[domain] = { headerCaptured: false, footerCaptured: false };
-  }
-  return chromeCache[domain];
-}
-
-/** Capture top-level chrome nodes (skip nested duplicates), return HTML string. */
-function extractChromeHtml($, selectors) {
-  const topLevel = $(selectors)
-    .toArray()
-    .filter((el) => $(el).parents(selectors).length === 0);
-
-  if (!topLevel.length) return "";
-  return topLevel
-    .map((el) => $.html(el))
-    .join("\n")
-    .trim();
-}
-
 const processWebPage = async (
   url,
   sourceCode,
@@ -388,122 +279,24 @@ const processWebPage = async (
       agentId = null,
       conversationId = null,
     } = usageContext;
-    const $ = cheerio.load(sourceCode);
-    const webPageURL = url;
-    const domain = new URL(webPageURL).hostname;
+
+    // Phase 1: generic Cheerio → markdown via contentPipeline
+    const extracted = extractGenericMarkdown(url, sourceCode, chromeCache);
+    const {
+      content: cleanContent,
+      webPageURL,
+      title,
+      metaDescription,
+      canonicalUrl,
+      language,
+      pageMetadata,
+    } = extracted;
+
     const isHomepage = isHomepageUrl(webPageURL);
-    const chromeState = getDomainChromeState(chromeCache, domain);
 
-    // ---- Metadata ----
-    const title = $("title").text().trim() || webPageURL;
-    const metaDescription =
-      $('meta[name="description"]').attr("content")?.trim() || "";
-
-    // ---- Remove unwanted elements ----
-    $(
-      "script, style, noscript, iframe, svg, canvas, form, input, button, select, textarea",
-    ).remove();
-    $(".ad, .advertisement, .popup, .modal").remove();
-
-    // Resolve relative URLs before extracting chrome so stored links are absolute
-    $("a, img").each((_, el) => {
-      const attr = $(el).is("a") ? "href" : "src";
-      const val = $(el).attr(attr);
-      if (val && !val.startsWith("http") && !val.startsWith("data:")) {
-        $(el).attr(attr, urlModule.resolve(webPageURL, val));
-      }
-    });
-
-    // ---- Site chrome: scrape header + footer once per domain, homepage only ----
-    let headerHTML = "";
-    let footerHTML = "";
-
-    if (isHomepage) {
-      if (!chromeState.headerCaptured) {
-        headerHTML = extractChromeHtml($, HEADER_SELECTORS);
-        if (headerHTML) chromeState.headerCaptured = true;
-      }
-      if (!chromeState.footerCaptured) {
-        footerHTML = extractChromeHtml($, FOOTER_SELECTORS);
-        if (footerHTML) chromeState.footerCaptured = true;
-      }
-    }
-
-    // Always strip shared chrome from page body so it never repeats in Qdrant
-    $(HEADER_SELECTORS).remove();
-    $(FOOTER_SELECTORS).remove();
-
-    // ---- Convert remote images to descriptive text; skip inline buffer images ----
-    $("img").each((_, el) => {
-      const src = $(el).attr("src")?.trim();
-      const alt = $(el).attr("alt")?.trim();
-
-      if (!src || isInlineBufferImageUrl(src)) {
-        if (alt) {
-          $(el).replaceWith(`<p>Image (${alt})</p>`);
-        } else {
-          $(el).remove();
-        }
-        return;
-      }
-
-      const altText = alt ? ` (${alt})` : "";
-      $(el).replaceWith(`<p>Image${altText}: ${src}</p>`);
-    });
-
-    // ---- Convert anchor-only links ----
-    $("a").each((_, el) => {
-      const href = $(el).attr("href");
-      const text = $(el).text().trim();
-      if (href && !text) {
-        $(el).text(`Link: ${href}`);
-      }
-    });
-
-    // ---- Remove empty or redundant tags ----
-    $("*").each((_, el) => {
-      const text = $(el).text().trim();
-      if (!text && $(el).children().length === 0) {
-        $(el).remove();
-      }
-    });
-
-    // ---- Convert to Markdown ----
-    const turndownService = new TurndownService({
-      headingStyle: "atx",
-      bulletListMarker: "-",
-    });
-
-    let markdown = turndownService.turndown($("body").html() || "");
-
-    // Attach header/footer only on the homepage pass that captured them
-    if (headerHTML) {
-      const enrichedHeader = enrichFooterHtml(headerHTML);
-      const headerMarkdown = turndownService.turndown(enrichedHeader);
-      markdown = `---\n**Header / Nav (from ${domain})**\n${headerMarkdown}\n\n---\n\n${markdown}`;
-    }
-
-    if (footerHTML) {
-      const enrichedFooter = enrichFooterHtml(footerHTML);
-      const footerMarkdown = turndownService.turndown(enrichedFooter);
-      markdown += `\n\n---\n**Footer Links (from ${domain})**\n${footerMarkdown}`;
-    }
-
-    // ---- Clean whitespace (preserve structure) ----
-    // Replace multiple spaces with single space, but preserve newlines
-    const cleanContent = stripInlineBufferImageContent(
-      markdown
-        .replace(/[ \t]+/g, " ") // Replace multiple spaces/tabs with single space
-        .replace(/\n{3,}/g, "\n\n") // Replace 3+ newlines with double newline
-        .trim(),
-    );
-
-    // Extract website metadata (from homepage-like URLs or we'll extract from first URL)
-    let websiteMetadata = null;
-
-    // Always extract metadata (we'll decide whether to use it based on homepage status)
+    // Site-level WebsiteData classification (unchanged)
     const $meta = cheerio.load(sourceCode);
-    websiteMetadata = extractWebsiteMetadata($meta, url, { isHomepage });
+    let websiteMetadata = extractWebsiteMetadata($meta, url, { isHomepage });
 
     if (websiteMetadata?._needsLlamaTypeClassification) {
       const llamaType = await classifyWebsiteType({
@@ -511,7 +304,7 @@ const processWebPage = async (
         title,
         description: metaDescription,
         pageContent: cleanContent,
-        schemaTypes: websiteMetadata._schemaTypes || [],
+        schemaTypes: websiteMetadata._schemaTypes || pageMetadata?.schemaTypes || [],
         userId,
         agentId,
         conversationId,
@@ -529,7 +322,6 @@ const processWebPage = async (
       delete websiteMetadata._schemaTypes;
     }
 
-    // Mark if this is homepage for priority
     if (isHomepage) {
       websiteMetadata._isHomepage = true;
     }
@@ -539,7 +331,10 @@ const processWebPage = async (
       webPageURL,
       title,
       metaDescription,
-      websiteMetadata, // Include metadata if this is homepage
+      canonicalUrl,
+      language,
+      pageMetadata,
+      websiteMetadata,
     };
   } catch (error) {
     console.error("Error processing webpage:", error);
@@ -726,6 +521,7 @@ new Worker(
 
       // Emit initial progress
       await emitScrapingProgress(0, totalUrlsCount, true);
+      await markUrlsQueued(urls, agentId);
 
       for (let i = 0; i < urls.length; i++) {
         const url = urls[i];
@@ -758,6 +554,7 @@ new Worker(
             userId,
             jobId: job.id,
           });
+          await markUrlFetched(url, agentId);
 
           const processResult = await processWebPage(
             url,
@@ -765,7 +562,7 @@ new Worker(
             chromeCache,
             { userId, agentId, conversationId: null },
           );
-          if (!processResult.content) {
+          if (!processResult?.content) {
             await TrainingModel.create({
               userId,
               agentId,
@@ -778,14 +575,10 @@ new Worker(
               chunkCount: 0,
               lastEdit: Date.now(),
             });
-            await Url.updateOne(
-              { url: url, agentId: agentId },
-              {
-                $set: {
-                  trainStatus: 2,
-                  error: "Failed to process/minify web page content",
-                },
-              },
+            await markUrlFailed(
+              url,
+              agentId,
+              "Failed to process/minify web page content",
             );
             continue;
           }
@@ -796,6 +589,8 @@ new Worker(
             metaDescription,
             webPageURL,
             websiteMetadata,
+            canonicalUrl,
+            language,
           } = processResult;
 
           // Store website metadata if extracted
@@ -910,6 +705,8 @@ new Worker(
                 url: webPageURL,
                 title,
                 metaDescription,
+                canonicalUrl: canonicalUrl || null,
+                language: language || "en",
                 type: "webpage",
               },
               originalUrl: url,
@@ -949,15 +746,7 @@ new Worker(
                 : { "pagesAdded.failed": 1 };
             await Agent.updateOne({ _id: agentId }, { $inc: inc });
           }
-          await Url.updateOne(
-            { url: url, agentId: agentId },
-            {
-              $set: {
-                trainStatus: 2,
-                error: "Failed to train",
-              },
-            },
-          );
+          await markUrlFailed(url, agentId, error?.message || "Failed to train");
         }
       }
 
@@ -1012,6 +801,7 @@ new Worker(
         // 3️⃣ Update training status in DB
         for (const doc of scrapedDocs) {
           const status = result?.failedUrls?.includes(doc.originalUrl) ? 2 : 1;
+          const pageResult = result?.resultsByUrl?.[doc.originalUrl];
           if (status == 1) {
             await TrainingModel.create({
               userId,
@@ -1023,6 +813,12 @@ new Worker(
               "webPage.url": doc.originalUrl,
               chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
               lastEdit: Date.now(),
+            });
+            await markUrlProcessed(doc.originalUrl, agentId, {
+              contentHash: pageResult?.contentHash || pageResult?.page?.content_hash,
+              pageType: pageResult?.page?.pageType || "generic",
+              canonicalUrl: doc.metadata?.canonicalUrl || null,
+              language: doc.metadata?.language || "en",
             });
           } else if (status == 2) {
             await TrainingModel.create({
@@ -1037,25 +833,18 @@ new Worker(
               chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
               lastEdit: Date.now(),
             });
-            await Url.updateOne(
-              { url: doc.originalUrl, agentId: agentId },
-              {
-                $set: {
-                  trainStatus: status,
-                  error: "Failed to process/minify web page content",
-                },
-              },
+            await markUrlFailed(
+              doc.originalUrl,
+              agentId,
+              "Failed to process/minify web page content",
             );
           } else {
-            await Url.updateOne(
-              { url: doc.originalUrl, agentId: agentId },
-              {
-                $set: {
-                  trainStatus: status,
-                  // error: "Failed to process/minify web page content",
-                },
-              },
-            );
+            await markUrlProcessed(doc.originalUrl, agentId, {
+              contentHash: pageResult?.contentHash,
+              pageType: "generic",
+              canonicalUrl: doc.metadata?.canonicalUrl || null,
+              language: doc.metadata?.language || "en",
+            });
           }
 
           await Agent.updateOne(
@@ -1506,7 +1295,14 @@ new Worker(
             continue;
           }
 
-          const { content, title, metaDescription, webPageURL } = processResult;
+          const {
+            content,
+            title,
+            metaDescription,
+            webPageURL,
+            canonicalUrl,
+            language,
+          } = processResult;
           const contentSize = Buffer.byteLength(content, "utf8");
           const oldDataSize = entry.dataSize || 0;
           const dataSizeDelta = contentSize - oldDataSize;
@@ -1526,6 +1322,8 @@ new Worker(
                 url: webPageURL,
                 title,
                 metaDescription,
+                canonicalUrl: canonicalUrl || null,
+                language: language || "en",
                 type: "webpage",
               },
               originalUrl: url,
@@ -1612,6 +1410,15 @@ new Worker(
                 },
               },
             );
+
+            const pageResult = result?.resultsByUrl?.[item.url];
+            await markUrlProcessed(item.url, agentId, {
+              contentHash:
+                pageResult?.contentHash || pageResult?.page?.content_hash,
+              pageType: pageResult?.page?.pageType || "generic",
+              canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
+              language: item.scrapedDoc?.metadata?.language || "en",
+            });
 
             await applyWebPagePagesAddedDelta(item.prevStatus, 1);
 
