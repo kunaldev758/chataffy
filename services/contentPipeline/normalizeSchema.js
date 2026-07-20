@@ -25,8 +25,9 @@ function normalizeToCommonSchema({
   entity_type = "general",
   entity_name = null,
   attributes = {},
+  search_terms = [],
   classification_confidence = 0,
-  classification_reason = "phase1_generic",
+  classification_reason = "phase3",
   quality_score = null,
   type = 0,
 }) {
@@ -48,6 +49,7 @@ function normalizeToCommonSchema({
     language: language || "en",
     attributes:
       attributes && typeof attributes === "object" ? { ...attributes } : {},
+    search_terms: Array.isArray(search_terms) ? [...search_terms] : [],
     classification_confidence,
     classification_reason,
     quality_score,

@@ -57,6 +57,17 @@ async function processPageDocuments(
         metaDescription: doc.metadata?.metaDescription || "",
         canonicalUrl: doc.metadata?.canonicalUrl || null,
         language: doc.metadata?.language || "en",
+        pageType: doc.metadata?.pageType || "generic",
+        entity_type: doc.metadata?.entity_type || "general",
+        entity_name: doc.metadata?.entity_name || null,
+        attributes: doc.metadata?.attributes || {},
+        search_terms: doc.metadata?.search_terms || [],
+        classification_confidence:
+          typeof doc.metadata?.classification_confidence === "number"
+            ? doc.metadata.classification_confidence
+            : 0,
+        classification_reason:
+          doc.metadata?.classification_reason || "phase3",
         type: doc.type !== undefined ? doc.type : 0,
       });
 

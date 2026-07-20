@@ -1,6 +1,13 @@
 const schema = require("./schema");
 const { extractGenericMarkdown } = require("./extractGenericMarkdown");
 const { extractPageMetadata } = require("./extractPageMetadata");
+const { extractByPageType } = require("./extractByPageType");
+const { detectPageType, RULE_CONFIDENCE_THRESHOLD } = require("./detectPageType");
+const {
+  classifyPageTypeLlm,
+  isPageTypeLlmEnabled,
+} = require("./classifyPageTypeLlm");
+const { applyValidation } = require("./validatePage");
 const {
   normalizeToCommonSchema,
   hashContent,
@@ -12,11 +19,19 @@ const urlStatus = require("./urlStatus");
 const htmlCleanup = require("./htmlCleanup");
 const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
 const { checkCanonicalDuplicate } = require("./canonicalDedupe");
+const { extractProductContent } = require("./extractors/product");
+const { extractWithReadability } = require("./extractors/contentReadability");
 
 module.exports = {
   ...schema,
   extractGenericMarkdown,
   extractPageMetadata,
+  extractByPageType,
+  detectPageType,
+  RULE_CONFIDENCE_THRESHOLD,
+  classifyPageTypeLlm,
+  isPageTypeLlmEnabled,
+  applyValidation,
   normalizeToCommonSchema,
   hashContent,
   pageToUpsertDocuments,
@@ -28,4 +43,6 @@ module.exports = {
   scoreQuality,
   QUALITY_THRESHOLD,
   checkCanonicalDuplicate,
+  extractProductContent,
+  extractWithReadability,
 };

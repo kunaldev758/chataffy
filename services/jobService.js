@@ -21,7 +21,7 @@ const {
 } = require("./LlamaWebsiteClassifierService");
 const { websiteTypeDefinitions, industryKeywords } = require("../utils/jobService/data.js");
 const {
-  extractGenericMarkdown,
+  extractByPageType,
   markUrlFetched,
   markUrlProcessed,
   markUrlFailed,
@@ -284,8 +284,13 @@ const processWebPage = async (
       conversationId = null,
     } = usageContext;
 
-    // Phase 1: generic Cheerio → markdown via contentPipeline
-    const extracted = extractGenericMarkdown(url, sourceCode, chromeCache);
+    // Phase 3: typed extraction (rules → optional LLM → product/readability/generic)
+    const extracted = await extractByPageType(
+      url,
+      sourceCode,
+      chromeCache,
+      { userId, agentId, conversationId },
+    );
     const {
       content: cleanContent,
       webPageURL,
@@ -294,6 +299,14 @@ const processWebPage = async (
       canonicalUrl,
       language,
       pageMetadata,
+      pageType,
+      entity_type,
+      entity_name,
+      attributes,
+      search_terms,
+      classification_confidence,
+      classification_reason,
+      extraction_source,
     } = extracted;
 
     const isHomepage = isHomepageUrl(webPageURL);
@@ -339,6 +352,17 @@ const processWebPage = async (
       language,
       pageMetadata,
       websiteMetadata,
+      pageType: pageType || "generic",
+      entity_type: entity_type || "general",
+      entity_name: entity_name || null,
+      attributes: attributes || {},
+      search_terms: search_terms || [],
+      classification_confidence:
+        typeof classification_confidence === "number"
+          ? classification_confidence
+          : 0,
+      classification_reason: classification_reason || "rules",
+      extraction_source: extraction_source || "generic",
     };
   } catch (error) {
     console.error("Error processing webpage:", error);
@@ -604,6 +628,14 @@ new Worker(
             websiteMetadata,
             canonicalUrl,
             language,
+            pageType,
+            entity_type,
+            entity_name,
+            attributes,
+            search_terms,
+            classification_confidence,
+            classification_reason,
+            extraction_source,
           } = processResult;
 
           // Phase 2: skip if this page's canonical is already covered by another URL
@@ -621,7 +653,11 @@ new Worker(
               url,
               agentId,
               `canonical_duplicate:${canonCheck.reason}`,
-              { canonicalUrl: canonicalUrl || null, language: language || "en" },
+              {
+                canonicalUrl: canonicalUrl || null,
+                language: language || "en",
+                pageType: pageType || "generic",
+              },
             );
             continue;
           }
@@ -740,6 +776,17 @@ new Worker(
                 metaDescription,
                 canonicalUrl: canonicalUrl || null,
                 language: language || "en",
+                pageType: pageType || "generic",
+                entity_type: entity_type || "general",
+                entity_name: entity_name || null,
+                attributes: attributes || {},
+                search_terms: search_terms || [],
+                classification_confidence:
+                  typeof classification_confidence === "number"
+                    ? classification_confidence
+                    : 0,
+                classification_reason: classification_reason || "rules",
+                extraction_source: extraction_source || "generic",
                 type: "webpage",
               },
               originalUrl: url,
@@ -888,7 +935,10 @@ new Worker(
             await markUrlProcessed(doc.originalUrl, agentId, {
               contentHash:
                 pageResult?.contentHash || pageResult?.page?.content_hash,
-              pageType: pageResult?.page?.pageType || "generic",
+              pageType:
+                pageResult?.page?.pageType ||
+                doc.metadata?.pageType ||
+                "generic",
               canonicalUrl: doc.metadata?.canonicalUrl || null,
               language: doc.metadata?.language || "en",
               qualityScore: pageResult?.qualityScore,
@@ -1360,6 +1410,14 @@ new Worker(
             webPageURL,
             canonicalUrl,
             language,
+            pageType,
+            entity_type,
+            entity_name,
+            attributes,
+            search_terms,
+            classification_confidence,
+            classification_reason,
+            extraction_source,
           } = processResult;
 
           // Phase 2: canonical duplicate — leave existing vectors of the canonical page
@@ -1374,7 +1432,11 @@ new Worker(
               url,
               agentId,
               `canonical_duplicate:${canonCheck.reason}`,
-              { canonicalUrl: canonicalUrl || null, language: language || "en" },
+              {
+                canonicalUrl: canonicalUrl || null,
+                language: language || "en",
+                pageType: pageType || "generic",
+              },
             );
             processedCount++;
             await emitScrapingProgress(
@@ -1406,6 +1468,17 @@ new Worker(
                 metaDescription,
                 canonicalUrl: canonicalUrl || null,
                 language: language || "en",
+                pageType: pageType || "generic",
+                entity_type: entity_type || "general",
+                entity_name: entity_name || null,
+                attributes: attributes || {},
+                search_terms: search_terms || [],
+                classification_confidence:
+                  typeof classification_confidence === "number"
+                    ? classification_confidence
+                    : 0,
+                classification_reason: classification_reason || "rules",
+                extraction_source: extraction_source || "generic",
                 type: "webpage",
               },
               originalUrl: url,

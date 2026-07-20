@@ -242,20 +242,36 @@ class QdrantVectorStoreManager {
           source_type: metadata.source_type,
         });
 
+        const autoTerms = extractSearchTerms({
+          text: pageContent,
+          title,
+          url,
+        });
+        const priorTerms = Array.isArray(metadata.search_terms)
+          ? metadata.search_terms
+          : [];
+        const mergedTerms = [
+          ...new Set(
+            [...priorTerms, ...autoTerms]
+              .map((t) => String(t).toLowerCase().trim())
+              .filter(Boolean),
+          ),
+        ].slice(0, 80);
+
+        // Prefer pageType/entity from pipeline over heuristic source_type overwrite
+        const pipelineSource =
+          metadata.pageType || metadata.source_type || payloadAttrs.source_type;
+
         return {
           id: uuidv4(),
           vector: embeddings[i],
           payload: {
             ...metadata,
             text: pageContent,
-            search_terms: extractSearchTerms({
-              text: pageContent,
-              title,
-              url,
-            }),
+            search_terms: mergedTerms,
             sizes: payloadAttrs.sizes,
             collections: payloadAttrs.collections,
-            source_type: payloadAttrs.source_type,
+            source_type: pipelineSource,
             created_at: new Date().toISOString(),
           },
         };

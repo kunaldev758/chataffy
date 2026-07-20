@@ -36,6 +36,21 @@ const CATEGORY_ENV_FALLBACKS = {
     model: process.env.LLAMA_WEBSITE_TYPE_MODEL || "llama-3.1-8b-instant",
     timeoutMs: Number(process.env.LLAMA_WEBSITE_TYPE_TIMEOUT_MS) || 30000,
   },
+  /** Phase 3: per-page type enrichment when rules are low-confidence */
+  "page-type": {
+    provider:
+      process.env.PAGE_TYPE_LLM_PROVIDER ||
+      process.env.LLAMA_WEBSITE_TYPE_PROVIDER ||
+      "groq",
+    model:
+      process.env.PAGE_TYPE_LLM_MODEL ||
+      process.env.LLAMA_WEBSITE_TYPE_MODEL ||
+      "llama-3.1-8b-instant",
+    timeoutMs:
+      Number(process.env.PAGE_TYPE_LLM_TIMEOUT_MS) ||
+      Number(process.env.LLAMA_WEBSITE_TYPE_TIMEOUT_MS) ||
+      30000,
+  },
   greeting: {
     provider:
       process.env.LLAMA_PROVIDER || process.env.LLAMA_MICRO_PROVIDER || "groq",

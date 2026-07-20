@@ -12,6 +12,7 @@
   "license": "ISC",
   "dependencies": {
     "@dqbd/tiktoken": "^1.0.20",
+    "@mozilla/readability": "^0.6.0",
     "@paypal/checkout-server-sdk": "^1.0.3",
     "@qdrant/js-client-rest": "^1.14.1",
     "axios": "^1.6.4",
