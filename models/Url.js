@@ -75,6 +75,11 @@ const urlSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    /** Phase 2: last computed quality score (0–1), null if never scored */
+    qualityScore: {
+      type: Number,
+      default: null,
+    },
   },
   { timestamps: true },
 );

@@ -13,6 +13,7 @@ const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js")
 const {
   isHomepageUrl,
   isScrapableWebUrl,
+  isNonContentPath,
 } = require("../utils/webUrlUtils.js");
 const { detectWebsiteLanguage } = require("../utils/websiteLanguage");
 const {
@@ -24,7 +25,10 @@ const {
   markUrlFetched,
   markUrlProcessed,
   markUrlFailed,
+  markUrlSkipped,
+  markUrlUnchanged,
   markUrlsQueued,
+  checkCanonicalDuplicate,
 } = require("./contentPipeline");
 
 const NON_HTML_SKIP_ERROR =
@@ -436,6 +440,8 @@ new Worker(
       let stoppedForStorageLimit = false;
       let storageLimitEmitMessage = null;
       let storageLimitEmitProgress = null;
+      /** Phase 2: in-batch canonical keys to avoid embedding URL variants of the same page */
+      const seenCanonicalKeys = new Set();
 
       // Use startTime from job data or current time as fallback
       const scrapingStartTime = startTime ? new Date(startTime) : new Date();
@@ -526,15 +532,22 @@ new Worker(
       for (let i = 0; i < urls.length; i++) {
         const url = urls[i];
         try {
-          if (!isScrapableWebUrl(url)) {
-            console.log(`Skipping non-HTML URL: ${url}`);
-            await markWebUrlScrapeFailed({
-              url,
-              userId,
-              agentId,
-              TrainingModel,
-              error: NON_HTML_SKIP_ERROR,
-            });
+          if (!isScrapableWebUrl(url) || isNonContentPath(url)) {
+            const reason = isNonContentPath(url)
+              ? "Non-content URL skipped (cart/checkout/login/pagination)."
+              : NON_HTML_SKIP_ERROR;
+            console.log(`Skipping non-content URL: ${url}`);
+            if (isNonContentPath(url)) {
+              await markUrlSkipped(url, agentId, reason);
+            } else {
+              await markWebUrlScrapeFailed({
+                url,
+                userId,
+                agentId,
+                TrainingModel,
+                error: reason,
+              });
+            }
             continue;
           }
 
@@ -592,6 +605,26 @@ new Worker(
             canonicalUrl,
             language,
           } = processResult;
+
+          // Phase 2: skip if this page's canonical is already covered by another URL
+          const canonCheck = await checkCanonicalDuplicate({
+            agentId,
+            pageUrl: url,
+            canonicalUrl,
+            seenCanonicalKeys,
+          });
+          if (canonCheck.isDuplicate) {
+            console.log(
+              `[jobService] Skipping canonical duplicate ${url} → ${canonCheck.duplicateOf} (${canonCheck.reason})`,
+            );
+            await markUrlSkipped(
+              url,
+              agentId,
+              `canonical_duplicate:${canonCheck.reason}`,
+              { canonicalUrl: canonicalUrl || null, language: language || "en" },
+            );
+            continue;
+          }
 
           // Store website metadata if extracted
           // Priority: homepage always wins; otherwise use first URL (domain-based name)
@@ -800,8 +833,46 @@ new Worker(
       } else {
         // 3️⃣ Update training status in DB
         for (const doc of scrapedDocs) {
-          const status = result?.failedUrls?.includes(doc.originalUrl) ? 2 : 1;
           const pageResult = result?.resultsByUrl?.[doc.originalUrl];
+          const skipped = pageResult?.skipped;
+          const failed = result?.failedUrls?.includes(doc.originalUrl);
+
+          if (skipped === "unchanged") {
+            await markUrlUnchanged(doc.originalUrl, agentId, {
+              contentHash: pageResult.contentHash,
+              pageType: pageResult.page?.pageType || "generic",
+              canonicalUrl: doc.metadata?.canonicalUrl || null,
+              language: doc.metadata?.language || "en",
+              qualityScore: pageResult.qualityScore,
+            });
+            // Already trained content — count as success for agent stats only if never counted
+            continue;
+          }
+
+          if (skipped === "low_quality") {
+            await markUrlSkipped(
+              doc.originalUrl,
+              agentId,
+              `low_quality:${pageResult.skipReason || "below_threshold"}`,
+              {
+                canonicalUrl: doc.metadata?.canonicalUrl || null,
+                language: doc.metadata?.language || "en",
+                qualityScore: pageResult.qualityScore,
+                contentHash: pageResult.contentHash,
+                pageType: "generic",
+              },
+            );
+            // Content was counted toward storage but never embedded — refund
+            if (doc.dataSize > 0) {
+              await Client.updateOne(
+                { userId },
+                { $inc: { currentDataSize: -doc.dataSize } },
+              );
+            }
+            continue;
+          }
+
+          const status = failed ? 2 : 1;
           if (status == 1) {
             await TrainingModel.create({
               userId,
@@ -815,10 +886,12 @@ new Worker(
               lastEdit: Date.now(),
             });
             await markUrlProcessed(doc.originalUrl, agentId, {
-              contentHash: pageResult?.contentHash || pageResult?.page?.content_hash,
+              contentHash:
+                pageResult?.contentHash || pageResult?.page?.content_hash,
               pageType: pageResult?.page?.pageType || "generic",
               canonicalUrl: doc.metadata?.canonicalUrl || null,
               language: doc.metadata?.language || "en",
+              qualityScore: pageResult?.qualityScore,
             });
           } else if (status == 2) {
             await TrainingModel.create({
@@ -838,13 +911,6 @@ new Worker(
               agentId,
               "Failed to process/minify web page content",
             );
-          } else {
-            await markUrlProcessed(doc.originalUrl, agentId, {
-              contentHash: pageResult?.contentHash,
-              pageType: "generic",
-              canonicalUrl: doc.metadata?.canonicalUrl || null,
-              language: doc.metadata?.language || "en",
-            });
           }
 
           await Agent.updateOne(
@@ -1193,6 +1259,7 @@ new Worker(
 
       const chromeCache = {};
       const pendingRetrainItems = [];
+      const retrainCanonicalKeys = new Set();
       const qdrantManager = new QdrantVectorStoreManager(qdrantIndexName);
       let successCount = 0;
       let failCount = 0;
@@ -1252,25 +1319,16 @@ new Worker(
         }
 
         try {
-          if (!isScrapableWebUrl(url)) {
-            console.log(`[retrainTrainingData] Skipping non-HTML URL: ${url}`);
+          if (!isScrapableWebUrl(url) || isNonContentPath(url)) {
+            console.log(`[retrainTrainingData] Skipping non-content URL: ${url}`);
             await markEntryFailedAndContinue({
               entry,
               prevStatus,
-              error: NON_HTML_SKIP_ERROR,
+              error: isNonContentPath(url)
+                ? "Non-content URL skipped (cart/checkout/login/pagination)."
+                : NON_HTML_SKIP_ERROR,
             });
             continue;
-          }
-
-          const deleteResult = await qdrantManager.deleteByFields({
-            user_id: userId?.toString(),
-            agent_id: agentId?.toString(),
-            url,
-          });
-          if (!deleteResult.success) {
-            throw new Error(
-              `Failed to delete old vectors: ${deleteResult.error}`,
-            );
           }
 
           const { rawHtml } = await webScraper.scrapeWebpage(url, {
@@ -1303,6 +1361,30 @@ new Worker(
             canonicalUrl,
             language,
           } = processResult;
+
+          // Phase 2: canonical duplicate — leave existing vectors of the canonical page
+          const canonCheck = await checkCanonicalDuplicate({
+            agentId,
+            pageUrl: url,
+            canonicalUrl,
+            seenCanonicalKeys: retrainCanonicalKeys,
+          });
+          if (canonCheck.isDuplicate) {
+            await markUrlSkipped(
+              url,
+              agentId,
+              `canonical_duplicate:${canonCheck.reason}`,
+              { canonicalUrl: canonicalUrl || null, language: language || "en" },
+            );
+            processedCount++;
+            await emitScrapingProgress(
+              processedCount,
+              totalEntries,
+              processedCount < totalEntries,
+            );
+            continue;
+          }
+
           const contentSize = Buffer.byteLength(content, "utf8");
           const oldDataSize = entry.dataSize || 0;
           const dataSizeDelta = contentSize - oldDataSize;
@@ -1387,7 +1469,50 @@ new Worker(
           }
         } else {
           for (const item of pendingRetrainItems) {
+            const pageResult = result?.resultsByUrl?.[item.url];
+            const skipped = pageResult?.skipped;
             const failed = result.failedUrls?.includes(item.url);
+
+            if (skipped === "unchanged") {
+              await markUrlUnchanged(item.url, agentId, {
+                contentHash: pageResult.contentHash,
+                pageType: pageResult.page?.pageType || "generic",
+                canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
+                language: item.scrapedDoc?.metadata?.language || "en",
+                qualityScore: pageResult.qualityScore,
+              });
+              successCount++;
+              continue;
+            }
+
+            if (skipped === "low_quality") {
+              await markUrlSkipped(
+                item.url,
+                agentId,
+                `low_quality:${pageResult.skipReason || "below_threshold"}`,
+                {
+                  canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
+                  language: item.scrapedDoc?.metadata?.language || "en",
+                  qualityScore: pageResult.qualityScore,
+                  contentHash: pageResult.contentHash,
+                },
+              );
+              // Remove stale vectors if quality now fails after prior success
+              try {
+                await qdrantManager.deleteByFields({
+                  user_id: userId?.toString(),
+                  agent_id: agentId?.toString(),
+                  url: item.url,
+                });
+              } catch (delErr) {
+                console.warn(
+                  `[retrain] low_quality delete warning for ${item.url}:`,
+                  delErr.message,
+                );
+              }
+              continue;
+            }
+
             if (failed) {
               await markEntryFailed({
                 entry: item.entry,
@@ -1411,13 +1536,13 @@ new Worker(
               },
             );
 
-            const pageResult = result?.resultsByUrl?.[item.url];
             await markUrlProcessed(item.url, agentId, {
               contentHash:
                 pageResult?.contentHash || pageResult?.page?.content_hash,
               pageType: pageResult?.page?.pageType || "generic",
               canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
               language: item.scrapedDoc?.metadata?.language || "en",
+              qualityScore: pageResult?.qualityScore,
             });
 
             await applyWebPagePagesAddedDelta(item.prevStatus, 1);

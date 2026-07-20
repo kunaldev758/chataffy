@@ -1,15 +1,17 @@
 const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter");
 const QdrantVectorStoreManager = require("../QdrantService");
+const Url = require("../../models/Url");
 const { normalizeToCommonSchema } = require("./normalizeSchema");
 const { upsertPageToQdrant } = require("./upsertPageToQdrant");
+const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
 
 const DEFAULT_CHUNK_SIZE = 500; // tokens
 const DEFAULT_CHUNK_OVERLAP = 100;
 const CHARS_PER_TOKEN = 4;
 
 /**
- * Phase 1 multi-page train: normalize → recursive chunk → delete-by-url → upsert.
- * Reuses one QdrantVectorStoreManager for the whole batch.
+ * Phase 1–2 multi-page train:
+ * normalize → quality gate → content-hash skip → recursive chunk → delete-by-url → upsert.
  */
 async function processPageDocuments(
   documents,
@@ -19,6 +21,7 @@ async function processPageDocuments(
   options = {},
 ) {
   const { onProgress } = options;
+  const qualityThreshold = options.qualityThreshold ?? QUALITY_THRESHOLD;
   const chunkSize = (options.chunkSize ?? DEFAULT_CHUNK_SIZE) * CHARS_PER_TOKEN;
   const chunkOverlap =
     (options.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP) * CHARS_PER_TOKEN;
@@ -33,6 +36,7 @@ async function processPageDocuments(
   const resultsByUrl = {};
   let totalChunks = 0;
   const failedUrls = [];
+  const skippedUrls = [];
   let storageMB = 0;
   let estimatedCost = null;
 
@@ -55,6 +59,63 @@ async function processPageDocuments(
         language: doc.metadata?.language || "en",
         type: doc.type !== undefined ? doc.type : 0,
       });
+
+      // --- Phase 2: quality gate ---
+      const quality = scoreQuality(page.text, { title: page.title });
+      page.quality_score = quality.score;
+
+      if (!quality.pass || quality.score < qualityThreshold) {
+        chunkCountPerUrl[url] = 0;
+        skippedUrls.push(url);
+        resultsByUrl[url] = {
+          success: true,
+          skipped: "low_quality",
+          skipReason: quality.reasons.join(",") || "below_threshold",
+          qualityScore: quality.score,
+          contentHash: page.content_hash,
+          page,
+        };
+        if (onProgress) {
+          await onProgress({
+            phase: "training",
+            trainingProcessed: docIndex + 1,
+            trainingTotal: docTotal,
+            step: "chunking",
+          });
+        }
+        continue;
+      }
+
+      // --- Phase 2: content-hash skip (unchanged) ---
+      const existing = await Url.findOne({ url, agentId })
+        .select("contentHash trainStatus")
+        .lean();
+
+      if (
+        existing?.contentHash &&
+        page.content_hash &&
+        existing.contentHash === page.content_hash
+      ) {
+        chunkCountPerUrl[url] = 0;
+        skippedUrls.push(url);
+        resultsByUrl[url] = {
+          success: true,
+          skipped: "unchanged",
+          skipReason: "content_hash_match",
+          qualityScore: quality.score,
+          contentHash: page.content_hash,
+          page,
+        };
+        if (onProgress) {
+          await onProgress({
+            phase: "training",
+            trainingProcessed: docIndex + 1,
+            trainingTotal: docTotal,
+            step: "chunking",
+          });
+        }
+        continue;
+      }
 
       const lcDocs = await splitter.createDocuments([page.text]);
       const chunks = lcDocs.map((d) => d.pageContent);
@@ -121,6 +182,7 @@ async function processPageDocuments(
           chunkCount: chunks.length,
           page,
           contentHash: page.content_hash,
+          qualityScore: quality.score,
         };
       }
     } catch (err) {
@@ -138,6 +200,7 @@ async function processPageDocuments(
     totalChunks,
     chunkCountPerUrl,
     failedUrls,
+    skippedUrls,
     storageMB,
     estimatedCost,
     resultsByUrl,

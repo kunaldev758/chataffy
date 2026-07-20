@@ -26,7 +26,7 @@ function finalizeDiscoveredUrls(urls, max = MAX_DISCOVERED_URLS) {
   const cleaned = filterAndDedupeWebUrls(urls).slice(0, max);
   if (originalCount !== cleaned.length) {
     console.log(
-      `Cleaned URLs: ${originalCount} -> ${cleaned.length} (removed invalid, non-HTML, or duplicate URLs)`,
+      `Cleaned URLs: ${originalCount} -> ${cleaned.length} (removed invalid, non-HTML, non-content, tracking dupes, or duplicates)`,
     );
   }
   return cleaned;

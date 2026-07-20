@@ -72,6 +72,7 @@ class BatchTrainingService {
         totalChunks: result.totalChunks,
         chunkCountPerUrl: result.chunkCountPerUrl,
         failedUrls: result.failedUrls || [],
+        skippedUrls: result.skippedUrls || [],
         storageMB: result.storageMB,
         estimatedCost: result.estimatedCost,
         resultsByUrl: result.resultsByUrl || {},

@@ -10,6 +10,8 @@ const { upsertPageToQdrant, normalizeAndUpsertPage } = require("./upsertPageToQd
 const { processPageDocuments } = require("./processPageDocuments");
 const urlStatus = require("./urlStatus");
 const htmlCleanup = require("./htmlCleanup");
+const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
+const { checkCanonicalDuplicate } = require("./canonicalDedupe");
 
 module.exports = {
   ...schema,
@@ -23,4 +25,7 @@ module.exports = {
   processPageDocuments,
   ...urlStatus,
   htmlCleanup,
+  scoreQuality,
+  QUALITY_THRESHOLD,
+  checkCanonicalDuplicate,
 };

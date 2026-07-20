@@ -30,7 +30,25 @@ async function markUrlProcessed(url, agentId, fields = {}) {
     pageType: fields.pageType ?? "generic",
     canonicalUrl: fields.canonicalUrl ?? null,
     language: fields.language ?? null,
+    qualityScore:
+      typeof fields.qualityScore === "number" ? fields.qualityScore : null,
     lastCrawledAt: new Date(),
+  });
+}
+
+/** Hash unchanged — keep vectors, only bump lastCheckedAt. */
+async function markUrlUnchanged(url, agentId, fields = {}) {
+  return updateUrlPipeline(url, agentId, {
+    trainStatus: 1,
+    status: URL_PIPELINE_STATUS.PROCESSED,
+    error: null,
+    failureReason: null,
+    contentHash: fields.contentHash ?? undefined,
+    pageType: fields.pageType ?? undefined,
+    canonicalUrl: fields.canonicalUrl ?? undefined,
+    language: fields.language ?? undefined,
+    qualityScore:
+      typeof fields.qualityScore === "number" ? fields.qualityScore : undefined,
   });
 }
 
@@ -43,10 +61,17 @@ async function markUrlFailed(url, agentId, reason) {
   });
 }
 
-async function markUrlSkipped(url, agentId, reason) {
+async function markUrlSkipped(url, agentId, reason, fields = {}) {
   return updateUrlPipeline(url, agentId, {
     status: URL_PIPELINE_STATUS.SKIPPED,
     failureReason: reason || "skipped",
+    error: null,
+    canonicalUrl: fields.canonicalUrl ?? undefined,
+    language: fields.language ?? undefined,
+    qualityScore:
+      typeof fields.qualityScore === "number" ? fields.qualityScore : undefined,
+    pageType: fields.pageType ?? undefined,
+    contentHash: fields.contentHash ?? undefined,
   });
 }
 
@@ -62,6 +87,7 @@ module.exports = {
   updateUrlPipeline,
   markUrlFetched,
   markUrlProcessed,
+  markUrlUnchanged,
   markUrlFailed,
   markUrlSkipped,
   markUrlsQueued,

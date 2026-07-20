@@ -38,6 +38,53 @@ const NON_HTML_EXTENSIONS = new Set([
 
 const NON_HTTP_PROTOCOLS = new Set(["mailto:", "tel:", "javascript:", "data:"]);
 
+/** Query params that create duplicate URLs without changing page content. */
+const TRACKING_QUERY_PARAMS = new Set([
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "utm_term",
+  "utm_content",
+  "utm_id",
+  "gclid",
+  "gbraid",
+  "wbraid",
+  "fbclid",
+  "msclkid",
+  "mc_cid",
+  "mc_eid",
+  "_ga",
+  "_gl",
+  "ref",
+  "referrer",
+]);
+
+/**
+ * Path segments / patterns that are rarely useful for RAG (cart, auth, pagination noise).
+ * Matched against pathname (lowercase).
+ */
+const NON_CONTENT_PATH_PATTERNS = [
+  /^\/cart\/?$/i,
+  /^\/basket\/?$/i,
+  /^\/checkout(\/|$)/i,
+  /^\/login\/?$/i,
+  /^\/signin\/?$/i,
+  /^\/sign-in\/?$/i,
+  /^\/signup\/?$/i,
+  /^\/sign-up\/?$/i,
+  /^\/register\/?$/i,
+  /^\/account(\/|$)/i,
+  /^\/my-account(\/|$)/i,
+  /^\/wishlist\/?$/i,
+  /^\/compare\/?$/i,
+  /^\/search\/?$/i,
+  /^\/cdn-cgi(\/|$)/i,
+  /^\/wp-admin(\/|$)/i,
+  /^\/wp-login\.php$/i,
+  /^\/cart\.php$/i,
+  /^\/checkout\.php$/i,
+];
+
 function getPathExtension(pathname) {
   const base = (pathname || "").split("/").pop() || "";
   const dot = base.lastIndexOf(".");
@@ -54,7 +101,6 @@ function isHomepageUrl(url) {
       path = path.slice(0, -1);
     }
     if (path === "/" || path === "") return true;
-    // Common homepage entry points
     return /^\/index\.(html?|php|aspx)$/i.test(path);
   } catch {
     return (
@@ -89,19 +135,48 @@ function isScrapableWebUrl(url) {
   }
 }
 
+/** True for cart/checkout/login/etc. paths that should not enter the scrape queue. */
+function isNonContentPath(url) {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname || "/";
+    if (NON_CONTENT_PATH_PATTERNS.some((re) => re.test(path))) return true;
+
+    const page = parsed.searchParams.get("page");
+    if (page != null && page !== "" && page !== "1") return true;
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function stripTrackingParams(parsedUrl) {
+  const keys = [...parsedUrl.searchParams.keys()];
+  for (const key of keys) {
+    const lower = key.toLowerCase();
+    if (TRACKING_QUERY_PARAMS.has(lower) || lower.startsWith("utm_")) {
+      parsedUrl.searchParams.delete(key);
+    }
+  }
+}
+
 function canonicalUrlKey(url) {
   const parsed = new URL(url);
+  stripTrackingParams(parsed);
   let path = parsed.pathname || "/";
   if (path.length > 1 && path.endsWith("/")) {
     path = path.slice(0, -1);
   }
-  return `${parsed.origin.toLowerCase()}${path}${parsed.search}`;
+  const search = parsed.searchParams.toString();
+  return `${parsed.origin.toLowerCase()}${path}${search ? `?${search}` : ""}`;
 }
 
 function normalizeWebUrl(url) {
   const parsed = new URL(url);
   parsed.hash = "";
   parsed.hostname = parsed.hostname.toLowerCase();
+  stripTrackingParams(parsed);
 
   let path = parsed.pathname || "/";
   if (path.length > 1 && path.endsWith("/")) {
@@ -110,6 +185,17 @@ function normalizeWebUrl(url) {
   parsed.pathname = path;
 
   return parsed.toString();
+}
+
+/** HTML + scrapable + not a non-content path. */
+function isContentQueueableUrl(url) {
+  if (!isScrapableWebUrl(url)) return false;
+  try {
+    const normalized = normalizeWebUrl(url.trim());
+    return !isNonContentPath(normalized);
+  } catch {
+    return false;
+  }
 }
 
 function filterAndDedupeWebUrls(urls) {
@@ -121,7 +207,15 @@ function filterAndDedupeWebUrls(urls) {
   for (const raw of urls) {
     if (!isScrapableWebUrl(raw)) continue;
 
-    const normalized = normalizeWebUrl(raw.trim());
+    let normalized;
+    try {
+      normalized = normalizeWebUrl(raw.trim());
+    } catch {
+      continue;
+    }
+
+    if (isNonContentPath(normalized)) continue;
+
     const key = canonicalUrlKey(normalized);
     if (seen.has(key)) continue;
 
@@ -161,7 +255,7 @@ function looksLikeUnrenderedSpa($) {
     $("#__next").length ||
     $("#__nuxt").length ||
     $("app-root").length ||
-    $("main-app").length; 
+    $("main-app").length;
 
   const hasMeaningfulMarkup =
     $("article").length ||
@@ -173,8 +267,11 @@ function looksLikeUnrenderedSpa($) {
 
 module.exports = {
   NON_HTML_EXTENSIONS,
+  TRACKING_QUERY_PARAMS,
   isHomepageUrl,
   isScrapableWebUrl,
+  isNonContentPath,
+  isContentQueueableUrl,
   canonicalUrlKey,
   normalizeWebUrl,
   filterAndDedupeWebUrls,
