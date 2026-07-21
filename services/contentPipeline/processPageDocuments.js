@@ -6,6 +6,9 @@ const { upsertPageToQdrant } = require("./upsertPageToQdrant");
 const DEFAULT_CHUNK_SIZE = 500; // tokens
 const DEFAULT_CHUNK_OVERLAP = 100;
 const CHARS_PER_TOKEN = 4;
+const CHUNKING_SHARE = 0.15;
+const EMBEDDING_SHARE = 0.55;
+const UPSERT_SHARE = 0.3;
 
 /**
  * Phase 1 multi-page train: normalize → recursive chunk → delete-by-url → upsert.
@@ -40,6 +43,32 @@ async function processPageDocuments(
   const vectorStore = new QdrantVectorStoreManager(qdrantIndexName);
   await vectorStore.createCollection();
 
+  const emitAggregateProgress = async ({
+    docIndex,
+    localFraction,
+    step,
+    ...details
+  }) => {
+    if (!onProgress || docTotal <= 0) return;
+
+    const boundedLocal = Math.max(0, Math.min(1, localFraction));
+    const trainingFraction = Math.max(
+      0,
+      Math.min(1, (docIndex + boundedLocal) / docTotal),
+    );
+
+    await onProgress({
+      phase: "training",
+      trainingProcessed: docIndex + boundedLocal,
+      trainingTotal: docTotal,
+      trainingFraction,
+      completedUrls: docIndex,
+      currentUrlIndex: docIndex + 1,
+      step,
+      ...details,
+    });
+  };
+
   for (let docIndex = 0; docIndex < documents.length; docIndex++) {
     const doc = documents[docIndex];
     const url = doc.originalUrl || doc.metadata?.url;
@@ -61,14 +90,11 @@ async function processPageDocuments(
       chunkCountPerUrl[url] = chunks.length;
       totalChunks += chunks.length;
 
-      if (onProgress) {
-        await onProgress({
-          phase: "training",
-          trainingProcessed: docIndex + 1,
-          trainingTotal: docTotal,
-          step: "chunking",
-        });
-      }
+      await emitAggregateProgress({
+        docIndex,
+        localFraction: CHUNKING_SHARE,
+        step: "chunking",
+      });
 
       const upsertResult = await upsertPageToQdrant({
         qdrantIndexName,
@@ -80,19 +106,25 @@ async function processPageDocuments(
         onProgress: onProgress
           ? async (event) => {
               if (event.step === "embedding") {
-                await onProgress({
-                  phase: "training",
-                  trainingProcessed: docTotal,
-                  trainingTotal: docTotal,
+                const ratio =
+                  event.total > 0 ? event.embedded / event.total : 1;
+                await emitAggregateProgress({
+                  docIndex,
+                  localFraction:
+                    CHUNKING_SHARE + ratio * EMBEDDING_SHARE,
                   embeddingProgress: event.embedded,
                   embeddingTotal: event.total,
                   step: "embedding",
                 });
               } else if (event.step === "upserting") {
-                await onProgress({
-                  phase: "training",
-                  trainingProcessed: docTotal,
-                  trainingTotal: docTotal,
+                const ratio =
+                  event.total > 0 ? event.upserted / event.total : 1;
+                await emitAggregateProgress({
+                  docIndex,
+                  localFraction:
+                    CHUNKING_SHARE +
+                    EMBEDDING_SHARE +
+                    ratio * UPSERT_SHARE,
                   embeddingProgress: event.total,
                   embeddingTotal: event.total,
                   upsertProgress: event.upserted,
@@ -130,6 +162,11 @@ async function processPageDocuments(
       );
       failedUrls.push(url);
       resultsByUrl[url] = { success: false, error: err.message };
+      await emitAggregateProgress({
+        docIndex,
+        localFraction: 1,
+        step: "upserting",
+      });
     }
   }
 

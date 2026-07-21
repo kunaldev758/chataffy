@@ -14,6 +14,7 @@ function formatElapsedTime(seconds) {
 }
 
 function computeTrainingFraction({
+  trainingFraction,
   trainingStep = "chunking",
   trainingProcessed = 0,
   trainingTotal = 0,
@@ -22,6 +23,9 @@ function computeTrainingFraction({
   upsertProgress = 0,
   upsertTotal = 0,
 }) {
+  if (Number.isFinite(trainingFraction)) {
+    return Math.max(0, Math.min(1, trainingFraction));
+  }
   if (trainingStep === "upserting" && upsertTotal > 0) {
     return (
       TRAINING_CHUNKING_SHARE +
@@ -45,6 +49,7 @@ function computeOverallPercentage({
   phase = "scraping",
   processed = 0,
   total = 0,
+  trainingFraction,
   trainingStep = "chunking",
   trainingProcessed = 0,
   trainingTotal = 0,
@@ -57,6 +62,7 @@ function computeOverallPercentage({
   let pct;
   if (phase === "training") {
     const trainFrac = computeTrainingFraction({
+      trainingFraction,
       trainingStep,
       trainingProcessed,
       trainingTotal,
@@ -80,9 +86,11 @@ function computeOverallPercentage({
 
 function buildTrainingProgressPayload({
   startTime,
+  trainingStartTime,
   phase = "scraping",
   processed = 0,
   total = 0,
+  trainingFraction,
   trainingStep = "chunking",
   trainingProcessed = 0,
   trainingTotal = 0,
@@ -104,12 +112,32 @@ function buildTrainingProgressPayload({
   if (phase === "scraping" && processed > 0 && total > processed) {
     const avgPerPage = elapsedSeconds / processed;
     estimatedSecondsRemaining = Math.round(avgPerPage * (total - processed));
+  } else if (
+    phase === "training" &&
+    Number.isFinite(trainingFraction) &&
+    trainingFraction > 0 &&
+    trainingFraction < 1
+  ) {
+    const trainingStart = trainingStartTime
+      ? new Date(trainingStartTime)
+      : start;
+    const trainingElapsedSeconds = Math.max(
+      0,
+      (Date.now() - trainingStart.getTime()) / 1000,
+    );
+    estimatedSecondsRemaining = Math.max(
+      0,
+      Math.round(
+        (trainingElapsedSeconds / trainingFraction) * (1 - trainingFraction),
+      ),
+    );
   }
 
   const percentage = computeOverallPercentage({
     phase,
     processed,
     total,
+    trainingFraction,
     trainingStep,
     trainingProcessed,
     trainingTotal,
@@ -125,6 +153,9 @@ function buildTrainingProgressPayload({
     processed,
     total,
     trainingStep,
+    ...(Number.isFinite(trainingFraction)
+      ? { trainingFraction: Math.max(0, Math.min(1, trainingFraction)) }
+      : {}),
     trainingProcessed,
     trainingTotal,
     embeddingProgress,

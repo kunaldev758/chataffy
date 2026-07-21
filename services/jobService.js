@@ -475,9 +475,12 @@ new Worker(
       };
 
       let lastTrainingEmitTime = 0;
+      let trainingStartTime = null;
+      let lastTrainingFraction = 0;
       const emitTrainingProgress = async ({
         trainingProcessed,
         trainingTotal,
+        trainingFraction,
         embeddingProgress = 0,
         embeddingTotal = 0,
         upsertProgress = 0,
@@ -489,13 +492,26 @@ new Worker(
         if (!force && now - lastTrainingEmitTime < PROGRESS_EMIT_INTERVAL) {
           return;
         }
+        if (!trainingStartTime) trainingStartTime = new Date(now);
         lastTrainingEmitTime = now;
+
+        const aggregateFraction = Number.isFinite(trainingFraction)
+          ? Math.max(
+              lastTrainingFraction,
+              Math.max(0, Math.min(1, trainingFraction)),
+            )
+          : undefined;
+        if (Number.isFinite(aggregateFraction)) {
+          lastTrainingFraction = aggregateFraction;
+        }
 
         const scrapingProgress = buildTrainingProgressPayload({
           startTime: scrapingStartTime,
+          trainingStartTime,
           phase: "training",
           processed: totalUrlsCount,
           total: totalUrlsCount,
+          trainingFraction: aggregateFraction,
           trainingStep,
           trainingProcessed,
           trainingTotal,
@@ -512,6 +528,9 @@ new Worker(
           scrapeTotal: totalUrlsCount,
           trainingCurrent: trainingProcessed,
           trainingTotal,
+          ...(Number.isFinite(aggregateFraction)
+            ? { trainingFraction: aggregateFraction }
+            : {}),
           trainingStep,
           embeddingProgress,
           embeddingTotal,
@@ -780,13 +799,15 @@ new Worker(
             await emitTrainingProgress({
               trainingProcessed: progress.trainingProcessed,
               trainingTotal: progress.trainingTotal,
+              trainingFraction: progress.trainingFraction,
               embeddingProgress: progress.embeddingProgress ?? 0,
               embeddingTotal: progress.embeddingTotal ?? 0,
               upsertProgress: progress.upsertProgress ?? 0,
               upsertTotal: progress.upsertTotal ?? 0,
               trainingStep: progress.step ?? "chunking",
-              force:
-                progress.step === "embedding" || progress.step === "upserting",
+              // Per-URL embedding/upsert callbacks are aggregated and throttled
+              // so the frontend receives a smooth batch-level progression.
+              force: false,
             });
           },
         },
@@ -1106,6 +1127,8 @@ new Worker(
     let lastProgressEmitTime = Date.now();
     const PROGRESS_EMIT_INTERVAL = 2000;
     let lastTrainingEmitTime = 0;
+    let trainingStartTime = null;
+    let lastTrainingFraction = 0;
     let processedCount = 0;
 
     const emitScrapingProgress = async (
@@ -1136,6 +1159,7 @@ new Worker(
     const emitTrainingProgress = async ({
       trainingProcessed,
       trainingTotal,
+      trainingFraction,
       embeddingProgress = 0,
       embeddingTotal = 0,
       upsertProgress = 0,
@@ -1147,13 +1171,26 @@ new Worker(
       if (!force && now - lastTrainingEmitTime < PROGRESS_EMIT_INTERVAL) {
         return;
       }
+      if (!trainingStartTime) trainingStartTime = new Date(now);
       lastTrainingEmitTime = now;
+
+      const aggregateFraction = Number.isFinite(trainingFraction)
+        ? Math.max(
+            lastTrainingFraction,
+            Math.max(0, Math.min(1, trainingFraction)),
+          )
+        : undefined;
+      if (Number.isFinite(aggregateFraction)) {
+        lastTrainingFraction = aggregateFraction;
+      }
 
       const scrapingProgress = buildTrainingProgressPayload({
         startTime: retrainStartTime,
+        trainingStartTime,
         phase: "training",
         processed: totalEntries,
         total: totalEntries,
+        trainingFraction: aggregateFraction,
         trainingStep,
         trainingProcessed,
         trainingTotal,
@@ -1170,6 +1207,9 @@ new Worker(
         scrapeTotal: totalEntries,
         trainingCurrent: trainingProcessed,
         trainingTotal,
+        ...(Number.isFinite(aggregateFraction)
+          ? { trainingFraction: aggregateFraction }
+          : {}),
         trainingStep,
         embeddingProgress,
         embeddingTotal,
@@ -1370,14 +1410,13 @@ new Worker(
                 trainingProcessed: progress.trainingProcessed ?? 0,
                 trainingTotal:
                   progress.trainingTotal ?? pendingRetrainItems.length,
+                trainingFraction: progress.trainingFraction,
                 embeddingProgress: progress.embeddingProgress ?? 0,
                 embeddingTotal: progress.embeddingTotal ?? 0,
                 upsertProgress: progress.upsertProgress ?? 0,
                 upsertTotal: progress.upsertTotal ?? 0,
                 trainingStep: progress.step ?? "chunking",
-                force:
-                  progress.step === "embedding" ||
-                  progress.step === "upserting",
+                force: false,
               });
             },
           },
