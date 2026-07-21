@@ -107,6 +107,7 @@ app.use(cookieParser());
 
 app.use(
   express.json({
+    limit: "10mb",
     verify: (req, res, buf) => {
       if (req.originalUrl?.startsWith("/api/shopify/webhooks")) {
         req.rawBody = buf;
@@ -139,6 +140,12 @@ cron.schedule('0 0 * * *', () => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({
+      success: false,
+      error: "Request payload is too large. Try selecting fewer pages or restart URL discovery.",
+    });
+  }
   console.error(err.stack);
   res.status(500).json({ message: 'Something went wrong!' });
 });
