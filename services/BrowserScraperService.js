@@ -146,6 +146,11 @@ class BrowserScraper {
    * on top of the global BROWSER_SCRAPE_CONCURRENCY cap.
    */
   async scrapeWebpage(url, options = {}) {
+
+
+    console.log("BrowserScraperService: scrapeWebpage", { url, options });
+
+    console.log("fallback to the playwright browser scraper for url: ", url);
     const held = await this._acquireSlot({
       userId: options.userId,
       jobId: options.jobId,

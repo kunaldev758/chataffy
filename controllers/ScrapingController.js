@@ -18,6 +18,10 @@ const {
   normalizeWebUrl,
   mightBeSpaShell,
 } = require("../utils/webUrlUtils.js");
+const zlib = require("zlib");
+const { promisify } = require("util");
+
+const gunzip = promisify(zlib.gunzip);
 
 const MAX_DISCOVERED_URLS = 1500;
 
@@ -136,7 +140,12 @@ async bulkInsertUrls(userId,agentId, urls) {
       try {
         const parsed = new URL(sitemapUrl);
         origin = parsed.origin;
-        isWebsiteUrl = !parsed.pathname.toLowerCase().endsWith(".xml");
+        // isWebsiteUrl = !parsed.pathname.toLowerCase().endsWith(".xml");
+        const pathname = parsed.pathname.toLowerCase();
+
+        isWebsiteUrl =
+          !pathname.endsWith(".xml") &&
+          !pathname.endsWith(".xml.gz");
       } catch (_) {
         // Not a valid URL; continue to existing logic which will handle and return []
       }
@@ -151,19 +160,27 @@ async bulkInsertUrls(userId,agentId, urls) {
             validateStatus: (status) => status < 500,
           });
           if (robotsResponse.status === 200 && typeof robotsResponse.data === "string") {
-            const lines = robotsResponse.data.split(/\r?\n/);
-            const sitemapLines = lines.filter((l) => /^\s*sitemap\s*:/i.test(l));
-            const discoveredSitemaps = sitemapLines
-              .map((l) => l.split(":")[1])
-              .filter(Boolean)
-              .map((v) => v.trim())
-              .filter((v) => v.startsWith("http"));
+            // const lines = robotsResponse.data.split(/\r?\n/);
+            // const sitemapLines = lines.filter((l) => /^\s*sitemap\s*:/i.test(l));
+            // const discoveredSitemaps = sitemapLines
+            //   .map((l) => l.split(" ")[1].trim()).filter(Boolean)
+              // .filter(Boolean)
+              // .map((v) => v.trim())
+              // .filter((v) => v.startsWith("http"));
+              
+            const discoveredSitemaps = robotsResponse.data
+            .split(/\r?\n/)
+            .map(line => {
+              const match = line.match(/^\s*sitemap\s*:\s*(.+)$/i);
+              return match ? match[1].trim() : null;
+            })
+            .filter(Boolean);
 
             for (const smUrl of discoveredSitemaps) {
               try {
                 const found = await this.extractUrlsFromSitemap(smUrl, userId, childOptions);
                 urls.push(...found);
-                if (urls.length >= 1500) break;
+                if (urls.length >= MAX_DISCOVERED_URLS) break;
               } catch (e) {
                 console.warn(`Failed to extract from robots sitemap ${smUrl}: ${e.message}`);
               }
@@ -178,7 +195,7 @@ async bulkInsertUrls(userId,agentId, urls) {
         }
 
         for (const path of commonSitemapPaths) {
-          if (urls.length >= 1500) break;
+          if (urls.length >= MAX_DISCOVERED_URLS) break;
           const candidate = `${origin}${path}`;
           try {
             const found = await this.extractUrlsFromSitemap(candidate, userId, childOptions);
@@ -248,9 +265,12 @@ async bulkInsertUrls(userId,agentId, urls) {
       }
 
       console.log(`Fetching sitemap: ${sitemapUrl}`);
-      
+
+      const isGzip = sitemapUrl.toLowerCase().endsWith(".gz");
+
       const response = await webScraper.fetchUrl(sitemapUrl, {
         timeout: 30000,
+        responseType: isGzip ? "arraybuffer" : "text",
         validateStatus: (status) => status < 500,
       });
   
@@ -266,23 +286,60 @@ async bulkInsertUrls(userId,agentId, urls) {
       }
   
       // Check if response has valid XML content
-      if (!response.data || typeof response.data !== 'string') {
-        console.warn(`Invalid XML content from sitemap: ${sitemapUrl}`);
+      // if (!response.data || typeof response.data !== 'string') {
+      //   console.warn(`Invalid XML content from sitemap: ${sitemapUrl}`);
+      //   return [];
+      // }
+
+      // Check if response has valid XML content
+      if (
+        !response.data ||
+        (!isGzip && typeof response.data !== "string")
+      ) {
+        console.warn(`Invalid sitemap content from ${sitemapUrl}`);
         return [];
       }
   
+      // const parser = new xml2js.Parser();
+      // const result = await parser.parseStringPromise(response.data);
+      let xmlContent = response.data;
+
+      if (isGzip) {
+        try {
+          const buffer = Buffer.isBuffer(xmlContent)
+            ? xmlContent
+            : Buffer.from(xmlContent);
+
+          xmlContent = (await gunzip(buffer)).toString("utf8");
+          console.log(`Successfully extracted gzip sitemap: ${sitemapUrl}`);
+        } catch (err) {
+          console.warn(`Failed to unzip sitemap ${sitemapUrl}: ${err.message}`);
+          return [];
+        }
+      }
+
       const parser = new xml2js.Parser();
-      const result = await parser.parseStringPromise(response.data);
+      const result = await parser.parseStringPromise(xmlContent);
+
       urls = [];
   
       // Handle regular sitemap
       if (result.urlset && result.urlset.url) {
-        urls = result.urlset.url.map((urlObj) => urlObj.loc[0]);
-        console.log(`Found ${urls.length} URLs in regular sitemap: ${sitemapUrl}`);
-        if (urls.length >= 1500) {
-          console.log(`URL limit reached. Returning first ${MAX_DISCOVERED_URLS} URLs from sitemap: ${sitemapUrl}`);
-          return finalizeDiscoveredUrls(urls);
-        }
+        // urls = result.urlset.url.map((urlObj) => urlObj.loc[0]);
+        // console.log(`Found ${urls.length} URLs in regular sitemap: ${sitemapUrl}`);
+        // if (urls.length >= 1500) {
+        //   console.log(`URL limit reached. Returning first ${MAX_DISCOVERED_URLS} URLs from sitemap: ${sitemapUrl}`);
+        //   return finalizeDiscoveredUrls(urls);
+        // }
+        urls = result.urlset.url
+          .slice(0, MAX_DISCOVERED_URLS)
+          .map(urlObj => urlObj.loc[0]);
+
+        console.log(
+          `Found ${urls.length} URLs in sitemap: ${sitemapUrl}`
+        );
+
+        return finalizeDiscoveredUrls(urls);
       }
       // Handle sitemap index
       else if (result.sitemapindex && result.sitemapindex.sitemap) {
@@ -294,8 +351,8 @@ async bulkInsertUrls(userId,agentId, urls) {
   
         // Recursively fetch URLs from each sitemap with better error handling
         for (const nestedSitemapUrl of sitemapUrls) {
-          if (urls.length >= 1500) {
-            console.log(`URL limit of 5000 reached. Stopping sitemap processing.`);
+          if (urls.length >= MAX_DISCOVERED_URLS) {
+            console.log(`URL limit of ${MAX_DISCOVERED_URLS} reached. Stopping sitemap processing.`);
             break;
           }
           try {

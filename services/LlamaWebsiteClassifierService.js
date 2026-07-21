@@ -106,7 +106,7 @@ function buildClassifierPrompt({
   pageContent,
   schemaTypes,
 }) {
-  const content = String(pageContent || "").slice(0, 48000);
+  const content = String(pageContent || "").slice(0, 24000); // Limit to 24k chars for LLM input
 
   return [
     "You classify websites by reading their page content.",
