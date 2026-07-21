@@ -506,22 +506,28 @@ const processWebPage = async (
     websiteMetadata = extractWebsiteMetadata($meta, url, { isHomepage });
 
     if (websiteMetadata?._needsLlamaTypeClassification) {
-      const llamaType = await classifyWebsiteType({
-        url,
-        title,
-        description: metaDescription,
-        pageContent: cleanContent,
-        schemaTypes: websiteMetadata._schemaTypes || [],
-        userId,
-        agentId,
-        conversationId,
-      });
+      // The LLM classifier sends up to ~48k chars of page content and is
+      // token-expensive. Website type is stored once per site (homepage wins),
+      // so only run the fallback on the homepage. Non-homepage pages keep the
+      // local keyword/schema best-guess and never trigger a paid call.
+      if (isHomepage) {
+        const llamaType = await classifyWebsiteType({
+          url,
+          title,
+          description: metaDescription,
+          pageContent: cleanContent,
+          schemaTypes: websiteMetadata._schemaTypes || [],
+          userId,
+          agentId,
+          conversationId,
+        });
 
-      if (llamaType?.company_type) {
-        websiteMetadata.company_type = llamaType.company_type;
-        websiteMetadata.company_type_source = llamaType.source;
-        if (llamaType.industry && !websiteMetadata.industry) {
-          websiteMetadata.industry = llamaType.industry;
+        if (llamaType?.company_type) {
+          websiteMetadata.company_type = llamaType.company_type;
+          websiteMetadata.company_type_source = llamaType.source;
+          if (llamaType.industry && !websiteMetadata.industry) {
+            websiteMetadata.industry = llamaType.industry;
+          }
         }
       }
 
