@@ -287,21 +287,25 @@ function emptyUsageTotals() {
 }
 
 /**
- * Embedding is the only type bucketed separately for training metrics.
+ * Embedding and website-classifier are bucketed separately for training metrics.
  * All other dynamic categories count as LLM / chat-side usage.
  */
 function isEmbeddingUsageType(type) {
   return usageTypeForCategory(type) === 'embedding';
 }
 
+function isWebsiteClassifierUsageType(type) {
+  return usageTypeForCategory(type) === 'website-classifier';
+}
+
 function isChatUsageType(type) {
-  return !isEmbeddingUsageType(type);
+  return !isEmbeddingUsageType(type) && !isWebsiteClassifierUsageType(type);
 }
 
 /** @deprecated Prefer isChatUsageType — categories are dynamic. */
 const CHAT_USAGE_TYPES = [];
-/** Embedding is the only reserved training bucket. */
-const TRAINING_USAGE_TYPES = ['embedding'];
+/** Reserved training buckets. */
+const TRAINING_USAGE_TYPES = ['embedding', 'website-classifier'];
 /** @deprecated Conversation queries no longer filter by a fixed type allowlist. */
 const CONVERSATION_USAGE_TYPES = [];
 
@@ -316,7 +320,8 @@ function toObjectIdOrValue(id) {
 
 /**
  * Aggregate OpenAI usage grouped by agentId for a client user.
- * Returns overall totals per agent plus embedding-only (website training) usage.
+ * Returns overall totals per agent plus embedding and website-classifier
+ * (training) usage buckets.
  */
 async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {}) {
   const match = {};
@@ -348,12 +353,14 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
   const byAgent = {};
   const totals = emptyUsageTotals();
   const embeddingTotals = emptyUsageTotals();
+  const websiteClassifierTotals = emptyUsageTotals();
 
   const ensureAgent = (key) => {
     if (!byAgent[key]) {
       byAgent[key] = {
         openAIUsage: emptyUsageTotals(),
         embeddingUsage: emptyUsageTotals(),
+        websiteClassifierUsage: emptyUsageTotals(),
       };
     }
     return byAgent[key];
@@ -389,6 +396,9 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
     if (isEmbeddingUsageType(type)) {
       addInto(agentBucket.embeddingUsage, usage);
       addInto(embeddingTotals, usage);
+    } else if (isWebsiteClassifierUsageType(type)) {
+      addInto(agentBucket.websiteClassifierUsage, usage);
+      addInto(websiteClassifierTotals, usage);
     } else {
       addInto(agentBucket.openAIUsage, usage);
       addInto(totals, usage);
@@ -402,12 +412,14 @@ async function getOpenAIUsageGroupedByAgent(userId, { startDate, endDate } = {})
   };
   alignTotals(totals);
   alignTotals(embeddingTotals);
+  alignTotals(websiteClassifierTotals);
   for (const bucket of Object.values(byAgent)) {
     alignTotals(bucket.openAIUsage);
     alignTotals(bucket.embeddingUsage);
+    alignTotals(bucket.websiteClassifierUsage);
   }
 
-  return { byAgent, totals, embeddingTotals };
+  return { byAgent, totals, embeddingTotals, websiteClassifierTotals };
 }
 
 /**
@@ -597,6 +609,7 @@ module.exports = {
   emptyUsageTotals,
   isChatUsageType,
   isEmbeddingUsageType,
+  isWebsiteClassifierUsageType,
   CHAT_USAGE_TYPES,
   CONVERSATION_USAGE_TYPES,
   TRAINING_USAGE_TYPES,

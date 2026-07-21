@@ -595,6 +595,7 @@ module.exports.getClientAgents = async (req, res) => {
         ...bot,
         openAIUsage: bucket.openAIUsage || { ...empty },
         embeddingUsage: bucket.embeddingUsage || { ...empty },
+        websiteClassifierUsage: bucket.websiteClassifierUsage || { ...empty },
       };
     });
 
@@ -605,6 +606,8 @@ module.exports.getClientAgents = async (req, res) => {
         humanAgents,
         openAIUsageTotal: openAIGrouped?.totals || empty,
         embeddingUsageTotal: openAIGrouped?.embeddingTotals || empty,
+        websiteClassifierUsageTotal:
+          openAIGrouped?.websiteClassifierTotals || empty,
       },
     });
   } catch (error) {
