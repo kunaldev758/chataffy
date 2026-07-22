@@ -10,6 +10,7 @@ const cheerio = require("cheerio");
 const webScraper = require("./WebScraper.js");
 const QdrantVectorStoreManager = require("./QdrantService");
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
+const { saveTrainingObserve } = require("./trainingObserve.js");
 const {
   isHomepageUrl,
   isScrapableWebUrl,
@@ -450,6 +451,11 @@ new Worker(
       startTime,
       totalUrls,
     } = job.data;
+    const trainingRunId = String(job.id);
+    const runStartedAt = startTime ? new Date(startTime) : new Date();
+    let batchResult = null;
+    let trainFailed = false;
+    let failedReason = null;
     try {
       const batchService = new batchTrainingService();
 
@@ -473,8 +479,7 @@ new Worker(
       /** Phase 2: in-batch canonical keys to avoid embedding URL variants of the same page */
       const seenCanonicalKeys = new Set();
 
-      // Use startTime from job data or current time as fallback
-      const scrapingStartTime = startTime ? new Date(startTime) : new Date();
+      const scrapingStartTime = runStartedAt;
       const totalUrlsCount = totalUrls || urls.length;
       let lastProgressEmitTime = Date.now();
       const PROGRESS_EMIT_INTERVAL = 2000; // Emit progress every 2 seconds
@@ -868,7 +873,7 @@ new Worker(
       }
 
       //make this a queue
-      let result = await batchService.processDocumentAndTrain(
+      batchResult = await batchService.processDocumentAndTrain(
         scrapedDocs,
         userId,
         agentId,
@@ -894,7 +899,7 @@ new Worker(
       );
 
       // Handle training failure
-      if (!result.success) {
+      if (!batchResult.success) {
         // Mark all documents as failed if training failed
         await Agent.updateOne(
           { _id: agentId },
@@ -907,9 +912,9 @@ new Worker(
       } else {
         // 3️⃣ Update training status in DB
         for (const doc of scrapedDocs) {
-          const pageResult = result?.resultsByUrl?.[doc.originalUrl];
+          const pageResult = batchResult?.resultsByUrl?.[doc.originalUrl];
           const skipped = pageResult?.skipped;
-          const failed = result?.failedUrls?.includes(doc.originalUrl);
+          const failed = batchResult?.failedUrls?.includes(doc.originalUrl);
 
           if (skipped === "unchanged") {
             await markUrlUnchanged(doc.originalUrl, agentId, {
@@ -956,7 +961,7 @@ new Worker(
               dataSize: doc.dataSize,
               trainingStatus: status,
               "webPage.url": doc.originalUrl,
-              chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
+              chunkCount: batchResult.chunkCountPerUrl?.[doc.originalUrl] || 0,
               lastEdit: Date.now(),
             });
             await markUrlProcessed(doc.originalUrl, agentId, {
@@ -980,7 +985,7 @@ new Worker(
               trainingStatus: status,
               error: "Failed to process/minify web page content",
               "webPage.url": doc.originalUrl,
-              chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
+              chunkCount: batchResult.chunkCountPerUrl?.[doc.originalUrl] || 0,
               lastEdit: Date.now(),
             });
             await markUrlFailed(
@@ -1050,6 +1055,8 @@ new Worker(
         });
       }
     } catch (error) {
+      trainFailed = true;
+      failedReason = error?.message || "Training job threw an error";
       await Agent.updateOne(
         { _id: agentId },
         { $set: { dataTrainingStatus: 0, scrapingStartTime: null } },
@@ -1057,7 +1064,7 @@ new Worker(
 
       // Calculate progress even on error
       const errorElapsedTime = Math.floor(
-        (Date.now() - scrapingStartTime.getTime()) / 1000,
+        (Date.now() - runStartedAt.getTime()) / 1000,
       );
       const formatTime = (seconds) => {
         const hrs = Math.floor(seconds / 3600);
@@ -1092,6 +1099,25 @@ new Worker(
         },
       });
       console.log(error);
+    } finally {
+      const status =
+        trainFailed || batchResult?.success === false ? "failed" : "completed";
+      await saveTrainingObserve({
+        trainingRunId,
+        userId,
+        agentId,
+        status,
+        startedAt: runStartedAt,
+        totalChunks: batchResult?.totalChunks ?? 0,
+        failedReason:
+          status === "failed"
+            ? failedReason ||
+              batchResult?.error ||
+              (batchResult?.failedUrls?.length
+                ? `Failed URLs: ${batchResult.failedUrls.length}`
+                : null)
+            : null,
+      });
     }
   },
   { connection: redisConfig, concurrency: 3 },
@@ -1229,6 +1255,11 @@ new Worker(
       startTime,
       totalEntries: jobTotalEntries,
     } = job.data;
+    const trainingRunId = String(job.id);
+    const runStartedAt = startTime ? new Date(startTime) : new Date();
+    let batchResult = null;
+    let trainFailed = false;
+    let failedReason = null;
     const batchService = new batchTrainingService();
     const Agent = require("../models/Agent");
 
@@ -1237,7 +1268,7 @@ new Worker(
         ? require("../models/TrainingListFreeUsers")
         : require("../models/OpenaiTrainingList");
 
-    const retrainStartTime = startTime ? new Date(startTime) : new Date();
+    const retrainStartTime = runStartedAt;
     const validEntries = (entries || []).filter((e) => e.webPage?.url);
     const totalEntries = jobTotalEntries || validEntries.length;
     let lastProgressEmitTime = Date.now();
@@ -1554,7 +1585,7 @@ new Worker(
           force: true,
         });
 
-        const result = await batchService.processDocumentAndTrain(
+        batchResult = await batchService.processDocumentAndTrain(
           pendingRetrainItems.map((item) => item.scrapedDoc),
           userId,
           agentId,
@@ -1577,19 +1608,19 @@ new Worker(
           },
         );
 
-        if (!result.success) {
+        if (!batchResult.success) {
           for (const item of pendingRetrainItems) {
             await markEntryFailed({
               entry: item.entry,
               prevStatus: item.prevStatus,
-              error: result.error || "Failed to upsert vectors",
+              error: batchResult.error || "Failed to upsert vectors",
             });
           }
         } else {
           for (const item of pendingRetrainItems) {
-            const pageResult = result?.resultsByUrl?.[item.url];
+            const pageResult = batchResult?.resultsByUrl?.[item.url];
             const skipped = pageResult?.skipped;
-            const failed = result.failedUrls?.includes(item.url);
+            const failed = batchResult.failedUrls?.includes(item.url);
 
             if (skipped === "unchanged") {
               await markUrlUnchanged(item.url, agentId, {
@@ -1648,7 +1679,7 @@ new Worker(
                   dataSize: item.contentSize,
                   trainingStatus: 1,
                   lastEdit: new Date(),
-                  chunkCount: result.chunkCountPerUrl?.[item.url] || 0,
+                  chunkCount: batchResult.chunkCountPerUrl?.[item.url] || 0,
                   "webPage.url": item.url,
                 },
               },
@@ -1714,6 +1745,8 @@ new Worker(
         `[retrainTrainingData] Completed: ${successCount} success, ${failCount} failed for user ${userId}`,
       );
     } catch (error) {
+      trainFailed = true;
+      failedReason = error?.message || "Retrain job threw an error";
       console.error("[retrainTrainingData] Job failed:", error);
       await Agent.updateOne(
         { _id: agentId },
@@ -1724,6 +1757,25 @@ new Worker(
         message: error?.message,
       });
       throw error;
+    } finally {
+      const status =
+        trainFailed || batchResult?.success === false ? "failed" : "completed";
+      await saveTrainingObserve({
+        trainingRunId,
+        userId,
+        agentId,
+        status,
+        startedAt: runStartedAt,
+        totalChunks: batchResult?.totalChunks ?? 0,
+        failedReason:
+          status === "failed"
+            ? failedReason ||
+              batchResult?.error ||
+              (batchResult?.failedUrls?.length
+                ? `Failed URLs: ${batchResult.failedUrls.length}`
+                : null)
+            : null,
+      });
     }
   },
   { connection: redisConfig, concurrency: 2 },
