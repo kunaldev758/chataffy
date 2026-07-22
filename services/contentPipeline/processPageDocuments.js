@@ -1,6 +1,6 @@
 const QdrantVectorStoreManager = require("../QdrantService");
 const Url = require("../../models/Url");
-const { normalizeToCommonSchema } = require("./normalizeSchema");
+const { normalizeToCommonSchema, hashContent } = require("./normalizeSchema");
 const { upsertPageToQdrant } = require("./upsertPageToQdrant");
 const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
 const {
@@ -17,8 +17,60 @@ const EMBEDDING_SHARE = 0.55;
 const UPSERT_SHARE = 0.3;
 
 /**
+ * Resolve sections for a scraped doc. Falls back to a single primary section.
+ */
+function resolveSections(doc) {
+  const meta = doc.metadata || {};
+  if (Array.isArray(meta.sections) && meta.sections.length > 0) {
+    return meta.sections
+      .map((s) => ({
+        pageType: s.pageType || meta.pageType || "generic",
+        entity_type: s.entity_type || meta.entity_type || "general",
+        entity_name:
+          s.entity_name !== undefined ? s.entity_name : meta.entity_name || null,
+        content: String(s.content || "").trim(),
+        attributes:
+          s.attributes && typeof s.attributes === "object"
+            ? s.attributes
+            : meta.attributes || {},
+        search_terms: Array.isArray(s.search_terms)
+          ? s.search_terms
+          : meta.search_terms || [],
+        classification_confidence:
+          typeof s.classification_confidence === "number"
+            ? s.classification_confidence
+            : typeof meta.classification_confidence === "number"
+              ? meta.classification_confidence
+              : 0,
+        classification_reason:
+          s.classification_reason || meta.classification_reason || "phase3",
+        extraction_source: s.extraction_source || meta.extraction_source,
+      }))
+      .filter((s) => s.content);
+  }
+
+  return [
+    {
+      pageType: meta.pageType || "generic",
+      entity_type: meta.entity_type || "general",
+      entity_name: meta.entity_name || null,
+      content: String(doc.content || "").trim(),
+      attributes: meta.attributes || {},
+      search_terms: meta.search_terms || [],
+      classification_confidence:
+        typeof meta.classification_confidence === "number"
+          ? meta.classification_confidence
+          : 0,
+      classification_reason: meta.classification_reason || "phase3",
+      extraction_source: meta.extraction_source,
+    },
+  ].filter((s) => s.content);
+}
+
+/**
  * Phase 1–4 multi-page train:
- * normalize → quality → hash skip → structure-aware chunk (+ embed prefix) → delete-by-url → upsert.
+ * normalize → per-section quality → hash skip → structure-aware chunk
+ * (+ embed prefix) → delete-by-url → upsert (chunks may differ by entity_type).
  */
 async function processPageDocuments(
   documents,
@@ -82,42 +134,69 @@ async function processPageDocuments(
     const doc = documents[docIndex];
     const url = doc.originalUrl || doc.metadata?.url;
     try {
+      const sections = resolveSections(doc);
+      const meta = doc.metadata || {};
+
+      // --- Phase 2: per-section quality (one weak section does not kill others) ---
+      const keptSections = [];
+      const sectionQualityScores = [];
+      for (const section of sections) {
+        const quality = scoreQuality(section.content, {
+          title: section.entity_name || meta.title || "",
+        });
+        sectionQualityScores.push(quality.score);
+        if (quality.pass && quality.score >= qualityThreshold) {
+          keptSections.push({
+            ...section,
+            quality_score: quality.score,
+          });
+        }
+      }
+
+      const combinedText = keptSections.map((s) => s.content).join("\n\n");
+      const content_hash = combinedText ? hashContent(combinedText) : null;
+      const bestQuality =
+        sectionQualityScores.length > 0
+          ? Math.max(...sectionQualityScores)
+          : 0;
+
       const page = normalizeToCommonSchema({
         url,
         userId,
         agentId,
-        content: doc.content,
-        title: doc.metadata?.title || "",
-        metaDescription: doc.metadata?.metaDescription || "",
-        canonicalUrl: doc.metadata?.canonicalUrl || null,
-        language: doc.metadata?.language || "en",
-        pageType: doc.metadata?.pageType || "generic",
-        entity_type: doc.metadata?.entity_type || "general",
-        entity_name: doc.metadata?.entity_name || null,
-        attributes: doc.metadata?.attributes || {},
-        search_terms: doc.metadata?.search_terms || [],
+        content: combinedText || doc.content,
+        title: meta.title || "",
+        metaDescription: meta.metaDescription || "",
+        canonicalUrl: meta.canonicalUrl || null,
+        language: meta.language || "en",
+        pageType: meta.pageType || keptSections[0]?.pageType || "generic",
+        entity_type:
+          meta.entity_type || keptSections[0]?.entity_type || "general",
+        entity_name: meta.entity_name || keptSections[0]?.entity_name || null,
+        attributes: meta.attributes || keptSections[0]?.attributes || {},
+        search_terms: meta.search_terms || [],
         classification_confidence:
-          typeof doc.metadata?.classification_confidence === "number"
-            ? doc.metadata.classification_confidence
-            : 0,
+          typeof meta.classification_confidence === "number"
+            ? meta.classification_confidence
+            : keptSections[0]?.classification_confidence || 0,
         classification_reason:
-          doc.metadata?.classification_reason || "phase3",
+          meta.classification_reason ||
+          keptSections[0]?.classification_reason ||
+          "phase3",
         type: doc.type !== undefined ? doc.type : 0,
       });
+      page.quality_score = bestQuality;
+      page.content_hash = content_hash;
 
-      // --- Phase 2: quality gate ---
-      const quality = scoreQuality(page.text, { title: page.title });
-      page.quality_score = quality.score;
-
-      if (!quality.pass || quality.score < qualityThreshold) {
+      if (keptSections.length === 0) {
         chunkCountPerUrl[url] = 0;
         skippedUrls.push(url);
         resultsByUrl[url] = {
           success: true,
           skipped: "low_quality",
-          skipReason: quality.reasons.join(",") || "below_threshold",
-          qualityScore: quality.score,
-          contentHash: page.content_hash,
+          skipReason: "all_sections_below_threshold",
+          qualityScore: bestQuality,
+          contentHash: content_hash,
           page,
         };
         if (onProgress) {
@@ -138,8 +217,8 @@ async function processPageDocuments(
 
       if (
         existing?.contentHash &&
-        page.content_hash &&
-        existing.contentHash === page.content_hash
+        content_hash &&
+        existing.contentHash === content_hash
       ) {
         chunkCountPerUrl[url] = 0;
         skippedUrls.push(url);
@@ -147,8 +226,8 @@ async function processPageDocuments(
           success: true,
           skipped: "unchanged",
           skipReason: "content_hash_match",
-          qualityScore: quality.score,
-          contentHash: page.content_hash,
+          qualityScore: bestQuality,
+          contentHash: content_hash,
           page,
         };
         if (onProgress) {
@@ -162,13 +241,31 @@ async function processPageDocuments(
         continue;
       }
 
-      // --- Phase 4: structure-aware chunking ---
-      const chunks = await structureAwareChunk(page.text, {
-        chunkSize,
-        chunkOverlap,
-      });
-      chunkCountPerUrl[url] = chunks.length;
-      totalChunks += chunks.length;
+      // --- Phase 4: structure-aware chunking per section ---
+      const allChunks = [];
+      for (const section of keptSections) {
+        const parts = await structureAwareChunk(section.content, {
+          chunkSize,
+          chunkOverlap,
+        });
+        for (const part of parts) {
+          allChunks.push({
+            text: part.text,
+            heading_path: part.heading_path || "",
+            pageType: section.pageType,
+            entity_type: section.entity_type,
+            entity_name: section.entity_name,
+            attributes: section.attributes,
+            search_terms: section.search_terms,
+            classification_confidence: section.classification_confidence,
+            classification_reason: section.classification_reason,
+            quality_score: section.quality_score,
+          });
+        }
+      }
+
+      chunkCountPerUrl[url] = allChunks.length;
+      totalChunks += allChunks.length;
 
       await emitAggregateProgress({
         docIndex,
@@ -181,7 +278,7 @@ async function processPageDocuments(
         userId,
         agentId,
         page,
-        chunks,
+        chunks: allChunks,
         vectorStore,
         onProgress: onProgress
           ? async (event) => {
@@ -230,10 +327,11 @@ async function processPageDocuments(
         }
         resultsByUrl[url] = {
           success: true,
-          chunkCount: chunks.length,
+          chunkCount: allChunks.length,
+          sectionCount: keptSections.length,
           page,
-          contentHash: page.content_hash,
-          qualityScore: quality.score,
+          contentHash: content_hash,
+          qualityScore: bestQuality,
         };
       }
     } catch (err) {
@@ -265,6 +363,7 @@ async function processPageDocuments(
 
 module.exports = {
   processPageDocuments,
+  resolveSections,
   DEFAULT_CHUNK_SIZE,
   DEFAULT_CHUNK_OVERLAP,
   CHARS_PER_TOKEN,

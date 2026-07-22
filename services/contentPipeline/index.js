@@ -21,6 +21,7 @@ const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
 const { checkCanonicalDuplicate } = require("./canonicalDedupe");
 const { extractProductContent } = require("./extractors/product");
 const { extractWithReadability } = require("./extractors/contentReadability");
+const { extractFaqContent } = require("./extractors/faq");
 const {
   structureAwareChunk,
   splitByHeadings,
@@ -52,6 +53,7 @@ module.exports = {
   checkCanonicalDuplicate,
   extractProductContent,
   extractWithReadability,
+  extractFaqContent,
   structureAwareChunk,
   splitByHeadings,
   DEFAULT_CHUNK_CHARS,

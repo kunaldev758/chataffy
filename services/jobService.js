@@ -307,6 +307,7 @@ const processWebPage = async (
       classification_confidence,
       classification_reason,
       extraction_source,
+      sections,
     } = extracted;
 
     const isHomepage = isHomepageUrl(webPageURL);
@@ -369,6 +370,7 @@ const processWebPage = async (
           : 0,
       classification_reason: classification_reason || "rules",
       extraction_source: extraction_source || "generic",
+      sections: Array.isArray(sections) ? sections : undefined,
     };
   } catch (error) {
     console.error("Error processing webpage:", error);
@@ -661,6 +663,7 @@ new Worker(
             classification_confidence,
             classification_reason,
             extraction_source,
+            sections,
           } = processResult;
 
           // Phase 2: skip if this page's canonical is already covered by another URL
@@ -812,6 +815,7 @@ new Worker(
                     : 0,
                 classification_reason: classification_reason || "rules",
                 extraction_source: extraction_source || "generic",
+                sections: Array.isArray(sections) ? sections : undefined,
                 type: "webpage",
               },
               originalUrl: url,
@@ -1464,6 +1468,7 @@ new Worker(
             classification_confidence,
             classification_reason,
             extraction_source,
+            sections,
           } = processResult;
 
           // Phase 2: canonical duplicate — leave existing vectors of the canonical page
@@ -1525,6 +1530,7 @@ new Worker(
                     : 0,
                 classification_reason: classification_reason || "rules",
                 extraction_source: extraction_source || "generic",
+                sections: Array.isArray(sections) ? sections : undefined,
                 type: "webpage",
               },
               originalUrl: url,

@@ -8,15 +8,32 @@ function asArray(value) {
 }
 
 function walkJsonLd(nodes, visit) {
-  for (const node of asArray(nodes)) {
-    if (!node || typeof node !== "object") continue;
+  const seen = new WeakSet();
+  const visitNode = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (seen.has(node)) return;
+    seen.add(node);
     visit(node);
-    if (node["@graph"]) walkJsonLd(node["@graph"], visit);
-  }
+    if (Array.isArray(node)) {
+      for (const item of node) visitNode(item);
+      return;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "@context") continue;
+      if (value && typeof value === "object") visitNode(value);
+    }
+  };
+  for (const node of asArray(nodes)) visitNode(node);
 }
 
 function typeList(node) {
-  return asArray(node["@type"]).map((t) => String(t).toLowerCase());
+  return asArray(node["@type"]).map((t) =>
+    String(t || "")
+      .toLowerCase()
+      .replace(/^https?:\/\/schema\.org\//, "")
+      .replace(/^schema\.org\//, "")
+      .trim(),
+  );
 }
 
 function pickOffer(node) {
@@ -35,12 +52,17 @@ function normalizeAvailability(raw) {
 
 /**
  * Extract Product / Offer fields from JSON-LD blocks.
+ * Merges nested ProductGroup → hasVariant → Offer so price/SKU are not dropped.
  */
 function extractProductFromJsonLd(jsonLdBlocks = []) {
   let best = null;
 
+  const attrRichness = (attrs = {}) => Object.keys(attrs).length;
+
   walkJsonLd(jsonLdBlocks, (node) => {
     const types = typeList(node);
+    const isVariantProduct = types.includes("product");
+    const isGroup = types.includes("productgroup");
     const isProduct = types.some((t) =>
       ["product", "productgroup", "individualproduct"].includes(t),
     );
@@ -74,21 +96,50 @@ function extractProductFromJsonLd(jsonLdBlocks = []) {
       size: node.size || null,
     };
 
-    // Drop nulls
     for (const k of Object.keys(attrs)) {
       if (attrs[k] == null || Number.isNaN(attrs[k])) delete attrs[k];
     }
+
+    // Prefer concrete Product/Offer over ProductGroup shell
+    let confidence = 0.6;
+    if (isVariantProduct || types.includes("individualproduct")) confidence = 0.95;
+    else if (isGroup) confidence = 0.88;
+    else if (isProduct) confidence = 0.92;
+    else if (types.includes("offer")) confidence = 0.7;
 
     const candidate = {
       entity_name: name || null,
       description,
       attributes: attrs,
-      confidence: isProduct ? 0.92 : 0.6,
+      confidence,
       source: "json_ld",
     };
 
-    if (!best || candidate.confidence > best.confidence) {
+    if (!best) {
       best = candidate;
+      return;
+    }
+
+    // Merge attributes into best (fill missing keys from any product/offer node)
+    for (const [k, v] of Object.entries(attrs)) {
+      if (best.attributes[k] == null && v != null) {
+        best.attributes[k] = v;
+      }
+    }
+    if (!best.description && description) best.description = description;
+    if (
+      candidate.confidence > best.confidence ||
+      (candidate.confidence === best.confidence &&
+        attrRichness(attrs) > attrRichness(best.attributes))
+    ) {
+      best = {
+        ...candidate,
+        attributes: { ...attrs, ...best.attributes, ...attrs },
+        description: candidate.description || best.description,
+        entity_name: candidate.entity_name || best.entity_name,
+      };
+    } else if (!best.entity_name && candidate.entity_name) {
+      best.entity_name = candidate.entity_name;
     }
   });
 
@@ -213,6 +264,10 @@ function extractProductContent({ url, html, jsonLdBlocks = [] }) {
   if (content.length < 120 && html) {
     const $ = cheerio.load(html);
     $("script, style, noscript, nav, footer, header").remove();
+    // Avoid pulling FAQ accordion into the product section when FAQ is separate
+    $(
+      "[itemtype*='FAQPage'], .faq, .faqs, #faq, [class*='faq-section'], [id*='faq']",
+    ).remove();
     const turndown = new TurndownService({ headingStyle: "atx" });
     const bodyMd = turndown.turndown(
       $("main, [role='main'], .product, .product-detail, body").first().html() ||

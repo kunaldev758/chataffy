@@ -78,15 +78,42 @@ function clamp01(n) {
   return Math.max(0, Math.min(1, Number(n) || 0));
 }
 
+/** Normalize schema.org @type (handles https://schema.org/Product etc.). */
+function normalizeSchemaType(raw) {
+  return String(raw || "")
+    .toLowerCase()
+    .trim()
+    .replace(/^https?:\/\/schema\.org\//, "")
+    .replace(/^schema\.org\//, "");
+}
+
+const PRODUCT_SCHEMA_KEYS = new Set([
+  "product",
+  "productgroup",
+  "individualproduct",
+  "offer",
+  "aggregateoffer",
+]);
+
+const FAQ_SCHEMA_KEYS = new Set(["faqpage", "question"]);
+
+function schemaHasProduct(schemaTypes = []) {
+  return schemaTypes.some((t) => PRODUCT_SCHEMA_KEYS.has(normalizeSchemaType(t)));
+}
+
+function schemaHasFaq(schemaTypes = []) {
+  return schemaTypes.some((t) => FAQ_SCHEMA_KEYS.has(normalizeSchemaType(t)));
+}
+
 function scoreFromSchema(schemaTypes = []) {
+  const hasProduct = schemaHasProduct(schemaTypes);
   let best = null;
   for (const raw of schemaTypes) {
-    const key = String(raw || "")
-      .toLowerCase()
-      .replace(/^schema\.org\//, "")
-      .trim();
+    const key = normalizeSchemaType(raw);
     const mapped = SCHEMA_TO_PAGE[key];
     if (!mapped) continue;
+    // FAQPage often coexists on PDPs — do not let it beat Product for primary type
+    if (hasProduct && mapped.pageType === "faq") continue;
     if (!best || mapped.weight > best.weight) {
       best = { ...mapped, reason: `schema:${key}` };
     }
@@ -206,6 +233,33 @@ function detectPageType({
   // Prefer schema strongly; otherwise take highest weight, boost if URL+schema agree
   candidates.sort((a, b) => b.weight - a.weight);
   let best = candidates[0];
+
+  // PDP conflict: product URL/schema must win over FAQ DOM/text/schema leftovers
+  const urlIsProduct = fromUrl?.pageType === "product";
+  const productInSchema = schemaHasProduct(schemaTypes);
+  if (
+    best.pageType === "faq" &&
+    (productInSchema || urlIsProduct)
+  ) {
+    const productCandidate =
+      candidates.find((c) => c.pageType === "product") ||
+      (urlIsProduct ? fromUrl : null) ||
+      (productInSchema
+        ? {
+            pageType: "product",
+            entity_type: "product",
+            weight: 0.9,
+            reason: "schema:product_preferred",
+          }
+        : null);
+    if (productCandidate) {
+      best = {
+        ...productCandidate,
+        reason: `${productCandidate.reason}+prefer_product_over_faq`,
+      };
+    }
+  }
+
   const agreeing = candidates.filter(
     (c) => c.pageType === best.pageType || c.entity_type === best.entity_type,
   );
@@ -223,14 +277,23 @@ function detectPageType({
 
   confidence = clamp01(confidence);
   const needsLlm = confidence < RULE_CONFIDENCE_THRESHOLD;
+  const secondaryFaq =
+    schemaHasFaq(schemaTypes) && pageType === "product"
+      ? true
+      : Boolean(
+          pageType === "product" &&
+            candidates.some((c) => c.pageType === "faq"),
+        );
 
   return {
     pageType,
     entity_type,
     confidence,
-    reason: agreeing.map((c) => c.reason).join("+"),
+    reason: agreeing.map((c) => c.reason).join("+") || best.reason,
     needsLlm,
     sources: agreeing.map((c) => c.reason),
+    /** Hint for multi-section: FAQ coexists on a product page */
+    secondaryFaq,
   };
 }
 
@@ -238,4 +301,7 @@ module.exports = {
   detectPageType,
   RULE_CONFIDENCE_THRESHOLD,
   SCHEMA_TO_PAGE,
+  normalizeSchemaType,
+  schemaHasProduct,
+  schemaHasFaq,
 };

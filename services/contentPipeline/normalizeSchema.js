@@ -61,7 +61,7 @@ function normalizeToCommonSchema({
 }
 
 /**
- * Normalize chunk list to { text, heading_path }[].
+ * Normalize chunk list to { text, heading_path, ...sectionOverrides }[].
  * Accepts plain strings (legacy) or chunk objects.
  */
 function normalizeChunkList(chunks) {
@@ -75,6 +75,14 @@ function normalizeChunkList(chunks) {
         return {
           text: String(c.text || c.pageContent || "").trim(),
           heading_path: c.heading_path || "",
+          pageType: c.pageType,
+          entity_type: c.entity_type,
+          entity_name: c.entity_name,
+          attributes: c.attributes,
+          search_terms: c.search_terms,
+          classification_confidence: c.classification_confidence,
+          classification_reason: c.classification_reason,
+          quality_score: c.quality_score,
         };
       }
       return null;
@@ -86,6 +94,7 @@ function normalizeChunkList(chunks) {
  * Build LangChain-style docs for QdrantService.upsertDocuments.
  * - pageContent / payload.text = clean chunk (NO prefix)
  * - metadata.embeddingText = prefixed string for embed only
+ * Chunk-level entity_type / attributes override page defaults (multi-section).
  */
 function pageToUpsertDocuments(page, chunks) {
   const normalized = normalizeChunkList(chunks);
@@ -95,12 +104,36 @@ function pageToUpsertDocuments(page, chunks) {
     const pageForChunk = {
       ...page,
       heading_path: chunk.heading_path || "",
+      pageType: chunk.pageType || page.pageType,
+      entity_type: chunk.entity_type || page.entity_type,
+      entity_name:
+        chunk.entity_name !== undefined && chunk.entity_name !== null
+          ? chunk.entity_name
+          : page.entity_name,
+      attributes:
+        chunk.attributes && typeof chunk.attributes === "object"
+          ? chunk.attributes
+          : page.attributes,
+      search_terms: Array.isArray(chunk.search_terms)
+        ? chunk.search_terms
+        : page.search_terms,
+      classification_confidence:
+        typeof chunk.classification_confidence === "number"
+          ? chunk.classification_confidence
+          : page.classification_confidence,
+      classification_reason:
+        chunk.classification_reason || page.classification_reason,
+      quality_score:
+        typeof chunk.quality_score === "number"
+          ? chunk.quality_score
+          : page.quality_score,
+      source_type: chunk.pageType || page.source_type || page.pageType,
     };
     const payload = buildQdrantChunkPayload(pageForChunk, chunk.text, {
       chunkIndex: index,
       totalChunks: total,
     });
-    const embeddingText = applyEmbeddingPrefix(chunk.text, page, {
+    const embeddingText = applyEmbeddingPrefix(chunk.text, pageForChunk, {
       heading_path: chunk.heading_path,
     });
 

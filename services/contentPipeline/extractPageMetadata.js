@@ -26,19 +26,30 @@ function extractPageMetadata($, url) {
       const raw = $(el).contents().text() || $(el).text();
       const parsed = JSON.parse(raw);
       jsonLdBlocks.push(parsed);
+      const seen = new WeakSet();
       const collect = (node) => {
-        if (!node) return;
-        if (Array.isArray(node)) return node.forEach(collect);
-        if (typeof node === "object") {
-          const t = node["@type"];
-          if (typeof t === "string") schemaTypes.push(t.toLowerCase());
-          else if (Array.isArray(t)) {
-            t.forEach(
-              (x) =>
-                typeof x === "string" && schemaTypes.push(x.toLowerCase()),
-            );
-          }
-          if (node["@graph"]) collect(node["@graph"]);
+        if (!node || typeof node !== "object") return;
+        if (seen.has(node)) return;
+        seen.add(node);
+        if (Array.isArray(node)) {
+          node.forEach(collect);
+          return;
+        }
+        const t = node["@type"];
+        const pushType = (rawType) => {
+          if (typeof rawType !== "string") return;
+          const key = rawType
+            .toLowerCase()
+            .replace(/^https?:\/\/schema\.org\//, "")
+            .replace(/^schema\.org\//, "")
+            .trim();
+          if (key) schemaTypes.push(key);
+        };
+        if (typeof t === "string") pushType(t);
+        else if (Array.isArray(t)) t.forEach(pushType);
+        for (const [key, value] of Object.entries(node)) {
+          if (key === "@context") continue;
+          if (value && typeof value === "object") collect(value);
         }
       };
       collect(parsed);
