@@ -78,6 +78,17 @@ const {
   AWAITING_FOLLOW_UP,
 } = require("../services/conversationStateService");
 const Conversation = require("../models/Conversation");
+const {
+  buildRetrievalStrategy,
+  broadenRetrievalStrategy,
+  buildQdrantHardFilter,
+  buildQdrantHardFilterLegacyCompatible,
+  rerankWithMetadata,
+  selectDiverseMatches,
+  evaluateRetrievalConfidence,
+  buildSectionAwareContextBlocks,
+  entityTypeMix,
+} = require("../services/retrieval");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -950,14 +961,33 @@ class QuestionAnsweringSystem {
         requestedCount,
       });
     } else {
-      // "brief" and "contact" modes: use page-merge context builder.
-      // Falls back to getRelevantContext automatically when collectionName/userId are absent.
-      context = await this.buildPageMergeContext(matches, {
-        ...contextLimits,
-        collectionName: answerOptions.collectionName,
-        userId: answerOptions.userId,
-        agentId: answerOptions.agentId,
-      });
+      // Prefer section-aware context when we have entity_type on payloads
+      const hasEntityMeta = (matches || []).some(
+        (m) => m?.payload?.entity_type || m?.entity_type,
+      );
+      if (hasEntityMeta && answerOptions.retrievalStrategy) {
+        context = buildSectionAwareContextBlocks(
+          matches,
+          answerOptions.retrievalStrategy,
+          contextLimits,
+        );
+        if (!context || context.length < 40) {
+          context = await this.buildPageMergeContext(matches, {
+            ...contextLimits,
+            collectionName: answerOptions.collectionName,
+            userId: answerOptions.userId,
+            agentId: answerOptions.agentId,
+          });
+        }
+      } else {
+        // "brief" and "contact" modes: use page-merge context builder.
+        context = await this.buildPageMergeContext(matches, {
+          ...contextLimits,
+          collectionName: answerOptions.collectionName,
+          userId: answerOptions.userId,
+          agentId: answerOptions.agentId,
+        });
+      }
     }
 
     console.log(
@@ -1239,9 +1269,23 @@ class QuestionAnsweringSystem {
     catalogKeywords,
     getQuestionEmbedding,
     queryAttributes,
+    retrievalStrategy = null,
+    agentId = null,
   }) {
+    const strategy =
+      retrievalStrategy ||
+      buildRetrievalStrategy({
+        route: queryAttributes?.route,
+        subIntent: queryAttributes?.subIntent,
+        queryAttributes,
+        requestedTopK: semanticTopK,
+      });
+
+    const topK = strategy.topK || semanticTopK || 8;
     const runKeyword =
-      needsKeywordRetrieval(queryAttributes) && catalogKeywords?.length > 0;
+      (strategy.useKeyword !== false) &&
+      needsKeywordRetrieval(queryAttributes) &&
+      catalogKeywords?.length > 0;
 
     const sizeKeywords = (queryAttributes?.sizes || []).map((s) =>
       s.replace(/\s/g, "").toLowerCase(),
@@ -1254,9 +1298,13 @@ class QuestionAnsweringSystem {
       this.queryQdrant(
         collectionName,
         await getQuestionEmbedding(),
-        semanticTopK,
+        topK,
         userIdString,
-        { sizes: queryAttributes?.sizes },
+        {
+          sizes: queryAttributes?.sizes,
+          strategy,
+          agentId,
+        },
       ),
       runKeyword
         ? this.structuralFetchByKeywords(
@@ -1275,12 +1323,24 @@ class QuestionAnsweringSystem {
 
     if (runKeyword) {
       console.log(
-        `[QueryController] Hybrid retrieval: ${vectorResults.length} vector + ${keywordPoints.length} keyword hits`,
+        `[QueryController] Hybrid retrieval: ${vectorResults.length} vector + ${keywordPoints.length} keyword hits | strategy=${strategy.reason}`,
       );
     }
 
     const merged = this.mergeRetrievalResults(vectorResults, keywordPoints);
-    return this.applyAttributeRerank(merged, queryAttributes, "hybrid");
+    const reranked = rerankWithMetadata(merged, queryAttributes, strategy, {
+      subIntent: queryAttributes?.subIntent,
+    });
+    const diverse = selectDiverseMatches(reranked, {
+      limit: Math.max(topK, 12),
+      minTypes: 2,
+    });
+
+    console.log(
+      `[QueryController] Rerank+diversity: ${merged.length} → ${diverse.length} | mix=${JSON.stringify(entityTypeMix(diverse))}`,
+    );
+
+    return diverse;
   }
 
   /**
@@ -2539,66 +2599,103 @@ ${answerInstructions}`;
         }
       }
 
-      // First try with user_id filter
+      // First try with user_id / strategy hard filters
       let searchResult = [];
       const sizeTokens = (options.sizes || [])
         .map((s) => s.replace(/\s/g, "").toLowerCase())
         .filter(Boolean);
+      const strategy = options.strategy || null;
+      const agentId = options.agentId || null;
 
-      const buildFilter = (withSizeBoost = false) => {
-        const must = [];
-        if (userId) {
-          must.push({
-            key: "user_id",
-            match: { value: userId.toString() },
+      const tryEnsureIndex = async (field_name) => {
+        try {
+          await this.qdrantClient.createPayloadIndex(collectionName, {
+            field_name,
+            field_schema: "keyword",
           });
+        } catch (e) {
+          if (!e.message?.includes("already exists")) {
+            console.warn(
+              `[QueryController] index ${field_name}: ${e.message}`,
+            );
+          }
         }
-        if (withSizeBoost && sizeTokens.length > 0) {
-          must.push({
-            key: "sizes",
-            match: { any: sizeTokens },
-          });
-        }
-        return must.length > 0 ? { must } : undefined;
       };
 
       if (userId) {
         try {
+          await tryEnsureIndex("entity_type");
+          await tryEnsureIndex("pageType");
+          await tryEnsureIndex("is_active");
+          if (agentId) await tryEnsureIndex("agent_id");
           if (sizeTokens.length > 0) {
+            await tryEnsureIndex("sizes");
+          }
+
+          // Pass 1: full hard filter (incl. is_active + entity_type when set)
+          let filter = buildQdrantHardFilter({
+            userId,
+            agentId,
+            strategy,
+            includeInactive: false,
+          });
+
+          if (filter) {
             try {
-              await this.qdrantClient.createPayloadIndex(collectionName, {
-                field_name: "sizes",
-                field_schema: "keyword",
+              searchResult = await this.qdrantClient.search(collectionName, {
+                vector: queryEmbedding,
+                limit: topK,
+                with_payload: true,
+                filter,
               });
-            } catch (e) {
-              if (!e.message?.includes("already exists")) {
-                console.warn(`[QueryController] sizes index: ${e.message}`);
-              }
+              console.log(
+                `[QueryController] Query hard-filter returned ${searchResult.length} results (strategy=${strategy?.reason || "none"})`,
+              );
+            } catch (activeErr) {
+              // Legacy collections may lack is_active — fall through
+              console.warn(
+                `[QueryController] is_active filter failed: ${activeErr.message}`,
+              );
             }
           }
 
-          const sizedFilter = buildFilter(sizeTokens.length > 0);
-          if (sizedFilter) {
+          // Pass 2: legacy-compatible (no is_active) if empty
+          if (searchResult.length === 0) {
+            filter = buildQdrantHardFilterLegacyCompatible({
+              userId,
+              agentId,
+              strategy,
+            });
             searchResult = await this.qdrantClient.search(collectionName, {
               vector: queryEmbedding,
               limit: topK,
               with_payload: true,
-              filter: sizedFilter,
+              filter,
             });
             console.log(
-              `[QueryController] Query with size filter [${sizeTokens.join(", ")}] returned ${searchResult.length} results`,
+              `[QueryController] Query legacy filter returned ${searchResult.length} results`,
             );
           }
 
-          if (searchResult.length === 0) {
+          // Pass 3: drop entity hard filter if still empty (will retry broaden at higher level)
+          if (
+            searchResult.length === 0 &&
+            strategy?.hardFilterEntity &&
+            strategy.preferredEntityTypes?.length
+          ) {
+            const loose = buildQdrantHardFilterLegacyCompatible({
+              userId,
+              agentId,
+              strategy: { ...strategy, hardFilterEntity: false },
+            });
             searchResult = await this.qdrantClient.search(collectionName, {
               vector: queryEmbedding,
               limit: topK,
               with_payload: true,
-              filter: buildFilter(false),
+              filter: loose,
             });
             console.log(
-              `[QueryController] Query with user_id filter returned ${searchResult.length} results`,
+              `[QueryController] Query without entity hard-filter returned ${searchResult.length} results`,
             );
           }
         } catch (filterError) {
@@ -2905,6 +3002,40 @@ ${answerInstructions}`;
 
       const langOpts = { userLanguage: routing.userLanguage };
 
+      // Off-topic: polite redirect, no retrieval
+      if (routing.isTrulyOffTopic === true) {
+        console.log(
+          `[QueryController] Truly off-topic — skipping retrieval`,
+        );
+        const offTopicResult = await generateOffTopicReply({
+          companyName,
+          userMessage: question,
+          userLanguage: routing.userLanguage || websiteLanguage,
+          websiteLanguage,
+          isIrrelevant: true,
+          userId,
+          agentId,
+          conversationId,
+        }).catch(() => null);
+
+        const answer =
+          offTopicResult?.answer ||
+          `<p>I'm here to help with questions about ${companyName}. Could you ask something related to our products or services?</p>`;
+
+        await this.persistRagStateForTurn(conversationId, {
+          routing,
+          ragState,
+          clear: true,
+          isOffTopic: true,
+        });
+        return {
+          success: true,
+          answer,
+          conversationId,
+          isAgentRequest: false,
+        };
+      }
+
       if (routing.route === ROUTES.GREETING) {
         // if (!isPureGreeting(question)) {
         //   console.log(
@@ -3113,6 +3244,17 @@ ${answerInstructions}`;
         subIntent: effectiveSubIntent,
       });
 
+      let retrievalStrategy = buildRetrievalStrategy({
+        route: routing.route,
+        subIntent: effectiveSubIntent,
+        queryAttributes,
+        requestedTopK,
+      });
+
+      console.log(
+        `[QueryController] Retrieval strategy: ${retrievalStrategy.reason} | mode=${retrievalStrategy.mode} | entities=${JSON.stringify(retrievalStrategy.preferredEntityTypes)} | hardEntity=${retrievalStrategy.hardFilterEntity}`,
+      );
+
       // console.log(
       //   `[QueryController] Attributes: sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length} flags=${JSON.stringify(queryAttributes.flags)}`
       // );
@@ -3231,6 +3373,8 @@ ${answerInstructions}`;
         semanticTopK = Math.max(semanticTopK, 15);
       }
 
+      semanticTopK = Math.max(semanticTopK, retrievalStrategy.topK || 0);
+
       let queryResponse = await this.runHybridRetrieval({
         collectionName,
         userIdString,
@@ -3238,7 +3382,74 @@ ${answerInstructions}`;
         catalogKeywords,
         getQuestionEmbedding,
         queryAttributes,
+        retrievalStrategy,
+        agentId: agentId?.toString?.() || agentId,
       });
+
+      let confidenceEval = evaluateRetrievalConfidence(
+        queryResponse,
+        retrievalStrategy,
+      );
+      console.log(
+        `[QueryController] Retrieval confidence: high=${confidenceEval.high} score=${confidenceEval.score.toFixed(2)} reasons=${confidenceEval.reasons.join(",")}`,
+      );
+
+      // One-shot broaden retry when confidence is low
+      if (!confidenceEval.high && !retrievalStrategy.broadened) {
+        const broadened = broadenRetrievalStrategy(retrievalStrategy);
+        console.log(
+          `[QueryController] Broadening retrieval once: ${broadened.reason}`,
+        );
+        const retryMatches = await this.runHybridRetrieval({
+          collectionName,
+          userIdString,
+          semanticTopK: broadened.topK,
+          catalogKeywords,
+          getQuestionEmbedding,
+          queryAttributes,
+          retrievalStrategy: broadened,
+          agentId: agentId?.toString?.() || agentId,
+        });
+        const retryConf = evaluateRetrievalConfidence(retryMatches, broadened);
+        if (
+          retryConf.score > confidenceEval.score ||
+          retryMatches.length > queryResponse.length
+        ) {
+          queryResponse = retryMatches;
+          confidenceEval = retryConf;
+          retrievalStrategy = broadened;
+          console.log(
+            `[QueryController] Using broadened results: conf=${retryConf.score.toFixed(2)} matches=${retryMatches.length}`,
+          );
+        }
+      }
+
+      // Honest fallback when still too weak
+      if (
+        !confidenceEval.high &&
+        (queryResponse.length === 0 || confidenceEval.score < 0.25)
+      ) {
+        console.log(
+          `[QueryController] Honest fallback — insufficient retrieval evidence`,
+        );
+        const fallbackAnswer = `<p>I couldn't find enough information about that in ${companyName}'s knowledge base. Could you rephrase, or ask about a specific product or topic?</p>`;
+        await this.persistRagStateForTurn(conversationId, {
+          routing,
+          ragState,
+          retrievalQuery,
+          baseForEmbedding,
+          queryAttributes,
+          matches: queryResponse,
+          assistantAnswer: fallbackAnswer,
+        });
+        return {
+          success: true,
+          answer: fallbackAnswer,
+          conversationId,
+          isAgentRequest: false,
+          lowRetrievalConfidence: true,
+        };
+      }
 
       // console.log("queryResponse data is : ", queryResponse);
 
@@ -3672,7 +3883,7 @@ ${answerInstructions}`;
           chatHistory: getChatHistoryFormatted(historyLimit),
           organisation: companyName,
           websiteData,
-          answerOptions: {
+            answerOptions: {
             responseMode,
             requestedCount,
             wantsProductUrls: wantsUrls,
@@ -3681,6 +3892,7 @@ ${answerInstructions}`;
             // Pass the LLM router's subIntent so determineMaxTokens uses it
             // instead of re-running English-only keyword classification.
             subIntent: effectiveSubIntent || null,
+            retrievalStrategy,
             // Pass Qdrant access params so buildPageMergeContext can expand pages
             collectionName,
             userId: userIdString,

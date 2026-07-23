@@ -15,7 +15,10 @@ function payloadText(match) {
 
 function payloadSizes(match) {
   const p = match.payload || match;
+  const attrs =
+    p.attributes && typeof p.attributes === "object" ? p.attributes : {};
   const fromPayload = (p.sizes || []).map(normalizeSize);
+  const fromAttrs = [].concat(attrs.sizes || []).map(normalizeSize);
   const fromTerms = (p.search_terms || [])
     .filter((t) => /\dmm$/i.test(String(t)))
     .map(normalizeSize);
@@ -24,7 +27,9 @@ function payloadSizes(match) {
   for (const m of text.matchAll(SIZE_PATTERN)) {
     fromText.push(normalizeSize(m[0]));
   }
-  return [...new Set([...fromPayload, ...fromTerms, ...fromText])];
+  return [
+    ...new Set([...fromPayload, ...fromAttrs, ...fromTerms, ...fromText]),
+  ];
 }
 
 function payloadCollections(match) {
