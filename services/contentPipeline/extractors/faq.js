@@ -45,6 +45,66 @@ function answerText(answerNode) {
   return "";
 }
 
+const FACET_SUMMARY_RE =
+  /^(collections?|categories|filter|filters|sort|sorting|availability|price|size|color|colour|brand|vendor|product type|type|tags?|material|style|fit)$/i;
+
+const FACET_ANCESTOR_RE =
+  /facet|filter|sidebar|collection-sidebar|refinement|nav-section/i;
+
+/** "EVA (7)" / "Super Soft (8 products)" facet count lines */
+const FACET_COUNT_LINE_RE =
+  /^[\w][\w\s/&'-]{0,40}\(\d+(?:\s+products?)?\)$/i;
+
+/**
+ * True when a details/summary block is a collection filter facet, not FAQ.
+ */
+function isFacetFilterBlock($, el, question, answer) {
+  const $el = $(el);
+  const summary = String(question || "").replace(/\s+/g, " ").trim();
+  const body = String(answer || "").replace(/\s+/g, " ").trim();
+
+  if (FACET_SUMMARY_RE.test(summary)) return true;
+
+  const classId = [
+    $el.attr("class") || "",
+    $el.attr("id") || "",
+    $el.parents("[class],[id]").slice(0, 6).map((_, p) => {
+      return `${$(p).attr("class") || ""} ${$(p).attr("id") || ""}`;
+    }).get().join(" "),
+  ].join(" ");
+
+  if (FACET_ANCESTOR_RE.test(classId)) return true;
+
+  if (
+    $el.closest(
+      "aside, [role='complementary'], .facets, .filters, [class*='facet'], [class*='Facet'], [id*='Facet'], [class*='filter'], facet-filters-form",
+    ).length
+  ) {
+    return true;
+  }
+
+  // Body is mostly "Label (N)" facet count rows
+  const lines = body
+    .split(/(?<=\))\s+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length >= 2) {
+    const facetLines = lines.filter((l) => FACET_COUNT_LINE_RE.test(l));
+    if (facetLines.length / lines.length >= 0.6) return true;
+  }
+
+  // Compact facet blob: several "Name (N)" patterns, little prose
+  const countHits = body.match(/\(\d+(?:\s+products?)?\)/g) || [];
+  if (countHits.length >= 3 && body.length < countHits.length * 48) {
+    return true;
+  }
+
+  // Filter UI chrome
+  if (/\b(clear|apply)\b/i.test(body) && countHits.length >= 2) return true;
+
+  return false;
+}
+
 /**
  * Extract FAQ Q/A pairs from JSON-LD FAQPage / Question nodes.
  * @returns {{ pairs: { question: string, answer: string }[], source: string } | null}
@@ -97,6 +157,7 @@ function extractFaqFromJsonLd(jsonLdBlocks = []) {
 
 /**
  * Light DOM fallback: details/summary or .faq blocks.
+ * Skips collection/filter facet accordions (Shopify sidebars, etc.).
  */
 function extractFaqFromDom(html) {
   if (!html) return null;
@@ -104,10 +165,11 @@ function extractFaqFromDom(html) {
   const pairs = [];
   const seen = new Set();
 
-  const push = (q, a) => {
+  const push = (q, a, el = null) => {
     const question = String(q || "").trim();
     const answer = String(a || "").trim();
     if (!question || !answer || answer.length < 8) return;
+    if (el && isFacetFilterBlock($, el, question, answer)) return;
     const key = question.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
@@ -118,12 +180,20 @@ function extractFaqFromDom(html) {
     const q = $(el).children("summary").first().text();
     const $clone = $(el).clone();
     $clone.children("summary").remove();
-    push(q, $clone.text());
+    push(q, $clone.text(), el);
   });
 
   $(".faq, .faqs, [class*='faq-item'], [itemtype*='FAQPage'] li").each(
     (_, el) => {
       const $el = $(el);
+      // Skip if this "faq" node is actually inside a filter sidebar
+      if (
+        $el.closest(
+          "aside, [role='complementary'], .facets, [class*='facet'], [class*='Facet'], facet-filters-form",
+        ).length
+      ) {
+        return;
+      }
       const q =
         $el.find("h2, h3, h4, .question, [itemprop='name']").first().text() ||
         $el.find("strong, b").first().text();
@@ -131,7 +201,7 @@ function extractFaqFromDom(html) {
         $el.find(".answer, [itemprop='acceptedAnswer'], p").last().text() ||
         $el.text();
       if (q && a && a.replace(q, "").trim().length > 8) {
-        push(q, a.replace(q, "").trim());
+        push(q, a.replace(q, "").trim(), el);
       }
     },
   );
@@ -190,4 +260,5 @@ module.exports = {
   extractFaqFromJsonLd,
   extractFaqFromDom,
   faqPairsToMarkdown,
+  isFacetFilterBlock,
 };

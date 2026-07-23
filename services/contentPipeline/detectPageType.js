@@ -155,8 +155,21 @@ function scoreFromDom({ $, title = "", metaDescription = "", textSample = "" } =
     }
     if (
       $('script[type="application/ld+json"]').length === 0 &&
-      ($(".faq, .faqs, [itemtype*='FAQPage'], details summary").length >= 2 ||
-        $("[class*='accordion']").length >= 3)
+      ($(".faq, .faqs, [itemtype*='FAQPage']").length >= 1 ||
+        ($("details summary").filter((_, el) => {
+          const $el = $(el);
+          if (
+            $el.closest(
+              "aside, [role='complementary'], .facets, [class*='facet'], [class*='Facet'], [class*='filter'], facet-filters-form, [class*='sidebar']",
+            ).length
+          ) {
+            return false;
+          }
+          const t = $el.text().replace(/\s+/g, " ").trim();
+          return !/^(collections?|filter|filters|sort|price|size|color|brand|availability)$/i.test(
+            t,
+          );
+        }).length >= 2))
     ) {
       signals.push({
         pageType: "faq",

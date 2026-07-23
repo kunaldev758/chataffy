@@ -27,6 +27,37 @@ const HEADER_SELECTORS = [
   "#menu",
 ].join(", ");
 
+/**
+ * Collection / catalog filter sidebars (Shopify facets, etc.).
+ * These are navigation chrome — not FAQ or product prose for RAG.
+ */
+const FACET_SIDEBAR_SELECTORS = [
+  "aside",
+  "[role='complementary']",
+  ".sidebar",
+  ".side-bar",
+  "#sidebar",
+  ".facets",
+  ".facet",
+  ".filters",
+  ".filter-group",
+  ".collection-filters",
+  ".collection-sidebar",
+  "[class*='facet-']",
+  "[class*='Facet']",
+  "[id*='FacetFilters']",
+  "[id*='Facet-']",
+  "[class*='filter-sidebar']",
+  "[class*='filters-drawer']",
+  "[class*='collection-filter']",
+  "[class*='facets__']",
+  "facet-filters-form",
+  "facet-filters",
+  ".facets-container",
+  ".product-filters",
+  "[data-facets]",
+].join(", ");
+
 const SOCIAL_PLATFORM_LABELS = [
   { pattern: /facebook\.com/i, label: "Facebook" },
   { pattern: /instagram\.com/i, label: "Instagram" },
@@ -123,6 +154,8 @@ function cleanupHtmlDom($, webPageURL, { isHomepage, chromeState } = {}) {
   $(
     "[id*='cookie'], [class*='cookie'], [id*='consent'], [class*='consent'], #onetrust-banner-sdk, .cc-window",
   ).remove();
+  // Collection filter / facet sidebars (not useful as RAG prose)
+  $(FACET_SIDEBAR_SELECTORS).remove();
 
   $("a, img").each((_, el) => {
     const attr = $(el).is("a") ? "href" : "src";
@@ -187,6 +220,7 @@ function cleanupHtmlDom($, webPageURL, { isHomepage, chromeState } = {}) {
 module.exports = {
   FOOTER_SELECTORS,
   HEADER_SELECTORS,
+  FACET_SIDEBAR_SELECTORS,
   isInlineBufferImageUrl,
   stripInlineBufferImageContent,
   getDomainChromeState,

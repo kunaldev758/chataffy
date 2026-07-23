@@ -11,6 +11,7 @@ const DEFAULT_CATEGORIES = [
   "chat",
   "brief-chat", // legacy typo alias used by existing query paths
   "micro-classifier",
+  "content-classifier",
   "website-classifier",
 ];
 
@@ -32,7 +33,7 @@ const DEFAULT_MODELS = [
     model: "gpt-4.1-nano",
     provider: "openai",
     status: "active",
-    categories: ["intent"],
+    categories: ["intent", "content-classifier","website-classifier"],
     inputCost: 0.1,
     outputCost: 0.4,
     cacheCost: 0.025,
@@ -74,7 +75,7 @@ const DEFAULT_MODELS = [
     model: "llama-3.1-8b-instant",
     provider: "groq",
     status: "active",
-    categories: ["micro-classifier", "website-classifier"],
+    categories: ["micro-classifier",],
     inputCost: 0.05,
     outputCost: 0.08,
     cacheCost: 0,

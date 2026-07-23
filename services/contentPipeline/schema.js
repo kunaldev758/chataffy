@@ -21,6 +21,7 @@ const ENTITY_TYPES = Object.freeze([
   "policy",
   "docs",
   "about",
+  "review",
   "general",
 ]);
 

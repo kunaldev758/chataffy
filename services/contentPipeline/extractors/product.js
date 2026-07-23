@@ -260,22 +260,59 @@ function extractProductContent({ url, html, jsonLdBlocks = [] }) {
     url,
   });
 
-  // If structured content is thin, append cleaned main HTML body via turndown
+  // If structured content is thin, append a light cleaned body excerpt only.
+  // Residual section scan owns FAQ / reviews / related / policy blocks.
   if (content.length < 120 && html) {
     const $ = cheerio.load(html);
     $("script, style, noscript, nav, footer, header").remove();
-    // Avoid pulling FAQ accordion into the product section when FAQ is separate
     $(
-      "[itemtype*='FAQPage'], .faq, .faqs, #faq, [class*='faq-section'], [id*='faq']",
+      [
+        "[itemtype*='FAQPage']",
+        ".faq",
+        ".faqs",
+        "#faq",
+        "[class*='faq-section']",
+        "[id*='faq']",
+        ".reviews",
+        "#reviews",
+        ".product-reviews",
+        "[class*='review']",
+        ".related",
+        ".related-products",
+        "[class*='related-product']",
+        ".recommendations",
+        "[class*='recommend']",
+        "[class*='shipping']",
+        "[class*='returns']",
+        "[class*='warranty']",
+        "aside",
+        "[role='complementary']",
+        ".facets",
+        ".filters",
+        "[class*='facet-']",
+        "[class*='Facet']",
+        "[id*='FacetFilters']",
+        "[class*='filter-sidebar']",
+        "[class*='collection-filter']",
+        "facet-filters-form",
+      ].join(", "),
     ).remove();
+    // Drop common leftover heading blocks by walking h2+siblings is hard here;
+    // prefer main/product containers over full body.
     const turndown = new TurndownService({ headingStyle: "atx" });
     const bodyMd = turndown.turndown(
-      $("main, [role='main'], .product, .product-detail, body").first().html() ||
-        "",
+      $(
+        "main .product, .product-detail, .product__description, [itemprop='description'], main, [role='main']",
+      )
+        .first()
+        .html() || "",
     );
-    if (bodyMd.trim().length > content.length) {
+    const cleaned = stripInlineBufferImageContent(
+      bodyMd.replace(/\n{3,}/g, "\n\n").trim(),
+    );
+    if (cleaned.length > 40 && cleaned.length > content.length) {
       content = stripInlineBufferImageContent(
-        `${content}\n\n${bodyMd}`.replace(/\n{3,}/g, "\n\n").trim(),
+        `${content}\n\n${cleaned}`.replace(/\n{3,}/g, "\n\n").trim(),
       );
     }
   }

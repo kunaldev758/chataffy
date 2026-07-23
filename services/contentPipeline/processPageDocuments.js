@@ -247,6 +247,8 @@ async function processPageDocuments(
         const parts = await structureAwareChunk(section.content, {
           chunkSize,
           chunkOverlap,
+          entity_type: section.entity_type,
+          pageType: section.pageType,
         });
         for (const part of parts) {
           allChunks.push({

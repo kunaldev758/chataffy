@@ -73,8 +73,8 @@ async function classifyPageTypeLlm({
 
   let cfg;
   try {
-    cfg = await getResolvedModelConfig("page-type", [
-      "website-classifier",
+    cfg = await getResolvedModelConfig("content-classifier", [
+      "content-classifier",
       "open-source",
     ]);
   } catch {

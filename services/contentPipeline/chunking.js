@@ -25,7 +25,7 @@ function protectCodeBlocks(markdown) {
 
 /**
  * Protect simple Q/A pairs (FAQ) so question+answer stay in one unit when possible.
- * Patterns: bold Q/A markers, plain Q:/A: lines.
+ * Patterns: bold Q/A markers, plain Q:/A: lines, Question/Answer labels.
  */
 function protectQaPairs(markdown) {
   const blocks = [];
@@ -51,10 +51,46 @@ function protectQaPairs(markdown) {
     },
   );
 
+  // Question: / Answer: labels (common FAQ markdown)
+  text = text.replace(
+    /(^|\n)((?:Question|Q)\s*:\s*[^\n]+(?:\n(?!(?:Question|Answer|Q|A)\s*:)[^\n]*)*)(\n(?:Answer|A)\s*:\s*[^\n]+(?:\n(?!(?:Question|Answer|Q|A)\s*:)[^\n]*)*)/gi,
+    (match, lead, q, a) => {
+      const idx = blocks.length;
+      blocks.push(`${q}${a}`);
+      return `${lead}@@QA_BLOCK_${idx}@@`;
+    },
+  );
+
   return {
     text,
     restore: (s) =>
       String(s || "").replace(/@@QA_BLOCK_(\d+)@@/g, (_, n) => blocks[Number(n)] || ""),
+  };
+}
+
+/**
+ * Keep product "Details" attribute blocks together when possible.
+ */
+function protectProductBlocks(markdown) {
+  const blocks = [];
+  let text = String(markdown || "");
+
+  text = text.replace(
+    /(^|\n)(#{1,3}\s*Details\b[^\n]*\n(?:[-*]\s+[^\n]+\n?)+)/gi,
+    (match, lead, block) => {
+      const idx = blocks.length;
+      blocks.push(block.trim());
+      return `${lead}@@PRODUCT_BLOCK_${idx}@@\n`;
+    },
+  );
+
+  return {
+    text,
+    restore: (s) =>
+      String(s || "").replace(
+        /@@PRODUCT_BLOCK_(\d+)@@/g,
+        (_, n) => blocks[Number(n)] || "",
+      ),
   };
 }
 
@@ -129,24 +165,65 @@ async function recursiveSplit(text, { chunkSize, chunkOverlap }) {
 }
 
 /**
- * Structure-aware chunking:
- * protect code/Q-A → heading sections → recursive split oversized sections.
+ * Structure-aware chunking, optionally tuned by section entity_type:
+ * - faq: stronger Q/A protection
+ * - product: keep Details attribute blocks together
+ * - policy/review/general: heading + paragraph splits
  *
  * @returns {Promise<{ text: string, heading_path: string }[]>}
  */
 async function structureAwareChunk(markdown, options = {}) {
   const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_CHARS;
   const chunkOverlap = options.chunkOverlap ?? DEFAULT_OVERLAP_CHARS;
+  const entityType = String(options.entity_type || options.pageType || "general")
+    .toLowerCase()
+    .trim();
 
   const code = protectCodeBlocks(markdown);
-  const qa = protectQaPairs(code.text);
-  const sections = splitByHeadings(qa.text);
+  let working = code.text;
+  const restorers = [];
 
+  if (entityType === "faq") {
+    const qa = protectQaPairs(working);
+    working = qa.text;
+    restorers.push(qa.restore);
+  } else if (entityType === "product" || entityType === "listing") {
+    const product = protectProductBlocks(working);
+    working = product.text;
+    restorers.push(product.restore);
+    // Light Q/A protect in case PDP embeds mini-FAQ not split out
+    const qa = protectQaPairs(working);
+    working = qa.text;
+    restorers.push(qa.restore);
+  } else {
+    const qa = protectQaPairs(working);
+    working = qa.text;
+    restorers.push(qa.restore);
+  }
+
+  const restoreAll = (s) => {
+    let out = s;
+    for (let i = restorers.length - 1; i >= 0; i--) {
+      out = restorers[i](out);
+    }
+    return code.restore(out);
+  };
+
+  const sections = splitByHeadings(working);
   const out = [];
 
   for (const section of sections) {
-    const restored = code.restore(qa.restore(section.text)).trim();
+    const restored = restoreAll(section.text).trim();
     if (!restored) continue;
+
+    // FAQ: prefer not splitting a single protected Q/A unit further when small
+    if (entityType === "faq" && restored.length <= chunkSize * 1.25) {
+      out.push({
+        text: restored,
+        heading_path: section.heading_path || "",
+      });
+      continue;
+    }
 
     if (restored.length <= chunkSize) {
       out.push({
@@ -156,7 +233,6 @@ async function structureAwareChunk(markdown, options = {}) {
       continue;
     }
 
-    // Oversized: recursive split, keep same heading_path
     const parts = await recursiveSplit(restored, { chunkSize, chunkOverlap });
     for (const part of parts) {
       const text = part.trim();
@@ -168,7 +244,6 @@ async function structureAwareChunk(markdown, options = {}) {
     }
   }
 
-  // Safety: if somehow empty, fall back to pure recursive on original
   if (out.length === 0 && String(markdown || "").trim()) {
     const parts = await recursiveSplit(String(markdown).trim(), {
       chunkSize,
@@ -187,6 +262,7 @@ module.exports = {
   splitByHeadings,
   protectCodeBlocks,
   protectQaPairs,
+  protectProductBlocks,
   DEFAULT_CHUNK_CHARS,
   DEFAULT_OVERLAP_CHARS,
 };

@@ -20,6 +20,7 @@ const htmlCleanup = require("./htmlCleanup");
 const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
 const { checkCanonicalDuplicate } = require("./canonicalDedupe");
 const { extractProductContent } = require("./extractors/product");
+const { extractListingContent } = require("./extractors/listing");
 const { extractWithReadability } = require("./extractors/contentReadability");
 const { extractFaqContent } = require("./extractors/faq");
 const {
@@ -29,6 +30,16 @@ const {
   DEFAULT_OVERLAP_CHARS,
 } = require("./chunking");
 const { buildContextPrefix, applyEmbeddingPrefix } = require("./contextPrefix");
+const {
+  processResidualSections,
+  markCoveredRegions,
+  markPrimaryCoveredRegions,
+  findCandidateSections,
+  classifySectionByRules,
+  extractLinkListAttributes,
+  SECTION_RULE_THRESHOLD,
+} = require("./residualSections");
+const { classifySectionsLlm } = require("./classifySectionsLlm");
 
 module.exports = {
   ...schema,
@@ -52,6 +63,7 @@ module.exports = {
   QUALITY_THRESHOLD,
   checkCanonicalDuplicate,
   extractProductContent,
+  extractListingContent,
   extractWithReadability,
   extractFaqContent,
   structureAwareChunk,
@@ -60,4 +72,12 @@ module.exports = {
   DEFAULT_OVERLAP_CHARS,
   buildContextPrefix,
   applyEmbeddingPrefix,
+  processResidualSections,
+  markCoveredRegions,
+  markPrimaryCoveredRegions,
+  findCandidateSections,
+  classifySectionByRules,
+  extractLinkListAttributes,
+  SECTION_RULE_THRESHOLD,
+  classifySectionsLlm,
 };
