@@ -8,6 +8,7 @@ const {
   isSupportedChatProvider,
 } = require("../providerChatComplete");
 const { PAGE_TYPES, ENTITY_TYPES } = require("./schema");
+const { recordPageTypeLlmUsage } = require("./llmUsageStats");
 
 function safeJsonParse(text) {
   try {
@@ -28,12 +29,15 @@ function extractJsonFromText(text) {
   return brace ? safeJsonParse(brace[0]) : safeJsonParse(raw);
 }
 
+/**
+ * PAGE_TYPE_LLM_ENABLED=true|false
+ * If unset, falls back to legacy Llama classifier flags (backward compatible).
+ */
 function isPageTypeLlmEnabled() {
   const explicit = process.env.PAGE_TYPE_LLM_ENABLED;
   if (explicit != null && String(explicit).trim() !== "") {
     return String(explicit).toLowerCase() === "true";
   }
-  // Reuse website-classifier enable flags as default
   return (
     String(process.env.LLAMA_WEBSITE_TYPE_ENABLED || "").toLowerCase() ===
       "true" ||
@@ -55,8 +59,9 @@ function normalizeEntityType(raw) {
 }
 
 /**
- * Low-confidence page-type enrichment via groq/openai (not Gemini).
- * Only fills classification fields — never invents prices/SKUs.
+ * Low-confidence page-type enrichment via content-classifier.
+ * Minimal JSON: pageType, entity_type, confidence, reason (+ optional entity_name).
+ * Skips deterministic pages and when PAGE_TYPE_LLM_ENABLED is off.
  */
 async function classifyPageTypeLlm({
   url,
@@ -68,8 +73,23 @@ async function classifyPageTypeLlm({
   userId = null,
   agentId = null,
   conversationId = null,
-}) {
-  if (!isPageTypeLlmEnabled()) return null;
+  force = false,
+} = {}) {
+  if (ruleGuess?.deterministic && !force) {
+    recordPageTypeLlmUsage({
+      skipped: true,
+      skipReason: "deterministic_page",
+    });
+    return null;
+  }
+
+  if (!isPageTypeLlmEnabled()) {
+    recordPageTypeLlmUsage({
+      skipped: true,
+      skipReason: "page_type_llm_disabled",
+    });
+    return null;
+  }
 
   let cfg;
   try {
@@ -78,32 +98,34 @@ async function classifyPageTypeLlm({
       "open-source",
     ]);
   } catch {
+    recordPageTypeLlmUsage({ skipped: true, skipReason: "no_model_config" });
     return null;
   }
 
-  if (!isSupportedChatProvider(cfg.provider) || !cfg.apiKey) return null;
+  if (!isSupportedChatProvider(cfg.provider) || !cfg.apiKey) {
+    recordPageTypeLlmUsage({ skipped: true, skipReason: "provider_unavailable" });
+    return null;
+  }
 
-  const sample = String(textSample || "").slice(0, 6000);
+  const sample = String(textSample || "").slice(0, 2000);
   const system =
-    "You classify web pages for a RAG index. Return valid JSON only. Do not invent product prices, SKUs, or stock status.";
+    "Classify one web page for a RAG index. Return valid JSON only. Do not invent prices, SKUs, or stock.";
   const prompt = [
-    "Classify this page.",
+    "Classify this page. Keep the response minimal.",
     `pageType must be one of: ${PAGE_TYPES.join(", ")}`,
     `entity_type must be one of: ${ENTITY_TYPES.join(", ")}`,
-    "Also return entity_name (short, or null) and optional search_terms (string array, max 12).",
-    "Only suggest attributes that are clearly stated (no guessing). Prefer empty attributes over invented ones.",
     "",
     `URL: ${url || ""}`,
     `Title: ${title || ""}`,
-    `Meta: ${metaDescription || ""}`,
+    `Meta: ${String(metaDescription || "").slice(0, 240)}`,
     schemaTypes?.length
-      ? `Schema.org types: ${schemaTypes.join(", ")}`
+      ? `Schema.org types: ${schemaTypes.slice(0, 12).join(", ")}`
       : "Schema.org types: none",
     ruleGuess
       ? `Rule guess: pageType=${ruleGuess.pageType}, entity_type=${ruleGuess.entity_type}, confidence=${ruleGuess.confidence}`
       : "Rule guess: none",
     "",
-    'Return JSON: { "pageType": "product", "entity_type": "product", "entity_name": "...", "search_terms": [], "attributes": {}, "confidence": 0.0, "reason": "..." }',
+    'Return JSON only: { "pageType": "product", "entity_type": "product", "confidence": 0.0, "reason": "short why", "entity_name": null }',
     "",
     "Page excerpt:",
     sample,
@@ -120,29 +142,37 @@ async function classifyPageTypeLlm({
       timeoutMs: cfg.timeoutMs || 30000,
       system,
       temperature: 0,
-      maxTokens: 280,
+      maxTokens: 120,
     });
     raw = result.text;
     callUsage = result.usage;
   } catch (error) {
     console.warn(`[pageTypeLlm] classification failed: ${error.message}`);
+    recordPageTypeLlmUsage({ skipped: true, skipReason: "call_failed" });
     return null;
   }
 
-  if (callUsage && userId) {
-    const inputTokens = callUsage.prompt_tokens || callUsage.input_tokens || 0;
-    const outputTokens =
-      callUsage.completion_tokens || callUsage.output_tokens || 0;
-    const cacheTokens = callUsage?.prompt_tokens_details?.cached_tokens ?? 0;
-    const costs = computeTokenCosts({
-      inputTokens,
-      outputTokens,
-      cacheTokens,
-      inputCostPerMillion: cfg.inputCost || 0,
-      outputCostPerMillion: cfg.outputCost || 0,
-      cacheCostPerMillion: cfg.cacheCost || 0,
-    });
+  const inputTokens = callUsage?.prompt_tokens || callUsage?.input_tokens || 0;
+  const outputTokens =
+    callUsage?.completion_tokens || callUsage?.output_tokens || 0;
+  const cacheTokens = callUsage?.prompt_tokens_details?.cached_tokens ?? 0;
+  const costs = computeTokenCosts({
+    inputTokens,
+    outputTokens,
+    cacheTokens,
+    inputCostPerMillion: cfg.inputCost || 0,
+    outputCostPerMillion: cfg.outputCost || 0,
+    cacheCostPerMillion: cfg.cacheCost || 0,
+  });
 
+  recordPageTypeLlmUsage({
+    inputTokens,
+    outputTokens,
+    cacheTokens,
+    estimatedCostUsd: costs.totalCost || 0,
+  });
+
+  if (userId) {
     logOpenAIUsage({
       userId,
       agentId,
@@ -152,7 +182,7 @@ async function classifyPageTypeLlm({
       inputTokens,
       outputTokens,
       cacheTokens,
-      totalTokens: callUsage.total_tokens || inputTokens + outputTokens,
+      totalTokens: callUsage?.total_tokens || inputTokens + outputTokens,
       ...costs,
     }).catch((err) =>
       console.warn(`[pageTypeLlm] usage log error: ${err.message}`),
@@ -171,31 +201,17 @@ async function classifyPageTypeLlm({
       ? Math.max(0, Math.min(1, parsed.confidence))
       : 0.55;
 
-  const search_terms = Array.isArray(parsed.search_terms)
-    ? parsed.search_terms
-        .map((t) => String(t).trim().toLowerCase())
-        .filter(Boolean)
-        .slice(0, 12)
-    : [];
-
-  const attributes =
-    parsed.attributes && typeof parsed.attributes === "object"
-      ? { ...parsed.attributes }
-      : {};
-
-  // Strip dangerous invented commerce fields if present without clear numeric evidence
-  // (validation layer will also prefer deterministic attrs)
   return {
     pageType: pageType || ruleGuess?.pageType || "generic",
     entity_type: entity_type || ruleGuess?.entity_type || "general",
     entity_name:
       typeof parsed.entity_name === "string" && parsed.entity_name.trim()
-        ? parsed.entity_name.trim()
+        ? parsed.entity_name.trim().slice(0, 120)
         : null,
-    search_terms,
-    attributes,
+    search_terms: [],
+    attributes: {},
     confidence,
-    reason: parsed.reason || "llm_page_type",
+    reason: String(parsed.reason || "llm_page_type").slice(0, 200),
     source: "page_type_llm",
     provider: cfg.provider,
   };

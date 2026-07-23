@@ -2,11 +2,24 @@ const schema = require("./schema");
 const { extractGenericMarkdown } = require("./extractGenericMarkdown");
 const { extractPageMetadata } = require("./extractPageMetadata");
 const { extractByPageType } = require("./extractByPageType");
-const { detectPageType, RULE_CONFIDENCE_THRESHOLD } = require("./detectPageType");
+const {
+  detectPageType,
+  RULE_CONFIDENCE_THRESHOLD,
+  DETERMINISTIC_CONFIDENCE,
+} = require("./detectPageType");
 const {
   classifyPageTypeLlm,
   isPageTypeLlmEnabled,
 } = require("./classifyPageTypeLlm");
+const {
+  classifySectionsLlm,
+  isSectionLlmEnabled,
+} = require("./classifySectionsLlm");
+const {
+  getLlmUsageStats,
+  resetLlmUsageStats,
+  logLlmUsageSummary,
+} = require("./llmUsageStats");
 const { applyValidation } = require("./validatePage");
 const {
   normalizeToCommonSchema,
@@ -39,7 +52,6 @@ const {
   extractLinkListAttributes,
   SECTION_RULE_THRESHOLD,
 } = require("./residualSections");
-const { classifySectionsLlm } = require("./classifySectionsLlm");
 
 module.exports = {
   ...schema,
@@ -48,8 +60,14 @@ module.exports = {
   extractByPageType,
   detectPageType,
   RULE_CONFIDENCE_THRESHOLD,
+  DETERMINISTIC_CONFIDENCE,
   classifyPageTypeLlm,
   isPageTypeLlmEnabled,
+  classifySectionsLlm,
+  isSectionLlmEnabled,
+  getLlmUsageStats,
+  resetLlmUsageStats,
+  logLlmUsageSummary,
   applyValidation,
   normalizeToCommonSchema,
   hashContent,
@@ -79,5 +97,4 @@ module.exports = {
   classifySectionByRules,
   extractLinkListAttributes,
   SECTION_RULE_THRESHOLD,
-  classifySectionsLlm,
 };

@@ -8,7 +8,12 @@ const {
   isSupportedChatProvider,
 } = require("../providerChatComplete");
 const { ENTITY_TYPES } = require("./schema");
-const { isPageTypeLlmEnabled } = require("./classifyPageTypeLlm");
+const { recordSectionLlmUsage } = require("./llmUsageStats");
+
+/** Hard caps to keep section LLM cheap when enabled. */
+const MAX_SECTIONS_PER_CALL = 5;
+const MAX_BATCHES_PER_PAGE = 1;
+const SECTION_EXCERPT_CHARS = 600;
 
 function safeJsonParse(text) {
   try {
@@ -34,6 +39,18 @@ function extractJsonFromText(text) {
   return brace ? safeJsonParse(brace[0]) : safeJsonParse(raw);
 }
 
+/**
+ * SECTION_LLM_ENABLED=true|false
+ * Defaults to false when unset (separate from page-type LLM; cost-safe).
+ */
+function isSectionLlmEnabled() {
+  const explicit = process.env.SECTION_LLM_ENABLED;
+  if (explicit != null && String(explicit).trim() !== "") {
+    return String(explicit).toLowerCase() === "true";
+  }
+  return false;
+}
+
 function normalizeEntityType(raw) {
   if (!raw) return null;
   const v = String(raw).trim().toLowerCase().replace(/\s+/g, "_");
@@ -42,10 +59,10 @@ function normalizeEntityType(raw) {
 }
 
 /**
- * Batched low-confidence section classification via content-classifier.
- * Returns an array aligned by section `id`. Never invents prices/SKUs.
+ * Batched low-confidence section classification.
+ * Minimal JSON per row: id, entity_type, confidence, reason (+ optional entity_name).
  *
- * @returns {Promise<Array<{ id, entity_type, entity_name, search_terms, attributes, confidence, reason }>|null>}
+ * @returns {Promise<Array<{ id, entity_type, entity_name, confidence, reason }>|null>}
  */
 async function classifySectionsLlm({
   pageType = "generic",
@@ -53,9 +70,29 @@ async function classifySectionsLlm({
   userId = null,
   agentId = null,
   conversationId = null,
+  deterministicPage = false,
+  force = false,
 } = {}) {
-  if (!isPageTypeLlmEnabled()) return null;
-  if (!Array.isArray(sections) || sections.length === 0) return null;
+  if (deterministicPage && !force) {
+    recordSectionLlmUsage({
+      skipped: true,
+      skipReason: "deterministic_page",
+    });
+    return null;
+  }
+
+  if (!isSectionLlmEnabled()) {
+    recordSectionLlmUsage({
+      skipped: true,
+      skipReason: "section_llm_disabled",
+    });
+    return null;
+  }
+
+  if (!Array.isArray(sections) || sections.length === 0) {
+    recordSectionLlmUsage({ skipped: true, skipReason: "no_sections" });
+    return null;
+  }
 
   let cfg;
   try {
@@ -64,34 +101,36 @@ async function classifySectionsLlm({
       "open-source",
     ]);
   } catch {
+    recordSectionLlmUsage({ skipped: true, skipReason: "no_model_config" });
     return null;
   }
 
-  if (!isSupportedChatProvider(cfg.provider) || !cfg.apiKey) return null;
+  if (!isSupportedChatProvider(cfg.provider) || !cfg.apiKey) {
+    recordSectionLlmUsage({ skipped: true, skipReason: "provider_unavailable" });
+    return null;
+  }
 
-  const payload = sections.map((s) => ({
+  // Cap sections + batches for cost control
+  const capped = sections.slice(0, MAX_SECTIONS_PER_CALL * MAX_BATCHES_PER_PAGE);
+  const payload = capped.map((s) => ({
     id: s.id,
-    heading: String(s.heading || "").slice(0, 160),
-    excerpt: String(s.content || "").slice(0, 1800),
-    rule_guess: s.ruleGuess
-      ? `${s.ruleGuess.entity_type || "general"}@${s.ruleGuess.confidence ?? "?"}`
-      : null,
+    heading: String(s.heading || "").slice(0, 120),
+    excerpt: String(s.content || "").slice(0, SECTION_EXCERPT_CHARS),
+    rule_guess: s.ruleGuess?.entity_type || null,
   }));
 
   const system =
-    "You classify leftover page sections for a RAG index. Return valid JSON only. Do not invent product prices, SKUs, or stock status.";
+    "Classify leftover page sections for a RAG index. Return valid JSON only. Do not invent prices or SKUs.";
   const prompt = [
-    `Page-level pageType is "${pageType}". Classify each section independently.`,
+    `Page pageType="${pageType}". Classify each section.`,
     `entity_type must be one of: ${ENTITY_TYPES.join(", ")}`,
-    "For ambiguous blocks prefer \"general\". Use \"faq\", \"review\", \"policy\", \"docs\", \"about\" when clearly indicated.",
-    "Also return entity_name (short, or null), optional search_terms (max 8), optional attributes (only clearly stated).",
-    "Do NOT suggest related_product_urls or invent commerce fields.",
+    'Prefer "general" when unsure. Use faq/review/policy/docs/about when clear.',
     "",
-    "Return a JSON array (same order / include every id):",
-    '[{ "id": "c0", "entity_type": "faq", "entity_name": "...", "search_terms": [], "attributes": {}, "confidence": 0.0, "reason": "..." }]',
+    "Return a JSON array only (include every id):",
+    '[{ "id": "c0", "entity_type": "faq", "confidence": 0.0, "reason": "short why", "entity_name": null }]',
     "",
     "Sections:",
-    JSON.stringify(payload, null, 2),
+    JSON.stringify(payload),
   ].join("\n");
 
   let raw = "";
@@ -105,39 +144,49 @@ async function classifySectionsLlm({
       timeoutMs: cfg.timeoutMs || 45000,
       system,
       temperature: 0,
-      maxTokens: Math.min(900, 120 + sections.length * 140),
+      maxTokens: Math.min(400, 80 + capped.length * 60),
     });
     raw = result.text;
     callUsage = result.usage;
   } catch (error) {
     console.warn(`[sectionLlm] batch classification failed: ${error.message}`);
+    recordSectionLlmUsage({ skipped: true, skipReason: "call_failed" });
     return null;
   }
 
-  if (callUsage && userId) {
-    const inputTokens = callUsage.prompt_tokens || callUsage.input_tokens || 0;
-    const outputTokens =
-      callUsage.completion_tokens || callUsage.output_tokens || 0;
-    const cacheTokens = callUsage?.prompt_tokens_details?.cached_tokens ?? 0;
-    const costs = computeTokenCosts({
-      inputTokens,
-      outputTokens,
-      cacheTokens,
-      inputCostPerMillion: cfg.inputCost || 0,
-      outputCostPerMillion: cfg.outputCost || 0,
-      cacheCostPerMillion: cfg.cacheCost || 0,
-    });
+  const inputTokens = callUsage?.prompt_tokens || callUsage?.input_tokens || 0;
+  const outputTokens =
+    callUsage?.completion_tokens || callUsage?.output_tokens || 0;
+  const cacheTokens = callUsage?.prompt_tokens_details?.cached_tokens ?? 0;
+  const costs = computeTokenCosts({
+    inputTokens,
+    outputTokens,
+    cacheTokens,
+    inputCostPerMillion: cfg.inputCost || 0,
+    outputCostPerMillion: cfg.outputCost || 0,
+    cacheCostPerMillion: cfg.cacheCost || 0,
+  });
 
+  recordSectionLlmUsage({
+    batches: 1,
+    sectionsClassified: capped.length,
+    inputTokens,
+    outputTokens,
+    cacheTokens,
+    estimatedCostUsd: costs.totalCost || 0,
+  });
+
+  if (userId) {
     logOpenAIUsage({
       userId,
       agentId,
       conversationId,
       model: cfg.model,
-      type: usageTypeForCategory("content-classifier") || "content-classifier",
+      type: usageTypeForCategory("page-type") || "page-type",
       inputTokens,
       outputTokens,
       cacheTokens,
-      totalTokens: callUsage.total_tokens || inputTokens + outputTokens,
+      totalTokens: callUsage?.total_tokens || inputTokens + outputTokens,
       ...costs,
     }).catch((err) =>
       console.warn(`[sectionLlm] usage log error: ${err.message}`),
@@ -165,31 +214,17 @@ async function classifySectionsLlm({
         typeof row.confidence === "number"
           ? Math.max(0, Math.min(1, row.confidence))
           : 0.55;
-      const search_terms = Array.isArray(row.search_terms)
-        ? row.search_terms
-            .map((t) => String(t).trim().toLowerCase())
-            .filter(Boolean)
-            .slice(0, 8)
-        : [];
-      const attributes =
-        row.attributes && typeof row.attributes === "object"
-          ? { ...row.attributes }
-          : {};
-      // Strip commerce inventions from section LLM
-      for (const key of ["sku", "price", "currency", "in_stock", "mpn"]) {
-        delete attributes[key];
-      }
       return {
         id: String(row.id || ""),
         entity_type: entity_type || "general",
         entity_name:
           typeof row.entity_name === "string" && row.entity_name.trim()
-            ? row.entity_name.trim()
+            ? row.entity_name.trim().slice(0, 120)
             : null,
-        search_terms,
-        attributes,
+        search_terms: [],
+        attributes: {},
         confidence,
-        reason: row.reason || "llm_section",
+        reason: String(row.reason || "llm_section").slice(0, 200),
         source: "section_llm",
         provider: cfg.provider,
       };
@@ -199,4 +234,7 @@ async function classifySectionsLlm({
 
 module.exports = {
   classifySectionsLlm,
+  isSectionLlmEnabled,
+  MAX_SECTIONS_PER_CALL,
+  MAX_BATCHES_PER_PAGE,
 };

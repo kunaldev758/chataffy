@@ -753,6 +753,7 @@ async function processResidualSections({
   existingSections = [],
   markFaqCovered = false,
   extraCoveredSelectors = [],
+  deterministicPage = false,
   usageContext = {},
 } = {}) {
   const empty = {
@@ -806,69 +807,68 @@ async function processResidualSections({
     else highConfidence.push(classified);
   }
 
-  // Batched LLM for ambiguous residual sections
+  // Batched LLM for ambiguous residual sections (skipped on deterministic pages /
+  // when SECTION_LLM_ENABLED is false — classifier records skip stats).
   let llmClassified = [];
   if (lowConfidence.length > 0) {
-    const batches = batchByCharBudget(lowConfidence);
-    for (const batch of batches) {
-      const llmResults = await classifySectionsLlm({
-        pageType,
-        sections: batch.map((s) => ({
-          id: s.id,
-          heading: s.heading,
-          content: s.content,
-          ruleGuess: {
-            entity_type: s.entity_type,
-            confidence: s.classification_confidence,
-            reason: s.classification_reason,
-          },
-        })),
-        ...usageContext,
-      });
+    // Single capped call — classifySectionsLlm enforces MAX_SECTIONS / MAX_BATCHES
+    const llmResults = await classifySectionsLlm({
+      pageType,
+      sections: lowConfidence.map((s) => ({
+        id: s.id,
+        heading: s.heading,
+        content: s.content,
+        ruleGuess: {
+          entity_type: s.entity_type,
+          confidence: s.classification_confidence,
+          reason: s.classification_reason,
+        },
+      })),
+      deterministicPage,
+      ...usageContext,
+    });
 
-      const byId = new Map(
-        (Array.isArray(llmResults) ? llmResults : []).map((r) => [r.id, r]),
-      );
+    const byId = new Map(
+      (Array.isArray(llmResults) ? llmResults : []).map((r) => [r.id, r]),
+    );
 
-      for (const s of batch) {
-        const llm = byId.get(s.id);
-        if (llm) {
-          llmClassified.push({
-            ...s,
-            entity_type: normalizeEntityType(llm.entity_type || s.entity_type),
-            entity_name: llm.entity_name || s.heading || null,
-            search_terms: Array.isArray(llm.search_terms) ? llm.search_terms : [],
-            attributes:
-              llm.attributes && typeof llm.attributes === "object"
-                ? llm.attributes
-                : {},
-            classification_confidence: clamp01(
-              Math.max(
-                s.classification_confidence,
-                typeof llm.confidence === "number" ? llm.confidence : 0,
-              ),
+    for (const s of lowConfidence) {
+      const llm = byId.get(s.id);
+      if (llm) {
+        llmClassified.push({
+          ...s,
+          entity_type: normalizeEntityType(llm.entity_type || s.entity_type),
+          entity_name: llm.entity_name || s.heading || null,
+          search_terms: [],
+          attributes: {},
+          classification_confidence: clamp01(
+            Math.max(
+              s.classification_confidence,
+              typeof llm.confidence === "number" ? llm.confidence : 0,
             ),
-            classification_reason: [
-              s.classification_reason,
-              llm.reason || "llm_section",
-            ]
-              .filter(Boolean)
-              .join("+"),
-            needsLlm: false,
-          });
-        } else {
-          // Unresolved → keep as general with low confidence flag
-          llmClassified.push({
-            ...s,
-            entity_type: "general",
-            entity_name: s.heading || null,
-            search_terms: [],
-            attributes: {},
-            classification_confidence: Math.min(s.classification_confidence, 0.4),
-            classification_reason: `${s.classification_reason}+unresolved`,
-            needsLlm: false,
-          });
-        }
+          ),
+          classification_reason: [
+            s.classification_reason,
+            llm.reason || "llm_section",
+          ]
+            .filter(Boolean)
+            .join("+"),
+          needsLlm: false,
+        });
+      } else {
+        // Unresolved / LLM skipped → keep rule guess or general with low confidence
+        llmClassified.push({
+          ...s,
+          entity_type: normalizeEntityType(s.entity_type) || "general",
+          entity_name: s.heading || null,
+          search_terms: [],
+          attributes: {},
+          classification_confidence: Math.min(s.classification_confidence, 0.45),
+          classification_reason: deterministicPage
+            ? `${s.classification_reason}+deterministic_no_llm`
+            : `${s.classification_reason}+unresolved`,
+          needsLlm: false,
+        });
       }
     }
   }

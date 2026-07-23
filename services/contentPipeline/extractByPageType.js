@@ -116,9 +116,9 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     $: $meta,
   });
 
-  // 2) LLM only when rules are ambiguous
+  // 2) LLM only when rules are ambiguous AND page is not deterministic
   let llmResult = null;
-  if (detection.needsLlm) {
+  if (detection.needsLlm && !detection.deterministic) {
     llmResult = await classifyPageTypeLlm({
       url,
       title: pageMetadata.title,
@@ -141,6 +141,14 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
         needsLlm: false,
       };
     }
+  } else {
+    const { recordPageTypeLlmUsage } = require("./llmUsageStats");
+    recordPageTypeLlmUsage({
+      skipped: true,
+      skipReason: detection.deterministic
+        ? "deterministic_page_short_circuit"
+        : "rules_confident",
+    });
   }
 
   // 2b) product pageType → PDP vs PLP entity split
@@ -292,6 +300,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
       existingSections: sections,
       markFaqCovered: faqExtracted || validated.pageType === "faq",
       extraCoveredSelectors,
+      deterministicPage: Boolean(detection.deterministic || isListing),
       usageContext: { userId, agentId, conversationId },
     });
     residualStats = residual.stats;
@@ -356,6 +365,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     classification_confidence: validated.classification_confidence,
     classification_reason: validated.classification_reason,
     extraction_source: validated.extraction_source,
+    deterministic: Boolean(detection.deterministic),
     sections,
     residualStats,
   };
