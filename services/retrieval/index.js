@@ -1,6 +1,8 @@
 const {
   buildRetrievalStrategy,
   broadenRetrievalStrategy,
+  isCatalogBrowseIntent,
+  isSpecificProductIntent,
 } = require("./retrievalStrategy");
 const {
   buildQdrantHardFilter,
@@ -28,4 +30,6 @@ module.exports = {
   evaluateRetrievalConfidence,
   groupMatchesByUrlAndEntity,
   buildSectionAwareContextBlocks,
+  isCatalogBrowseIntent,
+  isSpecificProductIntent,
 };

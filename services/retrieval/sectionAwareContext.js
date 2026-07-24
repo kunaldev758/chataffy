@@ -53,14 +53,36 @@ function groupMatchesByUrlAndEntity(matches = [], preferredEntityOrder = []) {
 }
 
 function selectRelevantSectionsForIntent(sections, strategy = {}) {
+  const primary = strategy.primaryEntity
+    ? String(strategy.primaryEntity).toLowerCase()
+    : null;
   const preferred =
     strategy.preferredEntityTypes?.length > 0
       ? strategy.preferredEntityTypes
       : strategy.softEntityTypes || [];
 
-  if (!preferred.length) return sections;
+  if (!preferred.length && !primary) return sections;
 
-  const preferredSet = new Set(preferred.map((t) => t.toLowerCase()));
+  const preferredSet = new Set(
+    [...(primary ? [primary] : []), ...preferred].map((t) => t.toLowerCase()),
+  );
+
+  // Product-detail: keep product (+ faq/review on same page), drop listing sections
+  if (primary === "product" || strategy.mode === "product_detail") {
+    const keep = sections.filter((s) =>
+      ["product", "faq", "review", "policy"].includes(s.entity_type),
+    );
+    if (keep.length) return keep;
+  }
+
+  // Catalog: prefer listing; allow product as secondary
+  if (primary === "listing" || strategy.mode === "catalog_list") {
+    const listing = sections.filter((s) => s.entity_type === "listing");
+    if (listing.length) return listing;
+    const products = sections.filter((s) => s.entity_type === "product");
+    if (products.length) return products;
+  }
+
   const matched = sections.filter((s) => preferredSet.has(s.entity_type));
   const extras = sections.filter((s) =>
     ["faq", "policy", "review"].includes(s.entity_type),
