@@ -41,6 +41,7 @@ const SUB_INTENTS = {
   IN_PAGE_LIST: "IN_PAGE_LIST",
   CONTACT_INFO: "CONTACT_INFO",
   PAGE_LINKS: "PAGE_LINKS",
+  COMPARE: "COMPARE",
 };
 
 const GREETINGS = [
@@ -338,7 +339,9 @@ function applyFollowUpAcceptanceOverride(
 
   return buildRouteResult({
     route: ROUTES.SEMANTIC_RAG,
-    subIntent: null,
+    // For compare follow-ups we want to keep the compare context.
+    subIntent:
+      result?.subIntent === SUB_INTENTS.COMPARE ? SUB_INTENTS.COMPARE : null,
     userLanguage: result?.userLanguage || "en",
     confidence: Math.max(result?.confidence || 0, 0.92),
     rewrittenQuery,
@@ -349,6 +352,8 @@ function applyFollowUpAcceptanceOverride(
         ? result.rewriteReason
         : "ELLIPSIS"
       : null,
+    entities: result?.entities || [],
+    compareAspect: result?.compareAspect || null,
     source:
       result?.source && String(result.source).startsWith("llm")
         ? "llm_router_follow_up_override"
@@ -380,6 +385,8 @@ function buildRouteResult({
   needsRewrite = false,
   rewriteReason = null,
   source = "rules",
+  entities = [],
+  compareAspect = null,
 }) {
   return {
     route,
@@ -391,6 +398,8 @@ function buildRouteResult({
     needsRewrite,
     rewriteReason,
     source,
+    entities,
+    compareAspect,
   };
 }
 
@@ -540,6 +549,12 @@ function parseRouterJson(content, question = "") {
       subIntent = null;
     }
 
+    const parsedEntities = Array.isArray(parsed.entities)
+      ? parsed.entities
+      : [];
+    const isCompareIntent =
+      subIntent === SUB_INTENTS.COMPARE && parsedEntities.length >= 2;
+
     const confidence =
       typeof parsed.confidence === "number"
         ? Math.max(0, Math.min(1, parsed.confidence))
@@ -577,16 +592,21 @@ function parseRouterJson(content, question = "") {
     let finalRoute = resolvedRoute;
     if (confidence < 0.4) {
       finalRoute = ROUTES.SEMANTIC_RAG;
-      subIntent = null;
+      subIntent = isCompareIntent ? SUB_INTENTS.COMPARE : null;
     } else if (confidence < 0.65 && finalRoute !== ROUTES.LIVE_AGENT) {
       finalRoute = ROUTES.SEMANTIC_RAG;
-      subIntent = null;
+      subIntent = isCompareIntent ? SUB_INTENTS.COMPARE : null;
     } else if (
       finalRoute === ROUTES.HYBRID &&
       !subIntent
     ) {
       finalRoute = ROUTES.SEMANTIC_RAG;
     }
+
+    const compareAspect =
+      typeof parsed.compareAspect === "string" && parsed.compareAspect.trim()
+        ? parsed.compareAspect.trim()
+        : null;
 
     return buildRouteResult({
       route: finalRoute,
@@ -598,6 +618,8 @@ function parseRouterJson(content, question = "") {
       needsRewrite,
       rewriteReason,
       source: "llm_router",
+      entities: isCompareIntent ? parsedEntities : [],
+      compareAspect,
     });
   } catch {
     return buildRouteResult({
@@ -651,6 +673,13 @@ Classify the visitor message into exactly one route:
 - HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), homepage product catalog with prices, or contact/social profiles
 - SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
 
+If the visitor is asking to compare 2+ things (e.g. "A vs B", "compare X and Y", "difference between M and N"),
+route MUST be SEMANTIC_RAG and subIntent MUST be "COMPARE".
+Return entities (2–4 items) extracted from the question.
+Each entity must include: name, query, keywords (string array), attributes (object), filters (object).
+Do NOT invent attributes/prices/SKUs/availability; omit unknown fields or leave them null/empty.
+keywords must be entity-specific terms from the visitor message only (no generic categories).
+
 IMPORTANT: Prefer SEMANTIC_RAG for pricing, features, policies, how-to, and general questions even if they contain words like "show" or "list". Only use HYBRID for explicit listing/navigation/contact requests. Real questions in any language (Japanese, Chinese, Russian, Spanish, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
 
 For HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
@@ -685,7 +714,9 @@ Respond with JSON only:
   "followUp": false,
   "needsRewrite": false,
   "rewriteReason": "NONE",
-  "isTrulyOffTopic": false
+  "isTrulyOffTopic": false,
+  "compareAspect": null,
+  "entities": []
 }`;
 
   const userContentParts = [`Website language: ${websiteLanguage}`];

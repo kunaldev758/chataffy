@@ -147,10 +147,20 @@ function buildFallbackPrompt(organisation, tier = "compact") {
 }
 
 function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
-  const { requestedCount = null, wantsProductUrls = false } = options;
+  const { requestedCount = null, wantsProductUrls = false, subIntent = null } =
+    options;
   const org = organisation || "the company";
   const countHint =
     requestedCount != null ? String(requestedCount) : "all found";
+
+  if (subIntent === "COMPARE") {
+    return `Instructions:
+- Compare the entities shown in the context in a side-by-side way.
+- Focus on differences that are explicitly supported by the retrieved knowledge snippets.
+- Use HTML (<p>, <ul>, <li>) when it improves clarity.
+- Keep the response concise (about 3-5 sentences total), but include the key comparison points.
+- If the user asks for a specific aspect (e.g. price/availability/specs), emphasize it. Do not invent missing facts.`;
+  }
 
   if (effectiveMode === "list") {
     let instructions = `Instructions:

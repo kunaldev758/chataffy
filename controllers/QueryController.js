@@ -315,6 +315,9 @@ class QuestionAnsweringSystem {
     this.embeddingModel = null;
     this.currentModelName = null;
     this.qdrantClient = qdrantClient;
+    // Avoid repeated "collection exists" / "points_count" calls during fan-out retrieval.
+    this._qdrantCollectionExistsCache = new Map(); // collectionName -> boolean
+    this._qdrantPointCountCache = new Map(); // collectionName -> number
   }
 
   // check 2 ---->
@@ -1284,6 +1287,246 @@ class QuestionAnsweringSystem {
   }
 
   /**
+   * Multi-entity compare retrieval (fan-out + progressive filter relaxation).
+   * Expects entities to come from the intent/router LLM (routing.entities).
+   *
+   * Match objects are tagged with `_compareEntityName` for labeled context.
+   */
+  async runCompareRetrieval({
+    collectionName,
+    userIdString,
+    entities,
+    requestedTopK,
+    scoreThreshold,
+    userId,
+    agentId,
+    conversationId,
+  }) {
+    const safeEntities = Array.isArray(entities)
+      ? entities
+          .filter((e) => e && typeof e.query === "string" && e.query.trim())
+          .slice(0, 4)
+      : [];
+
+    console.log("safe entities check : ",safeEntities);
+
+    if (safeEntities.length < 2) return [];
+
+    const entityCount = safeEntities.length;
+    const totalCandidateK = Math.min(20, Math.max(10, requestedTopK * 2));
+    const perEntityK = Math.max(3, Math.ceil(totalCandidateK / entityCount));
+
+    const embeddingModel = await this.getEmbeddingModel();
+
+    // Estimate embedding cost once (LangChain embedQuery doesn't expose usage reliably).
+    let embeddingModelName = this.currentModelName || DEFAULT_EMBEDDING_MODEL;
+    let inputCostPerMillion = 0;
+    try {
+      const modelRecord = await getResolvedModelConfig("embedding").catch(
+        () => null,
+      );
+      embeddingModelName = modelRecord?.model || embeddingModelName;
+      inputCostPerMillion = modelRecord?.inputCost || 0;
+    } catch {
+      // best-effort only
+    }
+
+    const relaxThreshold = Math.min(0.35, scoreThreshold ?? 0.4);
+
+    const embedCache = new Map();
+    const getEmbeddingForText = async (text) => {
+      const key = String(text || "").trim();
+      if (!key) return null;
+      if (embedCache.has(key)) return embedCache.get(key);
+
+      const embeddingResponse = await embeddingModel.embedQuery(key);
+      const embedding =
+        embeddingResponse.embedding || embeddingResponse || [];
+
+      // Rough token estimate for usage tracking.
+      const inputTokens = key.length > 0 ? Math.ceil(key.length / 4) : 0;
+      if (inputTokens > 0) {
+        const costs = computeTokenCosts({
+          inputTokens,
+          outputTokens: 0,
+          cacheTokens: 0,
+          inputCostPerMillion: inputCostPerMillion || 0,
+          outputCostPerMillion: 0,
+          cacheCostPerMillion: 0,
+        });
+
+        logOpenAIUsage({
+          userId,
+          agentId,
+          conversationId,
+          model: embeddingModelName,
+          type: "embedding",
+          inputTokens,
+          outputTokens: 0,
+          cacheTokens: 0,
+          totalTokens: inputTokens,
+          ...costs,
+        }).catch(() => {});
+      }
+
+      embedCache.set(key, embedding);
+      return embedding;
+    };
+
+    const extractSizesFromEntity = (entity) => {
+      const attrs = entity?.attributes || {};
+      const filters = entity?.filters || {};
+      const direct =
+        entity?.sizes ||
+        filters?.sizes ||
+        attrs?.sizes ||
+        (attrs?.size ? [attrs.size] : null) ||
+        [];
+      if (!Array.isArray(direct)) return [];
+      return direct.filter(Boolean).map((s) => String(s));
+    };
+
+    const buildExtraMust = (entity, mode = "strict") => {
+      if (mode !== "strict") return [];
+
+      const qf = entity?.qdrant || entity?.qdrantFilter || null;
+      if (!qf || typeof qf !== "object") return [];
+
+      const must = [];
+      if (qf.entity_type) {
+        must.push({
+          key: "entity_type",
+          match: { value: String(qf.entity_type).toLowerCase() },
+        });
+      }
+      if (qf.pageType) {
+        must.push({
+          key: "pageType",
+          match: { value: String(qf.pageType).toLowerCase() },
+        });
+      }
+      if (qf.entity_name) {
+        must.push({
+          key: "entity_name",
+          match: { value: String(qf.entity_name) },
+        });
+      }
+      return must;
+    };
+
+    const retrieveOneEntity = async (entity, idx) => {
+      const entityName = entity?.name?.toString?.().trim() || entity.query;
+      const keywordListRaw = Array.isArray(entity?.keywords)
+        ? entity.keywords
+        : [];
+
+      // Use LLM-provided keywords only; also include the entity query as a fallback term.
+      const keywordList = [...new Set([...keywordListRaw, entity.query])]
+        .filter(Boolean)
+        .slice(0, 25);
+
+      const strictSizes = extractSizesFromEntity(entity);
+      const relaxedSizes = [];
+
+      const strictExtraMust = buildExtraMust(entity, "strict");
+      const relaxedExtraMust = [];
+
+      const embedding = await getEmbeddingForText(entity.query);
+      if (!embedding || embedding.length === 0) return [];
+
+      const keywordPoints = await this.structuralFetchByKeywords(
+        collectionName,
+        keywordList,
+        userIdString,
+        Math.min(120, perEntityK * 6),
+      );
+
+      const vectorStrict = await this.queryQdrant(
+        collectionName,
+        embedding,
+        perEntityK,
+        userIdString,
+        {
+          sizes: strictSizes,
+          extraMust: strictExtraMust,
+        },
+      );
+
+      const mergedStrict = this.mergeRetrievalResults(
+        vectorStrict,
+        keywordPoints,
+      );
+      const entityQueryAttributes = {
+        subIntent: "COMPARE",
+        sizes: strictSizes,
+        collections: (entity?.attributes?.collections || []).filter(Boolean),
+        keywords: keywordList.slice(0, 20),
+        flags: {
+          wantsProductLinks: false,
+          isCatalogQuery: false,
+          wantsHomepage: false,
+          wantsContact: false,
+          wantsPrices: false,
+          wasExpanded: false,
+        },
+      };
+      let reranked = this.applyAttributeRerank(
+        mergedStrict,
+        entityQueryAttributes,
+        "compare_strict",
+      );
+
+      const bestStrictScore =
+        vectorStrict.length > 0
+          ? Math.max(...vectorStrict.map((m) => m.score ?? 0))
+          : 0;
+
+      const shouldRelax =
+        reranked.length === 0 || bestStrictScore < relaxThreshold;
+
+      if (shouldRelax) {
+        const vectorRelax = await this.queryQdrant(
+          collectionName,
+          embedding,
+          perEntityK,
+          userIdString,
+          {
+            sizes: relaxedSizes,
+            extraMust: relaxedExtraMust,
+          },
+        );
+
+        const mergedRelax = this.mergeRetrievalResults(
+          vectorRelax,
+          keywordPoints,
+        );
+        reranked = this.applyAttributeRerank(
+          mergedRelax,
+          {
+            ...entityQueryAttributes,
+            sizes: relaxedSizes,
+          },
+          "compare_relaxed",
+        );
+      }
+
+      const final = (reranked || []).slice(0, perEntityK).map((m) => ({
+        ...m,
+        _compareEntityName: entityName,
+        _compareEntityIndex: idx,
+      }));
+
+      return final;
+    };
+
+    const perEntity = await Promise.all(
+      safeEntities.map((e, i) => retrieveOneEntity(e, i)),
+    );
+
+    return perEntity.flat().sort((a, b) => (b.score || 0) - (a.score || 0));
+  }
+
+  /**
    * Size-filtered catalog matches for list responses.
    */
   selectCatalogMatches(matches, queryAttributes, { strictSize = false } = {}) {
@@ -2139,7 +2382,7 @@ class QuestionAnsweringSystem {
     const answerInstructions = buildAnswerInstructions(
       effectiveMode,
       organisation,
-      { requestedCount, wantsProductUrls },
+      { requestedCount, wantsProductUrls, subIntent },
     );
 
     const userPrompt = `Context:
@@ -2242,6 +2485,67 @@ ${answerInstructions}`;
 
       blocks.push(block);
       totalChars += block.length;
+    }
+
+    return blocks.join("\n\n");
+  }
+
+  /**
+   * Build labeled compare context for COMPARE questions.
+   * Retrieval matches must be tagged with `_compareEntityName`.
+   */
+  buildComparePrebuiltContext({
+    matches = [],
+    entities = [],
+    compareAspect = null,
+  } = {}) {
+    const contextLimits = getContextLimitsForMode("brief");
+    const entityCount = Array.isArray(entities) ? entities.length : 0;
+    const perEntityBudget =
+      entityCount > 0
+        ? Math.max(500, Math.floor(contextLimits.maxTotalChars / entityCount))
+        : contextLimits.maxTotalChars;
+
+    const matchesByEntity = new Map();
+    for (const m of matches || []) {
+      let name = m?._compareEntityName;
+      if (!name) {
+        const payloadEntityName = m?.payload?.entity_name;
+        if (
+          typeof payloadEntityName === "string" &&
+          payloadEntityName.trim()
+        ) {
+          name = payloadEntityName.trim();
+        }
+      }
+      if (!name) continue;
+      if (!matchesByEntity.has(name)) matchesByEntity.set(name, []);
+      matchesByEntity.get(name).push(m);
+    }
+
+    const orderedEntities = (entities || []).filter((e) => e && e.name);
+    const fallbackEntities =
+      orderedEntities.length > 0
+        ? orderedEntities
+        : Array.from(matchesByEntity.keys()).map((name) => ({ name }));
+
+    const blocks = [];
+    if (compareAspect) {
+      blocks.push(`Comparison focus: ${compareAspect}`);
+    }
+
+    for (const e of fallbackEntities) {
+      const name = e.name;
+      const groupMatches = matchesByEntity.get(name) || [];
+      if (!groupMatches.length) continue;
+
+      const groupContext = this.getRelevantContext(groupMatches, {
+        maxChunkChars: contextLimits.maxChunkChars,
+        maxTotalChars: perEntityBudget,
+      });
+      if (!groupContext) continue;
+
+      blocks.push(`[Entity: ${name}]\n${groupContext}`);
     }
 
     return blocks.join("\n\n");
@@ -2492,10 +2796,16 @@ ${answerInstructions}`;
       );
 
       // Check if collection exists and get stats
-      const collections = await this.qdrantClient.getCollections();
-      const collectionExists = collections.collections.some(
-        (col) => col.name === collectionName,
+      let collectionExists = this._qdrantCollectionExistsCache.get(
+        collectionName,
       );
+      if (collectionExists === undefined) {
+        const collections = await this.qdrantClient.getCollections();
+        collectionExists = collections.collections.some(
+          (col) => col.name === collectionName,
+        );
+        this._qdrantCollectionExistsCache.set(collectionName, collectionExists);
+      }
 
       if (!collectionExists) {
         console.error(
@@ -2506,9 +2816,13 @@ ${answerInstructions}`;
 
       // Get collection info to check point count
       try {
-        const collectionInfo =
-          await this.qdrantClient.getCollection(collectionName);
-        const pointCount = collectionInfo.points_count || 0;
+        let pointCount = this._qdrantPointCountCache.get(collectionName);
+        if (pointCount === undefined) {
+          const collectionInfo =
+            await this.qdrantClient.getCollection(collectionName);
+          pointCount = collectionInfo.points_count || 0;
+          this._qdrantPointCountCache.set(collectionName, pointCount);
+        }
         console.log(
           `[QueryController] Collection "${collectionName}" has ${pointCount} total points`,
         );
@@ -2547,6 +2861,9 @@ ${answerInstructions}`;
 
       const buildFilter = (withSizeBoost = false) => {
         const must = [];
+        const extraMust = Array.isArray(options.extraMust)
+          ? options.extraMust
+          : [];
         if (userId) {
           must.push({
             key: "user_id",
@@ -2558,6 +2875,9 @@ ${answerInstructions}`;
             key: "sizes",
             match: { any: sizeTokens },
           });
+        }
+        if (extraMust.length > 0) {
+          must.push(...extraMust);
         }
         return must.length > 0 ? { must } : undefined;
       };
@@ -3083,7 +3403,13 @@ ${answerInstructions}`;
 
       const subIntent = routing.subIntent || null;
       let effectiveSubIntent = subIntent;
+      const isCompareRequest =
+        process.env.COMPARE_RETRIEVAL_ENABLED !== "false" &&
+        subIntent === "COMPARE" &&
+        Array.isArray(routing.entities) &&
+        routing.entities.length >= 2;
       const hasSizeFilter =
+        !isCompareRequest &&
         (queryNorm.sizes?.length > 0 || currentSizes?.length > 0) &&
         /\b(lash|lashes|product|style|collection)\b/i.test(normalizedQuestion);
 
@@ -3113,6 +3439,15 @@ ${answerInstructions}`;
         subIntent: effectiveSubIntent,
       });
 
+      // For COMPARE queries, rely on the router-provided entity keywords/attributes
+      // rather than regex-driven size/collection heuristics.
+      if (isCompareRequest) {
+        queryAttributes.sizes = [];
+        queryAttributes.collections = [];
+        queryAttributes.keywords = [];
+        queryAttributes.keywordSource = baseForEmbedding;
+      }
+
       // console.log(
       //   `[QueryController] Attributes: sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length} flags=${JSON.stringify(queryAttributes.flags)}`
       // );
@@ -3124,8 +3459,9 @@ ${answerInstructions}`;
       //   );
       // }
 
-      const catalogKeywords =
-        queryAttributes.keywords.length > 0
+      const catalogKeywords = isCompareRequest
+        ? []
+        : queryAttributes.keywords.length > 0
           ? queryAttributes.keywords
           : this.buildCatalogKeywords(queryAttributes.keywordSource, {
               ...queryNorm,
@@ -3231,20 +3567,34 @@ ${answerInstructions}`;
         semanticTopK = Math.max(semanticTopK, 15);
       }
 
-      let queryResponse = await this.runHybridRetrieval({
-        collectionName,
-        userIdString,
-        semanticTopK,
-        catalogKeywords,
-        getQuestionEmbedding,
-        queryAttributes,
-      });
+      let queryResponse;
+      if (isCompareRequest) {
+        queryResponse = await this.runCompareRetrieval({
+          collectionName,
+          userIdString,
+          entities: routing.entities,
+          requestedTopK,
+          scoreThreshold,
+          userId,
+          agentId,
+          conversationId,
+        });
+      } else {
+        queryResponse = await this.runHybridRetrieval({
+          collectionName,
+          userIdString,
+          semanticTopK,
+          catalogKeywords,
+          getQuestionEmbedding,
+          queryAttributes,
+        });
+      }
 
       // console.log("queryResponse data is : ", queryResponse);
 
       console.log("Effective : ", effectiveSubIntent);
 
-      if (effectiveSubIntent) {
+      if (effectiveSubIntent && !isCompareRequest) {
         const specialized = await this.trySpecializedRetrieval({
           subIntent: effectiveSubIntent,
           question,
@@ -3657,14 +4007,18 @@ ${answerInstructions}`;
           question,
           requestedTopK,
         );
-        const responseMode = listFallback
-          ? "list"
-          : contactFallback
-            ? "contact"
-            : "brief";
-        const historyLimit = isPremiumResponseMode(responseMode)
-          ? CHAT_HISTORY_LIMIT
-          : CHAT_HISTORY_LIMIT_BRIEF;
+        const responseMode = isCompareRequest
+          ? "brief"
+          : listFallback
+            ? "list"
+            : contactFallback
+              ? "contact"
+              : "brief";
+        const historyLimit = isCompareRequest
+          ? CHAT_HISTORY_LIMIT_BRIEF
+          : isPremiumResponseMode(responseMode)
+            ? CHAT_HISTORY_LIMIT
+            : CHAT_HISTORY_LIMIT_BRIEF;
 
         const answerResult = await this.generateAnswerFromMatches({
           question,
@@ -3675,12 +4029,19 @@ ${answerInstructions}`;
           answerOptions: {
             responseMode,
             requestedCount,
-            wantsProductUrls: wantsUrls,
+            wantsProductUrls: isCompareRequest ? false : wantsUrls,
             wasExpanded,
             retrievalMaxScore: maxScore,
             // Pass the LLM router's subIntent so determineMaxTokens uses it
             // instead of re-running English-only keyword classification.
             subIntent: effectiveSubIntent || null,
+            prebuiltContext: isCompareRequest
+              ? this.buildComparePrebuiltContext({
+                  matches: relevantMatches,
+                  entities: routing.entities,
+                  compareAspect: routing.compareAspect || null,
+                })
+              : undefined,
             // Pass Qdrant access params so buildPageMergeContext can expand pages
             collectionName,
             userId: userIdString,

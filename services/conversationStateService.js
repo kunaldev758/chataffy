@@ -18,6 +18,7 @@ function createEmptyRagState() {
       sizes: [],
       collection: null,
       productTerms: [],
+      compare: [],
     },
     lastStandaloneQuery: null,
     awaiting: null,
@@ -48,6 +49,9 @@ function normalizeRagState(raw) {
       productTerms: Array.isArray(entities.productTerms)
         ? entities.productTerms.filter(Boolean)
         : [],
+      compare: Array.isArray(entities.compare)
+        ? entities.compare.filter(Boolean)
+        : [],
     },
     lastStandaloneQuery: raw.lastStandaloneQuery || null,
     awaiting: raw.awaiting || null,
@@ -71,6 +75,9 @@ function formatStateForRouter(state) {
   if (entities.sizes?.length) parts.push(`sizes: ${entities.sizes.join(", ")}`);
   if (entities.productTerms?.length) {
     parts.push(`terms: ${entities.productTerms.join(", ")}`);
+  }
+  if (Array.isArray(entities.compare) && entities.compare.length > 0) {
+    parts.push(`compare: ${entities.compare.slice(0, 4).join(" | ")}`);
   }
   if (normalized.lastIntent) parts.push(`last intent: ${normalized.lastIntent}`);
   if (normalized.awaiting) parts.push(`awaiting: ${normalized.awaiting}`);
@@ -182,6 +189,14 @@ function buildUpdatedRagState({
   const entities = clearEntities
     ? createEmptyRagState().entities
     : extractEntitiesFromMatches(matches, queryAttributes);
+
+  // Preserve compare entities for follow-ups (e.g. "which one is cheaper?").
+  if (routing?.subIntent === "COMPARE" && Array.isArray(routing.entities)) {
+    entities.compare = routing.entities
+      .map((e) => (e?.name ? String(e.name) : e?.query ? String(e.query) : null))
+      .filter(Boolean)
+      .slice(0, 4);
+  }
 
   const nextState = {
     lastIntent: routing.route || current.lastIntent,
