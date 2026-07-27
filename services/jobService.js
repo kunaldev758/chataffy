@@ -1030,6 +1030,15 @@ new Worker(
               chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
               lastEdit: Date.now(),
             });
+            await Url.updateOne(
+              { url: doc.originalUrl, agentId: agentId },
+              {
+                $set: {
+                  trainStatus: 1,
+                  error: null,
+                },
+              },
+            );
           } else if (status == 2) {
             await TrainingModel.create({
               userId,

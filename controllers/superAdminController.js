@@ -908,6 +908,15 @@ module.exports.setCustomLimits = async (req, res) => {
     const planDoc = await Plan.getPlanByName(client.plan);
     const plim = planDoc?.limits || {};
 
+    // Effective storage before this save (custom override or plan default)
+    const previousMaxStorage =
+      client.customLimits?.isCustomLimits &&
+      client.customLimits?.maxStorage != null
+        ? Number(client.customLimits.maxStorage)
+        : plim.maxStorage != null
+          ? Number(plim.maxStorage)
+          : null;
+
     const mergeDim = (bodyVal, planVal) => {
       if (bodyVal !== undefined && bodyVal !== null && bodyVal !== "") {
         const n = Number(bodyVal);
@@ -970,14 +979,58 @@ module.exports.setCustomLimits = async (req, res) => {
 
     await client.save();
 
+    // Only when custom storage limit is increased: auto-train remaining trainStatus: 0 URLs.
+    let resumeTraining = null;
+    const newMaxStorage =
+      client.customLimits?.isCustomLimits && client.customLimits?.maxStorage != null
+        ? Number(client.customLimits.maxStorage)
+        : null;
+    const storageLimitIncreased =
+      Boolean(isCustomLimits) &&
+      newMaxStorage != null &&
+      Number.isFinite(newMaxStorage) &&
+      (previousMaxStorage == null ||
+        !Number.isFinite(previousMaxStorage) ||
+        newMaxStorage > previousMaxStorage);
+
+    if (storageLimitIncreased && client.userId) {
+      try {
+        const {
+          continueUntrainedUrlsForUser,
+        } = require("../services/continueUntrainedUrlsService");
+        resumeTraining = await continueUntrainedUrlsForUser(client.userId);
+        console.log(
+          `[setCustomLimits] Storage limit increased (${previousMaxStorage} -> ${newMaxStorage}); resumed untrained URLs:`,
+          resumeTraining,
+        );
+      } catch (resumeError) {
+        console.error(
+          "[setCustomLimits] Failed to resume untrained URLs:",
+          resumeError,
+        );
+        resumeTraining = {
+          agentsQueued: 0,
+          totalUrls: 0,
+          error: resumeError?.message || "Failed to resume training",
+        };
+      }
+    }
+
+    const baseMessage = client.customLimits.isCustomLimits
+      ? "Limits saved successfully"
+      : "Per-client limits cleared; global plan limits apply";
+    const resumeMessage =
+      resumeTraining?.agentsQueued > 0
+        ? ` Resumed training for ${resumeTraining.totalUrls} untrained page(s) across ${resumeTraining.agentsQueued} agent(s).`
+        : "";
+
     res.status(200).json({
       success: true,
-      message: client.customLimits.isCustomLimits
-        ? "Limits saved successfully"
-        : "Per-client limits cleared; global plan limits apply",
+      message: `${baseMessage}${resumeMessage}`,
       data: {
         customLimits: client.customLimits,
         upgradePlanStatus: client.upgradePlanStatus,
+        ...(resumeTraining ? { resumeTraining } : {}),
       },
     });
   } catch (error) {

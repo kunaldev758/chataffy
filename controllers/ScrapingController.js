@@ -984,9 +984,8 @@ async bulkInsertUrls(userId,agentId, urls) {
 
   // Upgrade plan and continue scraping
   async ContinueScrappingAfterUpgrade(req, res) {
+    const { userId, agentId } = req.body;
     try {
-      const { userId, agentId } = req.body;
-
       if (!userId || !agentId) {
         return res.status(400).json({
           success: false,
@@ -994,74 +993,50 @@ async bulkInsertUrls(userId,agentId, urls) {
         });
       }
 
-      const client = await Client.findOne({ userId });
-      if (!client) {
+      const {
+        continueUntrainedUrlsForAgent,
+      } = require("../services/continueUntrainedUrlsService");
+
+      const result = await continueUntrainedUrlsForAgent(userId, agentId);
+
+      if (result.skippedReason === "client_not_found") {
         return res.status(404).json({
           success: false,
           error: "Client not found",
         });
       }
-      const agent = await Agent.findOne({ _id: agentId });
-      if (!agent) {
+      if (result.skippedReason === "agent_not_found") {
         return res.status(404).json({
           success: false,
           error: "Agent not found",
         });
       }
-      const qdrantIndexName =
-        client?.plan == "free"
-          ? agent?.qdrantIndexName
-          : agent?.qdrantIndexNamePaid;
-      const plan = await PlanService.getUserPlan(userId);
-
-      const remainingUrls = filterAndDedupeWebUrls(
-        await Url.distinct("url", {
-        // userId: userId,
-        agentId: agentId,
-        trainStatus: 0,
-        }),
-      );
-      if (remainingUrls.length <= 0) {
-        await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
+      if (result.skippedReason === "no_urls") {
+        await Agent.updateOne(
+          { _id: agentId },
+          { $set: { dataTrainingStatus: 0 } },
+        );
         appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
           message: "No URL found to scrape",
-        });
-      } else {
-        const scrapingStartTime = new Date();
-        await Agent.updateOne({ 
-          _id: agentId 
-        }, { 
-          $set: { 
-            dataTrainingStatus: 1,
-            scrapingStartTime: scrapingStartTime
-          } 
-        });
-        appEvents.emit("userEvent", agentId, "training-event", {
-          agent: await Agent.findOne({ _id: agentId }),
-        });
-
-        await urlProcessingQueue.add("processSingleUrl", {
-          urls: remainingUrls,
-          userId,
-          qdrantIndexName,
-          plan,
-          agentId: agentId,
-          startTime: scrapingStartTime.getTime(),
-          totalUrls: remainingUrls.length,
         });
       }
 
       res.json({
         success: true,
-        // message: "Plan upgraded and scraping continued",
+        data: result,
       });
     } catch (error) {
-      await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
-      appEvents.emit("userEvent", agentId, "training-event", {
-        agent: await Agent.findOne({ _id: agentId }),
-        message: error.message,
-      });
+      if (agentId) {
+        await Agent.updateOne(
+          { _id: agentId },
+          { $set: { dataTrainingStatus: 0 } },
+        );
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
+          message: error.message,
+        });
+      }
       console.error("Error upgrading plan and continuing scraping:", error);
       res.status(500).json({
         success: false,
