@@ -92,7 +92,7 @@ const CHAT_MODEL_BRIEF = process.env.OPENAI_CHAT_MODEL_BRIEF || "gpt-4.1-mini";
 const CHAT_HISTORY_LIMIT = Number(process.env.CHAT_HISTORY_LIMIT) || 5;
 const CHAT_HISTORY_LIMIT_BRIEF =
   Number(process.env.CHAT_HISTORY_LIMIT_BRIEF) || 5;
-const RAG_MAX_CHUNK_CHARS = Number(process.env.RAG_MAX_CHUNK_CHARS) || 1200;
+const RAG_MAX_CHUNK_CHARS = Number(process.env.RAG_MAX_CHUNK_CHARS) || 2000;
 const RAG_MAX_CHUNK_CHARS_BRIEF =
   Number(process.env.RAG_MAX_CHUNK_CHARS_BRIEF) || 6000;
 const RAG_MAX_CONTEXT_CHARS = Number(process.env.RAG_MAX_CONTEXT_CHARS) || 6000;
@@ -2342,6 +2342,8 @@ class QuestionAnsweringSystem {
     const premiumModel = premiumCfg.model || CHAT_MODEL_PREMIUM;
     const briefModel = briefCfg.model || CHAT_MODEL_BRIEF;
 
+    console.log("context to check : ",context);
+
     const chatModel = selectChatModel({
       responseMode: effectiveMode,
       retrievalMaxScore,
@@ -2555,33 +2557,101 @@ ${answerInstructions}`;
    * Scroll Qdrant for ALL stored chunks belonging to a specific URL.
    * Filters by user_id + agent_id + url for an exact page fetch.
    */
+  // async fetchAllChunksForUrl(collectionName, url, userId, agentId) {
+  //   const must = [
+  //     { key: "url", match: { value: url } },
+  //     { key: "user_id", match: { value: userId.toString() } },
+  //   ];
+  //   if (agentId) {
+  //     must.push({ key: "agent_id", match: { value: agentId.toString() } });
+  //   }
+
+  //   const points = [];
+  //   let nextPage = null;
+
+  //   while (true) {
+  //     const params = {
+  //       limit: 256,
+  //       with_payload: true,
+  //       filter: { must },
+  //       ...(nextPage ? { offset: nextPage } : {}),
+  //     };
+  //     const res = await this.qdrantClient.scroll(collectionName, params);
+  //     points.push(...(res.points || []));
+  //     if (!res.next_page_offset) break;
+  //     nextPage = res.next_page_offset;
+  //   }
+
+  //   return points;
+  // }
+
+
   async fetchAllChunksForUrl(collectionName, url, userId, agentId) {
-    const must = [
-      { key: "url", match: { value: url } },
-      { key: "user_id", match: { value: userId.toString() } },
-    ];
-    if (agentId) {
-      must.push({ key: "agent_id", match: { value: agentId.toString() } });
-    }
 
-    const points = [];
-    let nextPage = null;
+  console.log("fetch all chunks from url check  :",url)
+  const must = [
+    { key: "url", match: { value: url } },
+    { key: "user_id", match: { value: userId.toString() } },
+  ];
 
-    while (true) {
-      const params = {
-        limit: 256,
-        with_payload: true,
-        filter: { must },
-        ...(nextPage ? { offset: nextPage } : {}),
-      };
-      const res = await this.qdrantClient.scroll(collectionName, params);
-      points.push(...(res.points || []));
-      if (!res.next_page_offset) break;
-      nextPage = res.next_page_offset;
-    }
-
-    return points;
+  if (agentId) {
+    must.push({
+      key: "agent_id",
+      match: { value: agentId.toString() },
+    });
   }
+
+  const points = [];
+  const seenIds = new Set();
+
+  let nextPage = null;
+  let pageCount = 0;
+  const MAX_PAGES = 100;
+
+  while (true) {
+    if (++pageCount > MAX_PAGES) {
+      throw new Error(
+        `Exceeded maximum scroll pages (${MAX_PAGES}) while fetching chunks for URL: ${url}`
+      );
+    }
+
+    const params = {
+      limit: 256,
+      filter: { must },
+      with_payload: true, // Replace with an array of payload fields if desired
+      with_vector: false,
+      ...(nextPage ? { offset: nextPage } : {}),
+    };
+
+    const res = await this.qdrantClient.scroll(collectionName, params);
+
+    if (!res?.points?.length) {
+      break;
+    }
+
+    for (const point of res.points) {
+      if (seenIds.has(point.id)) continue;
+
+      seenIds.add(point.id);
+      points.push(point);
+    }
+
+    if (!res.next_page_offset) {
+      break;
+    }
+
+    nextPage = res.next_page_offset;
+  }
+
+  // Ensure chunks are returned in document order
+  points.sort((a, b) => {
+    const ai = a.payload?.chunk_index ?? 0;
+    const bi = b.payload?.chunk_index ?? 0;
+    return ai - bi;
+  });
+
+  return points;
+}
 
   /**
    * Deduplicate chunks from multiple training runs and sort by chunk_index.
@@ -3567,6 +3637,11 @@ ${answerInstructions}`;
         semanticTopK = Math.max(semanticTopK, 15);
       }
 
+
+      console.log("semantic topK check : ",semanticTopK);
+
+      semanticTopK = 30;
+
       let queryResponse;
       if (isCompareRequest) {
         queryResponse = await this.runCompareRetrieval({
@@ -3590,7 +3665,7 @@ ${answerInstructions}`;
         });
       }
 
-      // console.log("queryResponse data is : ", queryResponse);
+      console.log("queryResponse data is : ", queryResponse);
 
       console.log("Effective : ", effectiveSubIntent);
 
@@ -3610,7 +3685,7 @@ ${answerInstructions}`;
           queryAttributes,
         });
 
-        // console.log("Specialized retrieval result: ", specialized);
+        console.log("Specialized retrieval result: ", specialized);
         if (specialized) {
           const specializedResult = await this.generateAnswerFromMatches({
             question,
