@@ -614,6 +614,7 @@ class QdrantVectorStoreManager {
     queryEmbedding,
     queryText = "",
     sparseBoost = {},
+    lexicalTerms = [],
     topK = 10,
     filter,
   }) {
@@ -637,8 +638,18 @@ class QdrantVectorStoreManager {
       }));
     }
 
-    const prefetchLimit = Math.max(topK * 2, 20);
-    const sparseVector = encodeSparseVector(queryText, sparseBoost);
+    // Deep prefetch per channel (industry: 50–100), then RRF fuse to topK
+    const prefetchLimit = Math.min(
+      100,
+      Math.max(topK, Number(process.env.RAG_HYBRID_PREFETCH) || topK * 2, 50),
+    );
+    const sparseVector = encodeSparseVector(queryText, {
+      ...sparseBoost,
+      lexicalTerms:
+        lexicalTerms?.length > 0
+          ? lexicalTerms
+          : sparseBoost.lexicalTerms || [],
+    });
 
     const prefetch = [
       {

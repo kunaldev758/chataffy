@@ -2,6 +2,9 @@
  * Intent-driven Retrieval Plan.
  * Facets are soft signals for rerank/sparse — not hard Qdrant filters
  * (except tenant isolation and rare high-confidence indexed ids).
+ *
+ * Industry pattern: retrieve deep → multi-signal rerank → take top-N by rank.
+ * RRF fusion scores are rank-based — never gate on absolute thresholds.
  */
 
 const HARD_FILTER_KEYS = new Set(["product_id", "sku"]);
@@ -90,6 +93,7 @@ function resolveContextMode(subIntent) {
   if (subIntent === "PAGE_LINKS") return "links";
   if (subIntent === "CONTACT_INFO") return "contact";
   if (subIntent === "COMPARE") return "page_merge";
+  // Industry default: top ranked chunks, not whole-page merge
   return "parent_chunks";
 }
 
@@ -99,6 +103,8 @@ function resolveTokenBudget(contextMode) {
       return Number(process.env.RAG_MAX_CONTEXT_CHARS_LIST) || 3000;
     case "links":
       return Number(process.env.RAG_MAX_CONTEXT_CHARS_LINKS) || 3000;
+    case "page_merge":
+      return Number(process.env.RAG_MAX_CONTEXT_CHARS) || 4000;
     case "contact":
       return Number(process.env.RAG_MAX_CONTEXT_CHARS_BRIEF) || 4000;
     default:
@@ -106,36 +112,40 @@ function resolveTokenBudget(contextMode) {
   }
 }
 
+/**
+ * Deep candidate pool for RRF + rerank; finalTopK stays small for context.
+ * Industry: prefetch 50–100 per channel, keep ~12–15 for the LLM.
+ */
 function resolveTopK(subIntent, requestedTopK = 10) {
   if (subIntent === "IN_PAGE_LIST") {
     return {
-      topKDense: 30,
-      topKSparse: 30,
+      topKDense: 80,
+      topKSparse: 80,
       finalTopK: Math.max(15, Math.min(20, requestedTopK * 2)),
-      semanticTopK: Math.max(15, Math.min(30, requestedTopK * 3)),
+      semanticTopK: 80,
     };
   }
   if (subIntent === "CONTACT_INFO") {
     return {
-      topKDense: 20,
-      topKSparse: 20,
+      topKDense: 50,
+      topKSparse: 50,
       finalTopK: 12,
-      semanticTopK: 12,
+      semanticTopK: 50,
     };
   }
   if (subIntent === "PAGE_LINKS") {
     return {
-      topKDense: 24,
-      topKSparse: 24,
-      finalTopK: Math.max(12, requestedTopK * 2),
-      semanticTopK: Math.max(12, requestedTopK * 2),
+      topKDense: 60,
+      topKSparse: 60,
+      finalTopK: Math.max(12, Math.min(18, requestedTopK * 2)),
+      semanticTopK: 60,
     };
   }
   return {
-    topKDense: 30,
-    topKSparse: 30,
-    finalTopK: Math.max(15, requestedTopK),
-    semanticTopK: Math.max(10, requestedTopK),
+    topKDense: 60,
+    topKSparse: 60,
+    finalTopK: Math.max(12, Math.min(15, requestedTopK)),
+    semanticTopK: 60,
   };
 }
 
@@ -158,13 +168,11 @@ function buildHardFilters(facets = []) {
  * @param {object} params.routing - from routeQuery
  * @param {object} params.queryAttributes - from extractQueryAttributes
  * @param {number} [params.requestedTopK]
- * @param {number} [params.scoreThreshold]
  */
 function buildRetrievalPlan({
   routing = {},
   queryAttributes = {},
   requestedTopK = 10,
-  scoreThreshold = 0.4,
 } = {}) {
   const intent = routing.route || queryAttributes.route || "SEMANTIC_RAG";
   const subIntent =
@@ -176,9 +184,6 @@ function buildRetrievalPlan({
   const tokenBudget = resolveTokenBudget(contextMode);
   const topK = resolveTopK(subIntent, requestedTopK);
   const hardFilters = buildHardFilters(facets);
-
-
-  console.log("check facets :",facets);
 
   const softBoostKeys = [
     ...new Set(
@@ -202,15 +207,13 @@ function buildRetrievalPlan({
       topKSparse: topK.topKSparse,
       finalTopK: topK.finalTopK,
       semanticTopK: topK.semanticTopK,
+      // Rank-based selection only — no absolute RRF score gate
+      useScoreThreshold: false,
       allowRelax: true,
-      // Keyword payload scroll is optional legacy assist; sparse RRF is primary lexical path
       useKeywordScroll: false,
       contextMode,
       tokenBudget,
-      scoreThreshold,
       minResults: Math.min(5, topK.finalTopK),
-      relaxThresholdDelta: 0.15,
-      minScoreFloor: 0.2,
     },
   };
 
@@ -218,29 +221,26 @@ function buildRetrievalPlan({
 }
 
 /**
- * Select matches using plan policy (score threshold + optional soft facet preference).
- * Never hard-filters by size.
+ * Rank-based selection: sort by reranked score, take finalTopK.
+ * Never filters on absolute RRF/hybrid scores (they are not cosine).
  */
 function selectMatchesByPlan(matches, plan, { relaxed = false } = {}) {
   if (!matches?.length) return [];
 
   const policy = plan?.retrievalPolicy || {};
-  let threshold = policy.scoreThreshold ?? 0.4;
+  const sorted = [...matches].sort(
+    (a, b) => (b.score || 0) - (a.score || 0),
+  );
+
+  let finalTopK = policy.finalTopK || 15;
   if (relaxed) {
-    threshold = Math.max(
-      policy.minScoreFloor ?? 0.2,
-      threshold - (policy.relaxThresholdDelta ?? 0.15),
+    finalTopK = Math.min(
+      sorted.length,
+      Math.max(finalTopK, policy.minResults || 5) + 5,
     );
   }
 
-  const isList = policy.contextMode === "list";
-  // List intents: keep more candidates; still no hard size gate
-  const filtered = isList
-    ? [...matches].sort((a, b) => (b.score || 0) - (a.score || 0))
-    : matches.filter((m) => (m.score ?? 0) >= threshold);
-
-  const finalTopK = policy.finalTopK || 15;
-  return filtered.slice(0, Math.max(finalTopK, 15));
+  return sorted.slice(0, Math.max(finalTopK, 12));
 }
 
 function logRetrievalPlan(plan) {
@@ -253,7 +253,7 @@ function logRetrievalPlan(plan) {
       `context=${plan.retrievalPolicy?.contextMode} ` +
       `facets=[${facetStr}] lexical=${(plan.lexicalTerms || []).length} ` +
       `hardFilters=${(plan.retrievalPolicy?.hardFilters || []).length} ` +
-      `topK=${plan.retrievalPolicy?.semanticTopK}/${plan.retrievalPolicy?.finalTopK}`,
+      `candidates=${plan.retrievalPolicy?.semanticTopK} final=${plan.retrievalPolicy?.finalTopK}`,
   );
 }
 

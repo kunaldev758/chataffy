@@ -274,7 +274,7 @@ function usageTypeForChatSelection({
 }
 
 function getContextLimitsForMode(responseMode) {
-  if (responseMode === "page_links") {
+  if (responseMode === "page_links" || responseMode === "links") {
     return {
       maxChunkChars: RAG_MAX_CHUNK_CHARS,
       maxTotalChars: RAG_MAX_CONTEXT_CHARS_LINKS,
@@ -948,7 +948,7 @@ class QuestionAnsweringSystem {
 
     if (answerOptions.prebuiltContext) {
       context = answerOptions.prebuiltContext;
-    } else if (effectiveMode === "page_links") {
+    } else if (effectiveMode === "page_links" || effectiveMode === "links") {
       context = this.buildCompactPageLinksContext(matches, {
         ...contextLimits,
         requestedCount,
@@ -958,15 +958,20 @@ class QuestionAnsweringSystem {
         ...contextLimits,
         requestedCount,
       });
-    } else {
-      // "brief" and "contact" modes: use page-merge context builder.
-      // Falls back to getRelevantContext automatically when collectionName/userId are absent.
+    } else if (
+      answerOptions.contextMode === "page_merge" ||
+      effectiveMode === "page_merge"
+    ) {
+      // Whole-page merge only when the plan explicitly requests it (e.g. COMPARE)
       context = await this.buildPageMergeContext(matches, {
         ...contextLimits,
         collectionName: answerOptions.collectionName,
         userId: answerOptions.userId,
         agentId: answerOptions.agentId,
       });
+    } else {
+      // Industry default: top ranked chunks only (no whole-page expansion)
+      context = this.getRelevantContext(matches, contextLimits);
     }
 
     console.log(
@@ -1309,19 +1314,23 @@ class QuestionAnsweringSystem {
     return expanded.sort((a, b) => (b.score || 0) - (a.score || 0));
   }
 
-  applyAttributeRerank(matches, queryAttributes, label = "hybrid") {
+  applyAttributeRerank(matches, queryAttributes, label = "hybrid", lexicalTerms = []) {
     if (!matches?.length || !queryAttributes) return matches || [];
     const before = matches.slice(0, 8);
     const reranked = rerankByAttributes(matches, queryAttributes, {
       subIntent: queryAttributes.subIntent,
+      lexicalTerms:
+        lexicalTerms?.length > 0
+          ? lexicalTerms
+          : queryAttributes.keywords || [],
     });
     logRerankStats(label, before, reranked);
     return reranked;
   }
 
   /**
-   * Plan-driven retrieval: dense+sparse RRF (via queryQdrant), soft facet rerank,
-   * optional product expand. No hard size filters.
+   * Plan-driven retrieval: dense+sparse RRF (via queryQdrant), multi-signal rerank,
+   * optional product expand. No hard size filters. No absolute RRF score gate.
    */
   async runHybridRetrieval({
     collectionName,
@@ -1335,7 +1344,7 @@ class QuestionAnsweringSystem {
     plan = null,
   }) {
     const policy = plan?.retrievalPolicy || {};
-    const topK = semanticTopK || policy.semanticTopK || 10;
+    const topK = semanticTopK || policy.semanticTopK || 60;
     const lexicalTerms =
       plan?.lexicalTerms?.length > 0
         ? plan.lexicalTerms
@@ -1361,6 +1370,7 @@ class QuestionAnsweringSystem {
             "",
           agentId,
           hardFilters: policy.hardFilters || [],
+          lexicalTerms,
         },
       ),
       runKeyword
@@ -1379,7 +1389,7 @@ class QuestionAnsweringSystem {
       );
     } else {
       console.log(
-        `[QueryController] RRF retrieval: ${vectorResults.length} vector hits (keyword scroll off)`,
+        `[QueryController] RRF retrieval: ${vectorResults.length} candidates (prefetch depth=${topK}, keyword scroll off)`,
       );
     }
 
@@ -1394,6 +1404,7 @@ class QuestionAnsweringSystem {
       expanded,
       queryAttributes || plan?.queryAttributes,
       "hybrid",
+      lexicalTerms,
     );
   }
 
@@ -2438,7 +2449,8 @@ ${answerInstructions}`;
   }
 
   /**
-   * Page-merge context builder (replaces getRelevantContext for "brief" mode).
+   * Page-merge context builder — only when plan contextMode is "page_merge".
+   * Default brief answers use getRelevantContext (top ranked chunks).
    *
    * Flow:
    *  1. Group top-N retrieval matches by URL.
@@ -2692,6 +2704,7 @@ ${answerInstructions}`;
 
       const vectorStore = new QdrantVectorStoreManager(collectionName);
       const queryText = options.queryText || "";
+      const lexicalTerms = options.lexicalTerms || [];
 
       const executeSearch = async (filter) => {
         const mode = await vectorStore.getCollectionVectorMode();
@@ -2699,6 +2712,7 @@ ${answerInstructions}`;
           return vectorStore.hybridQuery({
             queryEmbedding,
             queryText,
+            lexicalTerms,
             topK,
             filter,
           });
@@ -3204,10 +3218,6 @@ ${answerInstructions}`;
         routing,
         queryAttributes,
         requestedTopK,
-        scoreThreshold:
-          widgetData?.scoreThreshold !== undefined
-            ? widgetData.scoreThreshold
-            : scoreThreshold,
       });
 
       console.log("retrivel plan check :", retrievalPlan);
@@ -3304,24 +3314,12 @@ ${answerInstructions}`;
         return questionEmbedding;
       };
 
+      // Prefer plan candidate depth (50–80); do not shrink below plan for RRF+rerank
       let semanticTopK =
         retrievalPlan.retrievalPolicy.semanticTopK ||
-        (subIntent === "IN_PAGE_LIST"
-          ? Math.max(
-              10,
-              Math.min(
-                20,
-                this.extractRequestedCount(question, requestedTopK) * 3,
-              ),
-            )
-          : subIntent === "CONTACT_INFO"
-            ? 12
-            : subIntent === "PAGE_LINKS"
-              ? Math.max(
-                  requestedTopK,
-                  this.extractRequestedCount(question, requestedTopK) * 2,
-                )
-              : requestedTopK);
+        Math.max(60, requestedTopK * 3);
+
+      console.log("check semantic topK:", semanticTopK);
 
       let queryResponse = await this.runHybridRetrieval({
         collectionName,
@@ -3460,71 +3458,48 @@ ${answerInstructions}`;
         );
       }
 
-      // Get threshold from widget settings or use plan / options
-      const widgetThreshold = widgetData?.scoreThreshold;
-      let effectiveThreshold =
-        widgetThreshold !== undefined
-          ? widgetThreshold
-          : retrievalPlan.retrievalPolicy.scoreThreshold ?? scoreThreshold;
-
-      retrievalPlan.retrievalPolicy.scoreThreshold = effectiveThreshold;
-
+      // Rank-based selection after multi-signal rerank (no absolute RRF threshold)
       const catalogListQuery =
         retrievalPlan.retrievalPolicy.contextMode === "list";
 
-      if (effectiveThreshold < 0.3) {
-        console.warn(
-          `[QueryController] Low score threshold (${effectiveThreshold}) may include irrelevant results. Consider using 0.4-0.5 for better quality.`,
-        );
-      }
-
-      // Plan-driven selection — no hard size catalog gate
       let relevantMatches = selectMatchesByPlan(queryResponse, retrievalPlan, {
         relaxed: false,
       });
 
       if (catalogListQuery && relevantMatches.length > 0) {
         console.log(
-          `[QueryController] List context: using ${relevantMatches.length} RRF+reranked chunks (no size hard filter)`,
+          `[QueryController] List context: using ${relevantMatches.length} RRF+reranked chunks (rank-based, no score gate)`,
         );
       }
 
-      // Check if query is completely irrelevant (all scores are very low)
       const maxScore =
         queryResponse.length > 0
-          ? Math.max(...queryResponse.map((m) => m.score))
+          ? Math.max(...queryResponse.map((m) => m.score ?? 0))
           : 0;
 
-      const IRRELEVANT_THRESHOLD = 0.3;
-      const isIrrelevant =
-        !catalogListQuery &&
-        queryResponse.length > 0 &&
-        maxScore < IRRELEVANT_THRESHOLD;
+      // Absolute RRF/cosine thresholds are unreliable after fusion+rerank.
+      // Only treat as empty/irrelevant when retrieval returned nothing.
+      const isIrrelevant = queryResponse.length === 0;
 
       if (isIrrelevant) {
         console.warn(
-          `[QueryController] IRRELEVANT QUERY DETECTED: "${question.substring(0, 50)}..." | Max similarity score: ${maxScore.toFixed(3)} (below threshold ${IRRELEVANT_THRESHOLD}). Will redirect user.`,
+          `[QueryController] No retrieval candidates for: "${question.substring(0, 50)}..."`,
         );
       }
 
-      // Progressive relax: lower threshold / fill up to finalTopK
+      // If too few after cut, expand final window slightly (still rank-based)
       if (
-        relevantMatches.length === 0 &&
-        queryResponse.length > 0 &&
         !isIrrelevant &&
+        relevantMatches.length <
+          (retrievalPlan.retrievalPolicy.minResults || 5) &&
         retrievalPlan.retrievalPolicy.allowRelax
       ) {
         relevantMatches = selectMatchesByPlan(queryResponse, retrievalPlan, {
           relaxed: true,
         });
         if (relevantMatches.length > 0) {
-          effectiveThreshold = Math.max(
-            retrievalPlan.retrievalPolicy.minScoreFloor ?? 0.2,
-            effectiveThreshold -
-              (retrievalPlan.retrievalPolicy.relaxThresholdDelta ?? 0.15),
-          );
           console.warn(
-            `[QueryController] Progressive relax: using ${relevantMatches.length} matches at threshold ${effectiveThreshold.toFixed(2)}`,
+            `[QueryController] Progressive expand: using ${relevantMatches.length} rank-ordered matches`,
           );
         }
       }
@@ -3539,7 +3514,7 @@ ${answerInstructions}`;
           (retrievalPlan.retrievalPolicy.finalTopK || requestedTopK) -
           relevantMatches.length;
         const supplemental = [...queryResponse]
-          .sort((a, b) => b.score - a.score)
+          .sort((a, b) => (b.score || 0) - (a.score || 0))
           .filter((m) => !relevantMatches.find((r) => r.id === m.id))
           .slice(0, Math.max(0, needed));
 
@@ -3654,7 +3629,7 @@ ${answerInstructions}`;
       //   }
       // } else
 
-      if (relevantMatches.length === 0 || maxScore < IRRELEVANT_THRESHOLD) {
+      if (relevantMatches.length === 0 && queryResponse.length > 0) {
 
         console.log("check 1 : ",)
         const onTopicResult = await this.answerOnTopicWithFallback({
@@ -3674,7 +3649,7 @@ ${answerInstructions}`;
         });
         finalAnswer = onTopicResult.answer;
         contextMatchesForSources = onTopicResult.matches || [];
-      } else if (relevantMatches.length === 0 || isIrrelevant) {
+      } else if (queryResponse.length === 0 || isIrrelevant) {
 
         console.log("check 2 : ",)
         const useLightTemplate = USE_LIGHTWEIGHT_RESPONSES && isIrrelevant;
@@ -3696,9 +3671,7 @@ ${answerInstructions}`;
         } else {
 
           console.log("check 3 : ");
-          const contextMessage = isIrrelevant
-            ? `The user asked: "${question}". This question is completely unrelated to ${companyName} (similarity score: ${maxScore.toFixed(3)}). Redirect politely and offer help with ${companyName}'s services.`
-            : `The user asked: "${question}". This question may not be directly related to ${companyName}. Redirect politely and offer help with relevant topics.`;
+          const contextMessage = `The user asked: "${question}". No matching knowledge-base content was found for ${companyName}. Redirect politely and offer help with relevant topics.`;
 
           const offTopicHistory = getChatHistoryFormatted(
             CHAT_HISTORY_LIMIT_BRIEF,
@@ -3746,8 +3719,10 @@ ${answerInstructions}`;
             : retrievalPlan.retrievalPolicy.contextMode === "contact"
               ? "contact"
               : retrievalPlan.retrievalPolicy.contextMode === "links"
-                ? "links"
-                : "brief";
+                ? "page_links"
+                : retrievalPlan.retrievalPolicy.contextMode === "page_merge"
+                  ? "page_merge"
+                  : "brief";
         let requestedCount =
           responseMode === "list"
             ? this.extractRequestedCount(question, requestedTopK)
@@ -3761,6 +3736,7 @@ ${answerInstructions}`;
           websiteData,
           answerOptions: {
             responseMode,
+            contextMode: retrievalPlan.retrievalPolicy.contextMode,
             requestedCount,
             wantsProductUrls: false,
             wasExpanded: queryWasEnriched,
