@@ -44,8 +44,12 @@ const {
 const {
   extractQueryAttributes,
   needsKeywordRetrieval,
-  isExplicitSizedCatalogQuery,
 } = require("../utils/queryAttributes");
+const {
+  buildRetrievalPlan,
+  selectMatchesByPlan,
+  logRetrievalPlan,
+} = require("../services/retrievalPlan");
 const {
   rerankByAttributes,
   logRerankStats,
@@ -933,7 +937,12 @@ class QuestionAnsweringSystem {
       }
     }
 
-    const contextLimits = getContextLimitsForMode(effectiveMode);
+    const contextLimits = {
+      ...getContextLimitsForMode(effectiveMode),
+      ...(answerOptions.maxTotalChars
+        ? { maxTotalChars: answerOptions.maxTotalChars }
+        : {}),
+    };
 
     console.log("context limits : ", contextLimits);
     let context;
@@ -1311,6 +1320,10 @@ class QuestionAnsweringSystem {
     return reranked;
   }
 
+  /**
+   * Plan-driven retrieval: dense+sparse RRF (via queryQdrant), soft facet rerank,
+   * optional product expand. No hard size filters.
+   */
   async runHybridRetrieval({
     collectionName,
     userIdString,
@@ -1320,51 +1333,54 @@ class QuestionAnsweringSystem {
     queryAttributes,
     queryText = "",
     agentId = null,
+    plan = null,
   }) {
-    const runKeyword =
-      needsKeywordRetrieval(queryAttributes) && catalogKeywords?.length > 0;
+    const policy = plan?.retrievalPolicy || {};
+    const topK = semanticTopK || policy.semanticTopK || 10;
+    const lexicalTerms =
+      plan?.lexicalTerms?.length > 0
+        ? plan.lexicalTerms
+        : catalogKeywords || queryAttributes?.keywords || [];
 
-    const sizeKeywords = (queryAttributes?.sizes || []).map((s) =>
-      s.replace(/\s/g, "").toLowerCase(),
-    );
-    const keywordList = runKeyword
-      ? [...new Set([...sizeKeywords, ...catalogKeywords])]
-      : catalogKeywords;
+    // Keyword payload scroll only when plan opts in (default: false — sparse RRF handles lexical)
+    const runKeyword =
+      Boolean(policy.useKeywordScroll) &&
+      needsKeywordRetrieval(queryAttributes) &&
+      lexicalTerms.length > 0;
 
     const [vectorResults, keywordPoints] = await Promise.all([
       this.queryQdrant(
         collectionName,
         await getQuestionEmbedding(),
-        semanticTopK,
+        topK,
         userIdString,
         {
-          sizes: queryAttributes?.sizes,
           queryText:
             queryText ||
             queryAttributes?.retrievalQuery ||
             queryAttributes?.keywordSource ||
             "",
           agentId,
+          hardFilters: policy.hardFilters || [],
         },
       ),
       runKeyword
         ? this.structuralFetchByKeywords(
-          collectionName,
-          keywordList,
-          userIdString,
-          isExplicitSizedCatalogQuery(
-            queryAttributes?.normalizedQuestion,
-            queryAttributes,
+            collectionName,
+            lexicalTerms,
+            userIdString,
+            Math.min(80, RAG_KEYWORD_FETCH_MAX),
           )
-            ? Math.min(120, RAG_KEYWORD_FETCH_MAX)
-            : Math.min(80, RAG_KEYWORD_FETCH_MAX),
-        )
         : Promise.resolve([]),
     ]);
 
     if (runKeyword) {
       console.log(
         `[QueryController] Hybrid retrieval: ${vectorResults.length} vector + ${keywordPoints.length} keyword hits`,
+      );
+    } else {
+      console.log(
+        `[QueryController] RRF retrieval: ${vectorResults.length} vector hits (keyword scroll off)`,
       );
     }
 
@@ -1375,24 +1391,31 @@ class QuestionAnsweringSystem {
       userIdString,
       agentId,
     );
-    return this.applyAttributeRerank(expanded, queryAttributes, "hybrid");
+    return this.applyAttributeRerank(
+      expanded,
+      queryAttributes || plan?.queryAttributes,
+      "hybrid",
+    );
   }
 
   /**
-   * Size-filtered catalog matches for list responses.
+   * Soft catalog preference for list mode. Never hard-drops all results on size miss.
    */
   selectCatalogMatches(matches, queryAttributes, { strictSize = false } = {}) {
     if (!matches?.length) return [];
-    let selected = filterMatchesBySizes(matches, queryAttributes?.sizes || [], {
-      strict: strictSize,
+    if (!queryAttributes?.sizes?.length) {
+      return matches;
+    }
+    const sized = filterMatchesBySizes(matches, queryAttributes.sizes, {
+      strict: false,
     });
-    if (queryAttributes?.sizes?.length > 0) {
-      const sized = filterMatchesBySizes(matches, queryAttributes.sizes, {
+    if (strictSize) {
+      const strict = filterMatchesBySizes(matches, queryAttributes.sizes, {
         strict: true,
       });
-      if (sized.length > 0) selected = sized;
+      return strict.length > 0 ? strict : sized;
     }
-    return selected;
+    return sized;
   }
 
   buildCatalogListResult(matches, companyName, requestedCount) {
@@ -1410,7 +1433,7 @@ class QuestionAnsweringSystem {
   }
 
   /**
-   * Forced catalog list when specialized path bailed but query is explicit sized catalog.
+   * List-mode fallback when intent is catalog/list — soft preference only, no size hard gate.
    */
   tryForcedCatalogList({
     question,
@@ -1418,41 +1441,30 @@ class QuestionAnsweringSystem {
     queryAttributes,
     companyName,
     requestedTopK,
+    plan = null,
   }) {
-    if (!isExplicitSizedCatalogQuery(question, queryAttributes)) return null;
+    const isList =
+      plan?.retrievalPolicy?.contextMode === "list" ||
+      queryAttributes?.subIntent === "IN_PAGE_LIST" ||
+      queryAttributes?.flags?.isCatalogQuery;
+    if (!isList) return null;
     if (!queryResponse?.length) return null;
 
     const requestedCount = this.extractRequestedCount(question, requestedTopK);
     let catalogMatches = this.selectCatalogMatches(
       queryResponse,
       queryAttributes,
-      { strictSize: true },
-    );
+      { strictSize: false },
+    ).slice(0, Math.max(requestedCount * 2, 15));
 
     if (catalogMatches.length === 0) {
-      catalogMatches = this.selectCatalogMatches(
-        queryResponse,
-        queryAttributes,
-      );
+      catalogMatches = queryResponse.slice(0, Math.max(requestedCount * 2, 15));
     }
 
-    catalogMatches = catalogMatches
-      .filter((m) =>
-        /\b(lash|lashes|product|price|\dmm)\b/i.test(
-          `${m.payload?.title || ""} ${m.payload?.text || ""} ${m.payload?.url || ""}`,
-        ),
-      )
-      .slice(0, Math.max(requestedCount * 2, 15));
-
-    if (catalogMatches.length === 0) {
-      console.log(
-        "[QueryController] Forced catalog: no lash/product matches after size filter",
-      );
-      return null;
-    }
+    if (catalogMatches.length === 0) return null;
 
     console.log(
-      `[QueryController] Forced catalog list: ${catalogMatches.length} size-matched chunks for sizes [${(queryAttributes.sizes || []).join(", ")}]`,
+      `[QueryController] List-mode catalog: ${catalogMatches.length} chunks (soft facets only)`,
     );
 
     return this.buildCatalogListResult(
@@ -1610,21 +1622,17 @@ class QuestionAnsweringSystem {
         keywordPoints,
       );
 
-      const forcedCatalog = isExplicitSizedCatalogQuery(
-        question,
-        queryAttributes,
-      );
+      // Soft list preference only — no hard size gate
       let catalogMatches = this.selectCatalogMatches(
         mergedMatches,
         queryAttributes,
-        { strictSize: forcedCatalog },
+        { strictSize: false },
       );
-      if (catalogMatches.length === 0 && !forcedCatalog) {
+      if (catalogMatches.length === 0) {
         catalogMatches = mergedMatches;
       }
 
       if (
-        !forcedCatalog &&
         !hasGoodSemantic &&
         structuralHits < 2 &&
         mergedMatches.length < 2
@@ -1635,9 +1643,9 @@ class QuestionAnsweringSystem {
         return null;
       }
 
-      if (forcedCatalog && catalogMatches.length === 0) {
+      if (catalogMatches.length === 0) {
         console.log(
-          "[QueryController] IN_PAGE_LIST forced catalog: no matches after size filter",
+          "[QueryController] IN_PAGE_LIST: no matches after soft preference",
         );
         return null;
       }
@@ -2656,13 +2664,10 @@ ${answerInstructions}`;
         }
       }
 
-      // First try with user_id filter
+      // First try with user_id filter (tenant isolation). No hard size filters.
       let searchResult = [];
-      const sizeTokens = (options.sizes || [])
-        .map((s) => s.replace(/\s/g, "").toLowerCase())
-        .filter(Boolean);
 
-      const buildFilter = (withSizeBoost = false) => {
+      const buildFilter = () => {
         const must = [];
         if (userId) {
           must.push({
@@ -2676,10 +2681,13 @@ ${answerInstructions}`;
             match: { value: options.agentId.toString() },
           });
         }
-        if (withSizeBoost && sizeTokens.length > 0) {
+        // High-confidence identity facets only (product_id / sku) — never sizes
+        for (const hf of options.hardFilters || []) {
+          if (!hf?.key || !hf?.value) continue;
+          if (hf.key === "size" || hf.key === "sizes") continue;
           must.push({
-            key: "sizes",
-            match: { any: sizeTokens },
+            key: hf.key === "sku" ? "attributes.sku" : hf.key,
+            match: { value: String(hf.value) },
           });
         }
         return must.length > 0 ? { must } : undefined;
@@ -2718,31 +2726,34 @@ ${answerInstructions}`;
 
       if (userId) {
         try {
-          if (sizeTokens.length > 0) {
-            try {
-              await this.qdrantClient.createPayloadIndex(collectionName, {
-                field_name: "sizes",
-                field_schema: "keyword",
-              });
-            } catch (e) {
-              if (!e.message?.includes("already exists")) {
-                console.warn(`[QueryController] sizes index: ${e.message}`);
-              }
-            }
-          }
+          searchResult = await executeSearch(buildFilter());
+          console.log(
+            `[QueryController] Query with tenant filter returned ${searchResult.length} results`,
+          );
 
-          const sizedFilter = buildFilter(sizeTokens.length > 0);
-          if (sizedFilter) {
-            searchResult = await executeSearch(sizedFilter);
-            console.log(
-              `[QueryController] Query with size filter [${sizeTokens.join(", ")}] returned ${searchResult.length} results`,
+          // Progressive relax: if hard identity filters yielded nothing, retry tenant-only
+          if (
+            searchResult.length === 0 &&
+            (options.hardFilters || []).length > 0
+          ) {
+            console.warn(
+              `[QueryController] Hard facet filters returned 0 hits — relaxing to tenant filter only`,
             );
-          }
-
-          if (searchResult.length === 0) {
-            searchResult = await executeSearch(buildFilter(false));
-            console.log(
-              `[QueryController] Query with user_id filter returned ${searchResult.length} results`,
+            const tenantOnly = [];
+            if (userId) {
+              tenantOnly.push({
+                key: "user_id",
+                match: { value: userId.toString() },
+              });
+            }
+            if (options.agentId) {
+              tenantOnly.push({
+                key: "agent_id",
+                match: { value: options.agentId.toString() },
+              });
+            }
+            searchResult = await executeSearch(
+              tenantOnly.length ? { must: tenantOnly } : undefined,
             );
           }
         } catch (filterError) {
@@ -3211,16 +3222,20 @@ ${answerInstructions}`;
         subIntent: effectiveSubIntent,
       });
 
+      const retrievalPlan = buildRetrievalPlan({
+        routing,
+        queryAttributes,
+        requestedTopK,
+        scoreThreshold:
+          widgetData?.scoreThreshold !== undefined
+            ? widgetData.scoreThreshold
+            : scoreThreshold,
+      });
+      logRetrievalPlan(retrievalPlan);
+
       console.log(
         `[QueryController] Attributes: sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length} flags=${JSON.stringify(queryAttributes.flags)}`
       );
-
-      // const embeddingQuery = queryAttributes.embeddingQuery;
-      // if (embeddingQuery !== retrievalQuery) {
-      //   console.log(
-      //     `[QueryController] Enriched embedding query: "${embeddingQuery}"`
-      //   );
-      // }
 
       const catalogKeywords =
         queryAttributes.keywords.length > 0
@@ -3308,26 +3323,23 @@ ${answerInstructions}`;
       };
 
       let semanticTopK =
-        effectiveSubIntent === "IN_PAGE_LIST"
+        retrievalPlan.retrievalPolicy.semanticTopK ||
+        (effectiveSubIntent === "IN_PAGE_LIST"
           ? Math.max(
-            10,
-            Math.min(
-              20,
-              this.extractRequestedCount(question, requestedTopK) * 3,
-            ),
-          )
+              10,
+              Math.min(
+                20,
+                this.extractRequestedCount(question, requestedTopK) * 3,
+              ),
+            )
           : effectiveSubIntent === "CONTACT_INFO"
             ? 12
             : effectiveSubIntent === "PAGE_LINKS"
               ? Math.max(
-                requestedTopK,
-                this.extractRequestedCount(question, requestedTopK) * 2,
-              )
-              : requestedTopK;
-
-      // if (isCatalogQuery || wantsProductLinks) {
-      //   semanticTopK = Math.max(semanticTopK, 15);
-      // }
+                  requestedTopK,
+                  this.extractRequestedCount(question, requestedTopK) * 2,
+                )
+              : requestedTopK);
 
       let queryResponse = await this.runHybridRetrieval({
         collectionName,
@@ -3338,9 +3350,8 @@ ${answerInstructions}`;
         queryAttributes,
         queryText: retrievalQuery,
         agentId,
+        plan: retrievalPlan,
       });
-
-      // console.log("queryResponse data is : ", queryResponse);
 
       console.log("Effective : ", effectiveSubIntent);
 
@@ -3467,37 +3478,32 @@ ${answerInstructions}`;
         );
       }
 
-      // Get threshold from widget settings or use default/options
+      // Get threshold from widget settings or use plan / options
       const widgetThreshold = widgetData?.scoreThreshold;
       let effectiveThreshold =
-        widgetThreshold !== undefined ? widgetThreshold : scoreThreshold;
+        widgetThreshold !== undefined
+          ? widgetThreshold
+          : retrievalPlan.retrievalPolicy.scoreThreshold ?? scoreThreshold;
 
-      const sizedCatalogQuery = isExplicitSizedCatalogQuery(
-        normalizedQuestion,
-        queryAttributes,
-      );
+      retrievalPlan.retrievalPolicy.scoreThreshold = effectiveThreshold;
+
       const catalogListQuery =
-        sizedCatalogQuery ||
-        (effectiveSubIntent === "IN_PAGE_LIST" &&
-          this.isExplicitInPageListQuestion(normalizedQuestion));
+        retrievalPlan.retrievalPolicy.contextMode === "list";
 
-      // Warn if threshold is very low (may include irrelevant results)
       if (effectiveThreshold < 0.3) {
         console.warn(
           `[QueryController] Low score threshold (${effectiveThreshold}) may include irrelevant results. Consider using 0.4-0.5 for better quality.`,
         );
       }
 
-      // Filter matches by score threshold (bypass for explicit catalog list queries)
-      let relevantMatches = catalogListQuery
-        ? this.selectCatalogMatches(queryResponse, queryAttributes, {
-          strictSize: sizedCatalogQuery,
-        }).slice(0, Math.max(requestedTopK * 2, 15))
-        : queryResponse.filter((match) => match.score >= effectiveThreshold);
+      // Plan-driven selection — no hard size catalog gate
+      let relevantMatches = selectMatchesByPlan(queryResponse, retrievalPlan, {
+        relaxed: false,
+      });
 
       if (catalogListQuery && relevantMatches.length > 0) {
         console.log(
-          `[QueryController] Catalog list bypass: using ${relevantMatches.length} size-matched chunks (threshold bypassed)`,
+          `[QueryController] List context: using ${relevantMatches.length} RRF+reranked chunks (no size hard filter)`,
         );
       }
 
@@ -3507,20 +3513,9 @@ ${answerInstructions}`;
           ? Math.max(...queryResponse.map((m) => m.score))
           : 0;
 
-      // const clearlyOnTopic = this.isClearlyOnTopicCompanyQuestion(
-      //   normalizedQuestion,
-      //   companyName,
-      // );
-      // if (clearlyOnTopic) {
-      //   console.log(
-      //     `[QueryController] On-topic company question detected: "${question.substring(0, 60)}..."`,
-      //   );
-      // }
-
       const IRRELEVANT_THRESHOLD = 0.3;
       const isIrrelevant =
         !catalogListQuery &&
-        // !clearlyOnTopic &&
         queryResponse.length > 0 &&
         maxScore < IRRELEVANT_THRESHOLD;
 
@@ -3530,47 +3525,45 @@ ${answerInstructions}`;
         );
       }
 
-      // If no matches found with current threshold, try with a lower threshold as fallback
+      // Progressive relax: lower threshold / fill up to finalTopK
       if (
         relevantMatches.length === 0 &&
         queryResponse.length > 0 &&
-        !isIrrelevant
+        !isIrrelevant &&
+        retrievalPlan.retrievalPolicy.allowRelax
       ) {
-        const fallbackThreshold = Math.max(0.2, effectiveThreshold - 0.15); // Lower by 0.15 but not below 0.2
-        console.warn(
-          `[QueryController] No matches above threshold ${effectiveThreshold}. Trying fallback threshold ${fallbackThreshold.toFixed(
-            2,
-          )}...`,
-        );
-        const fallbackMatches = queryResponse.filter(
-          (match) => match.score >= fallbackThreshold,
-        );
-        if (fallbackMatches.length > 0) {
-          relevantMatches = fallbackMatches;
-          effectiveThreshold = fallbackThreshold;
-          console.log(
-            `[QueryController] Fallback threshold found ${fallbackMatches.length} matches. Using these results.`,
+        relevantMatches = selectMatchesByPlan(queryResponse, retrievalPlan, {
+          relaxed: true,
+        });
+        if (relevantMatches.length > 0) {
+          effectiveThreshold = Math.max(
+            retrievalPlan.retrievalPolicy.minScoreFloor ?? 0.2,
+            effectiveThreshold -
+              (retrievalPlan.retrievalPolicy.relaxThresholdDelta ?? 0.15),
+          );
+          console.warn(
+            `[QueryController] Progressive relax: using ${relevantMatches.length} matches at threshold ${effectiveThreshold.toFixed(2)}`,
           );
         }
       }
 
-      // If we still have fewer matches than requested, relax threshold by
-      // bringing back the highest-scoring remaining results (but keep
-      // ordering and avoid irrelevant queries).
       if (
         !isIrrelevant &&
         queryResponse.length > 0 &&
-        relevantMatches.length < requestedTopK
+        relevantMatches.length <
+          (retrievalPlan.retrievalPolicy.minResults || requestedTopK)
       ) {
-        const needed = requestedTopK - relevantMatches.length;
+        const needed =
+          (retrievalPlan.retrievalPolicy.finalTopK || requestedTopK) -
+          relevantMatches.length;
         const supplemental = [...queryResponse]
           .sort((a, b) => b.score - a.score)
           .filter((m) => !relevantMatches.find((r) => r.id === m.id))
-          .slice(0, needed);
+          .slice(0, Math.max(0, needed));
 
         if (supplemental.length > 0) {
           console.warn(
-            `[QueryController] Only ${relevantMatches.length} matches met threshold ${effectiveThreshold}. Adding ${supplemental.length} top-scoring remaining matches to reach requested topK ${requestedTopK}.`,
+            `[QueryController] Filling ${supplemental.length} top remaining matches to reach plan finalTopK`,
           );
           relevantMatches = [...relevantMatches, ...supplemental];
         }
@@ -3765,8 +3758,18 @@ ${answerInstructions}`;
 
         let historyLimit = 10;
 
-        let responseMode = "brief";
-        let requestedCount = 1;
+        let responseMode =
+          retrievalPlan.retrievalPolicy.contextMode === "list"
+            ? "list"
+            : retrievalPlan.retrievalPolicy.contextMode === "contact"
+              ? "contact"
+              : retrievalPlan.retrievalPolicy.contextMode === "links"
+                ? "links"
+                : "brief";
+        let requestedCount =
+          responseMode === "list"
+            ? this.extractRequestedCount(question, requestedTopK)
+            : 1;
 
         const answerResult = await this.generateAnswerFromMatches({
           question,
@@ -3780,13 +3783,11 @@ ${answerInstructions}`;
             wantsProductUrls: false,
             wasExpanded,
             retrievalMaxScore: maxScore,
-            // Pass the LLM router's subIntent so determineMaxTokens uses it
-            // instead of re-running English-only keyword classification.
             subIntent: effectiveSubIntent || null,
-            // Pass Qdrant access params so buildPageMergeContext can expand pages
             collectionName,
             userId: userIdString,
             agentId: agentId?.toString(),
+            maxTotalChars: retrievalPlan.retrievalPolicy.tokenBudget,
             ...langOpts,
           },
         });

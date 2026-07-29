@@ -135,7 +135,8 @@ function needsKeywordRetrieval(attributes) {
 }
 
 /**
- * Explicit sized catalog request, e.g. "give me all 16mm lashes".
+ * @deprecated Prefer RetrievalPlan contextMode === "list".
+ * Kept for backward compatibility; no longer used as a hard filter gate.
  */
 function isExplicitSizedCatalogQuery(question, queryAttributes) {
   const sizes = queryAttributes?.sizes || [];
