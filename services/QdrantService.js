@@ -18,6 +18,11 @@ const {
   extractSearchTerms,
   extractPayloadAttributes,
 } = require("../utils/searchTerms");
+const { encodeSparseVector } = require("./sparseEncoder");
+
+const DENSE_VECTOR_NAME = "dense";
+const SPARSE_VECTOR_NAME = "sparse";
+const USE_HYBRID_VECTORS = process.env.RAG_HYBRID_VECTORS !== "false";
 
 const PAYLOAD_INDEX_SCHEMAS = {
   user_id: "keyword",
@@ -34,6 +39,11 @@ const PAYLOAD_INDEX_SCHEMAS = {
   content_hash: "keyword",
   // Phase 4
   heading_path: "keyword",
+  // Parent-child + product grouping
+  product_id: "keyword",
+  parent_id: "keyword",
+  chunk_role: "keyword",
+  pipeline_version: "keyword",
 };
 
 class QdrantVectorStoreManager {
@@ -53,6 +63,43 @@ class QdrantVectorStoreManager {
     this.embeddingInitPromise = null;
 
     this.embeddingInitPromise = this.initializeEmbeddings();
+    /** @type {'hybrid'|'legacy'|null} */
+    this._vectorModeCache = null;
+  }
+
+  /**
+   * Detect collection vector layout: hybrid (dense+sparse named) vs legacy single vector.
+   */
+  async getCollectionVectorMode(forceRefresh = false) {
+    if (!forceRefresh && this._vectorModeCache) {
+      return this._vectorModeCache;
+    }
+    try {
+      const exists = await this.doesCollectionExist();
+      if (!exists) {
+        this._vectorModeCache = USE_HYBRID_VECTORS ? "hybrid" : "legacy";
+        return this._vectorModeCache;
+      }
+      const info = await this.qdrantClient.getCollection(this.collectionName);
+      const vectors = info.config?.params?.vectors;
+      const sparse = info.config?.params?.sparse_vectors;
+
+      if (
+        vectors &&
+        typeof vectors === "object" &&
+        vectors[DENSE_VECTOR_NAME] &&
+        sparse &&
+        typeof sparse === "object" &&
+        sparse[SPARSE_VECTOR_NAME]
+      ) {
+        this._vectorModeCache = "hybrid";
+      } else {
+        this._vectorModeCache = "legacy";
+      }
+    } catch {
+      this._vectorModeCache = "legacy";
+    }
+    return this._vectorModeCache;
   }
 
   async initializeEmbeddings(forceRefresh = false) {
@@ -228,6 +275,7 @@ class QdrantVectorStoreManager {
 
       console.log(`Generated ${embeddings.length} embeddings, creating points...`);
 
+      const vectorMode = await this.getCollectionVectorMode();
 
       const points = documents.map((doc, i) => {
         // Ensure user_id is a string for proper filtering in Qdrant
@@ -268,9 +316,18 @@ class QdrantVectorStoreManager {
         const pipelineSource =
           metadata.pageType || metadata.source_type || payloadAttrs.source_type;
 
-        return {
+        const sparseSource =
+          metadata.sparseText || pageContent;
+        const sparseBoost = metadata.sparseBoost || {
+          title,
+          sku: metadata.attributes?.sku || metadata.sku,
+          url,
+        };
+        delete metadata.sparseText;
+        delete metadata.sparseBoost;
+
+        const point = {
           id: uuidv4(),
-          vector: embeddings[i],
           payload: {
             ...metadata,
             text: pageContent,
@@ -281,6 +338,17 @@ class QdrantVectorStoreManager {
             created_at: new Date().toISOString(),
           },
         };
+
+        if (vectorMode === "hybrid") {
+          point.vector = {
+            [DENSE_VECTOR_NAME]: embeddings[i],
+            [SPARSE_VECTOR_NAME]: encodeSparseVector(sparseSource, sparseBoost),
+          };
+        } else {
+          point.vector = embeddings[i];
+        }
+
+        return point;
       });
 
 
@@ -462,18 +530,39 @@ class QdrantVectorStoreManager {
       const exists = await this.doesCollectionExist();
       if (exists) {
         console.log(`Collection "${this.collectionName}" already exists.`);
+        await this.getCollectionVectorMode(true);
       } else {
         console.log(`Creating Qdrant collection "${this.collectionName}"...`);
-        await this.qdrantClient.createCollection(this.collectionName, {
-          vectors: {
-            size: EMBEDDING_DIMENSION,
-            distance: "Cosine",
-          },
-          optimizers_config: {
-            default_segment_number: 2,
-          },
-          replication_factor: 1,
-        });
+        if (USE_HYBRID_VECTORS) {
+          await this.qdrantClient.createCollection(this.collectionName, {
+            vectors: {
+              [DENSE_VECTOR_NAME]: {
+                size: EMBEDDING_DIMENSION,
+                distance: "Cosine",
+              },
+            },
+            sparse_vectors: {
+              [SPARSE_VECTOR_NAME]: {},
+            },
+            optimizers_config: {
+              default_segment_number: 2,
+            },
+            replication_factor: 1,
+          });
+          this._vectorModeCache = "hybrid";
+        } else {
+          await this.qdrantClient.createCollection(this.collectionName, {
+            vectors: {
+              size: EMBEDDING_DIMENSION,
+              distance: "Cosine",
+            },
+            optimizers_config: {
+              default_segment_number: 2,
+            },
+            replication_factor: 1,
+          });
+          this._vectorModeCache = "legacy";
+        }
         console.log(`Collection "${this.collectionName}" created successfully.`);
       }
 
@@ -491,17 +580,97 @@ class QdrantVectorStoreManager {
 
   async search(queryEmbedding, k = 5) {
     try {
-      const results = await this.qdrantClient.search(this.collectionName, {
-        vector: queryEmbedding,
+      const vectorMode = await this.getCollectionVectorMode();
+      const searchParams = {
         limit: k,
         with_payload: true,
-      });
+      };
+      if (vectorMode === "hybrid") {
+        searchParams.vector = {
+          name: DENSE_VECTOR_NAME,
+          vector: queryEmbedding,
+        };
+      } else {
+        searchParams.vector = queryEmbedding;
+      }
+
+      const results = await this.qdrantClient.search(
+        this.collectionName,
+        searchParams,
+      );
 
       return results;
     } catch (error) {
       console.error(`Error searching Qdrant collection: ${error}`);
       return [];
     }
+  }
+
+  /**
+   * Sparse-dense hybrid query with Reciprocal Rank Fusion (Qdrant Query API).
+   * Falls back to dense-only search on legacy collections.
+   */
+  async hybridQuery({
+    queryEmbedding,
+    queryText = "",
+    sparseBoost = {},
+    topK = 10,
+    filter,
+  }) {
+    const vectorMode = await this.getCollectionVectorMode();
+    if (vectorMode !== "hybrid") {
+      const searchParams = {
+        vector: queryEmbedding,
+        limit: topK,
+        with_payload: true,
+      };
+      if (filter) searchParams.filter = filter;
+      const results = await this.qdrantClient.search(
+        this.collectionName,
+        searchParams,
+      );
+      return (results || []).map((r) => ({
+        id: r.id,
+        score: r.score,
+        payload: r.payload || {},
+        metadata: r.payload || {},
+      }));
+    }
+
+    const prefetchLimit = Math.max(topK * 2, 20);
+    const sparseVector = encodeSparseVector(queryText, sparseBoost);
+
+    const prefetch = [
+      {
+        query: queryEmbedding,
+        using: DENSE_VECTOR_NAME,
+        limit: prefetchLimit,
+        ...(filter ? { filter } : {}),
+      },
+    ];
+
+    if (sparseVector.indices.length > 0) {
+      prefetch.push({
+        query: sparseVector,
+        using: SPARSE_VECTOR_NAME,
+        limit: prefetchLimit,
+        ...(filter ? { filter } : {}),
+      });
+    }
+
+    const response = await this.qdrantClient.query(this.collectionName, {
+      prefetch,
+      query: { fusion: "rrf" },
+      limit: topK,
+      with_payload: true,
+    });
+
+    return (response.points || []).map((p) => ({
+      id: p.id,
+      score: p.score,
+      payload: p.payload || {},
+      metadata: p.payload || {},
+    }));
   }
 
   async deleteCollection() {
@@ -563,11 +732,21 @@ class QdrantVectorStoreManager {
           console.log(`Retrieved ${points.length} points in this batch`);
   
           // 4. Transform points for upsert (ensure proper format)
-          const transformedPoints = points.map((pt) => ({
-            id: pt.id,
-            vector: Array.isArray(pt.vector) ? pt.vector : pt.vector.vector || pt.vector, // Handle different vector formats
-            payload: pt.payload || {},
-          }));
+          const transformedPoints = points.map((pt) => {
+            let vector = pt.vector;
+            if (vector && typeof vector === "object" && !Array.isArray(vector)) {
+              if (vector.dense || vector.sparse) {
+                // Named hybrid vectors — copy as-is
+              } else if (vector.vector) {
+                vector = vector.vector;
+              }
+            }
+            return {
+              id: pt.id,
+              vector,
+              payload: pt.payload || {},
+            };
+          });
   
           // 5. Upsert points into the target collection
           await targetManager.qdrantClient.upsert(targetCollection, {
@@ -731,3 +910,6 @@ class QdrantVectorStoreManager {
 }
 
 module.exports = QdrantVectorStoreManager;
+module.exports.DENSE_VECTOR_NAME = DENSE_VECTOR_NAME;
+module.exports.SPARSE_VECTOR_NAME = SPARSE_VECTOR_NAME;
+module.exports.USE_HYBRID_VECTORS = USE_HYBRID_VECTORS;

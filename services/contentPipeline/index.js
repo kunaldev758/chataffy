@@ -38,10 +38,14 @@ const { extractWithReadability } = require("./extractors/contentReadability");
 const { extractFaqContent } = require("./extractors/faq");
 const {
   structureAwareChunk,
+  structureAwareParentChildChunk,
   splitByHeadings,
   DEFAULT_CHUNK_CHARS,
   DEFAULT_OVERLAP_CHARS,
+  DEFAULT_PARENT_CHARS,
+  DEFAULT_CHILD_CHARS,
 } = require("./chunking");
+const { resolveProductId } = require("./productId");
 const { buildContextPrefix, applyEmbeddingPrefix } = require("./contextPrefix");
 const {
   processResidualSections,
@@ -84,10 +88,14 @@ module.exports = {
   extractListingContent,
   extractWithReadability,
   extractFaqContent,
+  resolveProductId,
   structureAwareChunk,
+  structureAwareParentChildChunk,
   splitByHeadings,
   DEFAULT_CHUNK_CHARS,
   DEFAULT_OVERLAP_CHARS,
+  DEFAULT_PARENT_CHARS,
+  DEFAULT_CHILD_CHARS,
   buildContextPrefix,
   applyEmbeddingPrefix,
   processResidualSections,
@@ -97,4 +105,6 @@ module.exports = {
   classifySectionByRules,
   extractLinkListAttributes,
   SECTION_RULE_THRESHOLD,
+  extractCleanProductBody: htmlCleanup.extractCleanProductBody,
+  PRODUCT_BODY_SELECTORS: htmlCleanup.PRODUCT_BODY_SELECTORS,
 };

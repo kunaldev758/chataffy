@@ -3,6 +3,8 @@
  * Keep user_id / agent_id naming for existing QueryController filters.
  */
 
+const PIPELINE_VERSION = "pc_hybrid_v1";
+
 const PAGE_TYPES = Object.freeze([
   "product",
   "faq",
@@ -72,8 +74,18 @@ function buildQdrantChunkPayload(page, chunk, { chunkIndex, totalChunks }) {
     pageType,
     entity_type: entityType,
     entity_name: page.entity_name ?? null,
+    product_id: page.product_id ?? null,
 
     text: chunk,
+    parent_text: page.parent_text ?? null,
+    parent_id: page.parent_id ?? null,
+    parent_index:
+      typeof page.parent_index === "number" ? page.parent_index : null,
+    child_index:
+      typeof page.child_index === "number" ? page.child_index : chunkIndex,
+    chunk_role: page.chunk_role || "child",
+    pipeline_version: page.pipeline_version || PIPELINE_VERSION,
+
     heading_path: page.heading_path || "",
     title: page.title || "",
     metaDescription: page.metaDescription || "",
@@ -107,6 +119,7 @@ function buildQdrantChunkPayload(page, chunk, { chunkIndex, totalChunks }) {
 }
 
 module.exports = {
+  PIPELINE_VERSION,
   PAGE_TYPES,
   ENTITY_TYPES,
   URL_PIPELINE_STATUS,

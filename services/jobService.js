@@ -308,6 +308,7 @@ const processWebPage = async (
       classification_reason,
       extraction_source,
       sections,
+      product_id,
     } = extracted;
 
     const isHomepage = isHomepageUrl(webPageURL);
@@ -370,6 +371,7 @@ const processWebPage = async (
           : 0,
       classification_reason: classification_reason || "rules",
       extraction_source: extraction_source || "generic",
+      product_id: product_id || null,
       sections: Array.isArray(sections) ? sections : undefined,
     };
   } catch (error) {
@@ -664,6 +666,7 @@ new Worker(
             classification_reason,
             extraction_source,
             sections,
+            product_id,
           } = processResult;
 
           // Phase 2: skip if this page's canonical is already covered by another URL
@@ -815,6 +818,7 @@ new Worker(
                     : 0,
                 classification_reason: classification_reason || "rules",
                 extraction_source: extraction_source || "generic",
+                product_id: product_id || null,
                 sections: Array.isArray(sections) ? sections : undefined,
                 type: "webpage",
               },
@@ -1469,6 +1473,7 @@ new Worker(
             classification_reason,
             extraction_source,
             sections,
+            product_id,
           } = processResult;
 
           // Phase 2: canonical duplicate — leave existing vectors of the canonical page
@@ -1530,6 +1535,7 @@ new Worker(
                     : 0,
                 classification_reason: classification_reason || "rules",
                 extraction_source: extraction_source || "generic",
+                product_id: product_id || null,
                 sections: Array.isArray(sections) ? sections : undefined,
                 type: "webpage",
               },

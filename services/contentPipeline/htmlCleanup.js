@@ -58,6 +58,69 @@ const FACET_SIDEBAR_SELECTORS = [
   "[data-facets]",
 ].join(", ");
 
+/**
+ * PDP body containers — description, specs, tabs (keep these for primary extract).
+ * Used by extractCleanProductBody + residual covered marking.
+ */
+const PRODUCT_BODY_SELECTORS = [
+  "[itemprop='description']",
+  ".product__description",
+  ".product-description",
+  ".product-single__description",
+  ".product__content",
+  ".product-content",
+  ".product-detail",
+  ".product-details",
+  ".product__details",
+  ".product-detail__description",
+  ".product-info-main",
+  ".product__info-description",
+  ".product-tabs",
+  ".product__tabs",
+  ".product-tab-content",
+  "[class*='product-description']",
+  "[class*='ProductDescription']",
+  "[id*='ProductDescription']",
+  "[id*='product-description']",
+  ".rte",
+  ".product .rte",
+  "main .product",
+  "[itemtype*='Product']",
+].join(", ");
+
+/** Blocks to strip from PDP primary body (owned by residual / FAQ extractors). */
+const PRODUCT_BODY_EXCLUDE_SELECTORS = [
+  "[itemtype*='FAQPage']",
+  ".faq",
+  ".faqs",
+  "#faq",
+  "#faqs",
+  "[class*='faq-section']",
+  "[id*='faq']",
+  ".reviews",
+  "#reviews",
+  ".product-reviews",
+  "[class*='review']",
+  "[itemtype*='Review']",
+  "[itemtype*='AggregateRating']",
+  ".related",
+  ".related-products",
+  "[class*='related-product']",
+  ".recommendations",
+  "[class*='recommend']",
+  "[class*='upsell']",
+  "[class*='cross-sell']",
+  ".recently-viewed",
+  "[class*='recently-viewed']",
+  "[class*='newsletter']",
+  "[id*='newsletter']",
+  ".popup",
+  ".modal",
+  "[class*='cookie']",
+  "[id*='cookie']",
+  "[class*='consent']",
+].join(", ");
+
 const SOCIAL_PLATFORM_LABELS = [
   { pattern: /facebook\.com/i, label: "Facebook" },
   { pattern: /instagram\.com/i, label: "Instagram" },
@@ -217,14 +280,160 @@ function cleanupHtmlDom($, webPageURL, { isHomepage, chromeState } = {}) {
   return { headerHTML, footerHTML };
 }
 
+/**
+ * Extract cleaned product page body markdown for PDP primary content.
+ * Strips chrome / facets / FAQ / reviews / related; keeps description, specs,
+ * materials, care, size guide, shipping/returns when present on the page.
+ *
+ * @param {string} html
+ * @param {string} [pageUrl]
+ * @returns {{ markdown: string, source: string|null }}
+ */
+function extractCleanProductBody(html, pageUrl = "") {
+  if (!html || typeof html !== "string") {
+    return { markdown: "", source: null };
+  }
+
+  try {
+    const TurndownService = require("turndown");
+    const $ = cheerio.load(html);
+
+    $("script, style, noscript, iframe, svg, template").remove();
+    $(HEADER_SELECTORS).remove();
+    $(FOOTER_SELECTORS).remove();
+    $(FACET_SIDEBAR_SELECTORS).remove();
+    $(PRODUCT_BODY_EXCLUDE_SELECTORS).remove();
+    $(
+      "[id*='cookie'], [class*='cookie'], [id*='consent'], [class*='consent'], #onetrust-banner-sdk, .cc-window, .popup, .modal, .advertisement, .ad",
+    ).remove();
+
+    // Absolute-ize links for RAG
+    if (pageUrl) {
+      $("a, img").each((_, el) => {
+        const attr = $(el).is("a") ? "href" : "src";
+        const val = $(el).attr(attr);
+        if (val && !val.startsWith("http") && !val.startsWith("data:") && !val.startsWith("#")) {
+          try {
+            $(el).attr(attr, urlModule.resolve(pageUrl, val));
+          } catch {
+            /* ignore */
+          }
+        }
+      });
+    }
+
+    // Drop data:/blob: images; keep alt text when useful
+    $("img").each((_, el) => {
+      const src = $(el).attr("src")?.trim();
+      const alt = $(el).attr("alt")?.trim();
+      if (!src || isInlineBufferImageUrl(src)) {
+        if (alt) $(el).replaceWith(`<p>Image (${alt})</p>`);
+        else $(el).remove();
+      }
+    });
+
+    const turndown = new TurndownService({
+      headingStyle: "atx",
+      bulletListMarker: "-",
+    });
+
+    const preferredSelectors = [
+      "[itemprop='description']",
+      ".product__description",
+      ".product-description",
+      ".product-single__description",
+      ".product__content",
+      ".product-content",
+      ".product-detail__description",
+      ".product__info-description",
+      "[class*='product-description']",
+      "[class*='ProductDescription']",
+      "[id*='ProductDescription']",
+      "[id*='product-description']",
+      ".product-tabs",
+      ".product__tabs",
+      ".product-tab-content",
+      ".rte",
+      ".product .rte",
+    ];
+
+    const fallbackSelectors = [
+      ".product-detail",
+      ".product-details",
+      ".product__details",
+      ".product-info-main",
+      "main .product",
+      "[itemtype*='Product']",
+      "main [class*='product']",
+      "main, [role='main']",
+      "article",
+      "body",
+    ];
+
+    const pickBest = (selectorList) => {
+      let bestHtml = "";
+      let bestSource = null;
+      let bestLen = 0;
+      for (const selector of selectorList) {
+        const nodes = $(selector)
+          .toArray()
+          .filter((el) => $(el).parents(selector).length === 0);
+        for (const el of nodes) {
+          const inner = $(el).html() || "";
+          const textLen = $(el).text().replace(/\s+/g, " ").trim().length;
+          if (textLen > bestLen && textLen >= 40) {
+            bestLen = textLen;
+            bestHtml = inner;
+            bestSource = selector;
+          }
+        }
+      }
+      return { bestHtml, bestSource, bestLen };
+    };
+
+    let { bestHtml, bestSource, bestLen } = pickBest(preferredSelectors);
+    if (bestLen < 120) {
+      const fallback = pickBest(fallbackSelectors);
+      if (fallback.bestLen > bestLen) {
+        bestHtml = fallback.bestHtml;
+        bestSource = fallback.bestSource;
+        bestLen = fallback.bestLen;
+      }
+    }
+
+    if (!bestHtml) {
+      return { markdown: "", source: null };
+    }
+
+    const markdown = stripInlineBufferImageContent(
+      turndown
+        .turndown(bestHtml)
+        .replace(/[ \t]+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim(),
+    );
+
+    return {
+      markdown: markdown.length >= 40 ? markdown : "",
+      source: markdown.length >= 40 ? bestSource : null,
+    };
+  } catch (err) {
+    console.warn(`[htmlCleanup] extractCleanProductBody failed: ${err.message}`);
+    return { markdown: "", source: null };
+  }
+}
+
 module.exports = {
   FOOTER_SELECTORS,
   HEADER_SELECTORS,
   FACET_SIDEBAR_SELECTORS,
+  PRODUCT_BODY_SELECTORS,
+  PRODUCT_BODY_EXCLUDE_SELECTORS,
   isInlineBufferImageUrl,
   stripInlineBufferImageContent,
   getDomainChromeState,
   extractChromeHtml,
   enrichFooterHtml,
   cleanupHtmlDom,
+  extractCleanProductBody,
 };

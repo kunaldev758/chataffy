@@ -51,6 +51,7 @@ const {
   logRerankStats,
   filterMatchesBySizes,
 } = require("../utils/attributeReranker");
+const QdrantVectorStoreManager = require("../services/QdrantService");
 const {
   isClearlyOnTopicCompanyQuestion: detectClearlyOnTopicQuestion,
   isCompanyIdentityQuestion: detectCompanyIdentityQuestion,
@@ -307,11 +308,11 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 const qdrantClient = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey:
-    process.env.QDRANT_API_KEY 
+    process.env.QDRANT_API_KEY
 });
 
 class QuestionAnsweringSystem {
-   constructor() {
+  constructor() {
     this.embeddingModel = null;
     this.currentModelName = null;
     this.qdrantClient = qdrantClient;
@@ -321,39 +322,39 @@ class QuestionAnsweringSystem {
 
   async getEmbeddingModel() {
 
-    try{
+    try {
 
-    const cfg = await getResolvedModelConfig("embedding");
-    const modelName = cfg.model || DEFAULT_EMBEDDING_MODEL;
+      const cfg = await getResolvedModelConfig("embedding");
+      const modelName = cfg.model || DEFAULT_EMBEDDING_MODEL;
 
-    if (
-      this.embeddingModel &&
-      this.currentModelName === modelName
-    ) {
+      if (
+        this.embeddingModel &&
+        this.currentModelName === modelName
+      ) {
+        return this.embeddingModel;
+      }
+
+      console.log(`Switching embedding model to ${modelName}`);
+
+      this.embeddingModel = new OpenAIEmbeddings({
+        openAIApiKey: OPENAI_API_KEY,
+        modelName,
+      });
+
+      this.currentModelName = modelName;
+
       return this.embeddingModel;
-    }
 
-    console.log(`Switching embedding model to ${modelName}`);
-
-    this.embeddingModel = new OpenAIEmbeddings({
-      openAIApiKey: OPENAI_API_KEY,
-      modelName,
-    });
-
-    this.currentModelName = modelName;
-
-    return this.embeddingModel;
-
-    }catch(error){
+    } catch (error) {
 
       console.error(`Error occurred while fetching embedding model: ${error.message}`);
-          this.embeddingModel = new OpenAIEmbeddings({
-      openAIApiKey: OPENAI_API_KEY,
-      modelName: process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL,
-    });
+      this.embeddingModel = new OpenAIEmbeddings({
+        openAIApiKey: OPENAI_API_KEY,
+        modelName: process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL,
+      });
 
-    return this.embeddingModel;
-    
+      return this.embeddingModel;
+
     }
   }
 
@@ -438,7 +439,7 @@ class QuestionAnsweringSystem {
 
 
   // check 2 ----> 
-  
+
   async getChatHistory(conversationId) {
     try {
       if (!conversationId) {
@@ -545,8 +546,8 @@ class QuestionAnsweringSystem {
     // Filter out the current question if it's already in the history (shouldn't happen, but safety check)
     const filteredMessages = currentQuestion
       ? limitedMessages.filter(
-          (msg) => msg.message?.trim() !== currentQuestion.trim(),
-        )
+        (msg) => msg.message?.trim() !== currentQuestion.trim(),
+      )
       : limitedMessages;
 
     if (filteredMessages.length === 0) {
@@ -1204,8 +1205,12 @@ class QuestionAnsweringSystem {
       const payload = match.payload || match;
       const text = payload?.text || payload?.pageContent || "";
       const url = payload?.url || "";
-      const key = `${url}::${text.slice(0, 120)}`;
-      if (!text || seen.has(key)) return;
+      const parentId = payload?.parent_id;
+      const key = parentId
+        ? `parent::${parentId}`
+        : `${url}::${text.slice(0, 120)}`;
+      if (!text && !payload?.parent_text) return;
+      if (seen.has(key)) return;
       seen.add(key);
       merged.push({
         id: match.id || key,
@@ -1220,6 +1225,80 @@ class QuestionAnsweringSystem {
     }
 
     return merged.sort((a, b) => (b.score || 0) - (a.score || 0));
+  }
+
+  /**
+   * Expand retrieval with additional parent chunks for matched product_id values.
+   */
+  async expandByProductIds(
+    collectionName,
+    matches,
+    userId,
+    agentId,
+    { maxProducts = 2, maxParentsPerProduct = 4 } = {},
+  ) {
+    if (!matches?.length || !userId || !collectionName) return matches || [];
+
+    const productIds = [];
+    for (const m of matches) {
+      const pid = m.payload?.product_id;
+      if (pid && !productIds.includes(pid)) productIds.push(pid);
+      if (productIds.length >= maxProducts) break;
+    }
+    if (productIds.length === 0) return matches;
+
+    const seenParents = new Set();
+    for (const m of matches) {
+      const p = m.payload || {};
+      const key =
+        p.parent_id || `${p.url}::${String(p.text || "").slice(0, 80)}`;
+      seenParents.add(key);
+    }
+
+    const expanded = [...matches];
+
+    for (const productId of productIds) {
+      const must = [
+        { key: "user_id", match: { value: userId.toString() } },
+        { key: "product_id", match: { value: productId } },
+      ];
+      if (agentId) {
+        must.push({ key: "agent_id", match: { value: agentId.toString() } });
+      }
+
+      try {
+        const res = await this.qdrantClient.scroll(collectionName, {
+          limit: 64,
+          with_payload: true,
+          filter: { must },
+        });
+
+        const parentsAdded = new Set();
+        for (const pt of res.points || []) {
+          const payload = pt.payload || {};
+          const parentKey =
+            payload.parent_id ||
+            `${payload.url}::${String(payload.parent_text || payload.text || "").slice(0, 80)}`;
+          if (seenParents.has(parentKey) || parentsAdded.has(parentKey)) {
+            continue;
+          }
+          if (parentsAdded.size >= maxParentsPerProduct) break;
+          seenParents.add(parentKey);
+          parentsAdded.add(parentKey);
+          expanded.push({
+            id: pt.id,
+            score: 0.38,
+            payload,
+          });
+        }
+      } catch (err) {
+        console.warn(
+          `[QueryController] expandByProductIds failed for ${productId}: ${err.message}`,
+        );
+      }
+    }
+
+    return expanded.sort((a, b) => (b.score || 0) - (a.score || 0));
   }
 
   applyAttributeRerank(matches, queryAttributes, label = "hybrid") {
@@ -1239,6 +1318,8 @@ class QuestionAnsweringSystem {
     catalogKeywords,
     getQuestionEmbedding,
     queryAttributes,
+    queryText = "",
+    agentId = null,
   }) {
     const runKeyword =
       needsKeywordRetrieval(queryAttributes) && catalogKeywords?.length > 0;
@@ -1256,20 +1337,28 @@ class QuestionAnsweringSystem {
         await getQuestionEmbedding(),
         semanticTopK,
         userIdString,
-        { sizes: queryAttributes?.sizes },
+        {
+          sizes: queryAttributes?.sizes,
+          queryText:
+            queryText ||
+            queryAttributes?.retrievalQuery ||
+            queryAttributes?.keywordSource ||
+            "",
+          agentId,
+        },
       ),
       runKeyword
         ? this.structuralFetchByKeywords(
-            collectionName,
-            keywordList,
-            userIdString,
-            isExplicitSizedCatalogQuery(
-              queryAttributes?.normalizedQuestion,
-              queryAttributes,
-            )
-              ? Math.min(120, RAG_KEYWORD_FETCH_MAX)
-              : Math.min(80, RAG_KEYWORD_FETCH_MAX),
+          collectionName,
+          keywordList,
+          userIdString,
+          isExplicitSizedCatalogQuery(
+            queryAttributes?.normalizedQuestion,
+            queryAttributes,
           )
+            ? Math.min(120, RAG_KEYWORD_FETCH_MAX)
+            : Math.min(80, RAG_KEYWORD_FETCH_MAX),
+        )
         : Promise.resolve([]),
     ]);
 
@@ -1280,7 +1369,13 @@ class QuestionAnsweringSystem {
     }
 
     const merged = this.mergeRetrievalResults(vectorResults, keywordPoints);
-    return this.applyAttributeRerank(merged, queryAttributes, "hybrid");
+    const expanded = await this.expandByProductIds(
+      collectionName,
+      merged,
+      userIdString,
+      agentId,
+    );
+    return this.applyAttributeRerank(expanded, queryAttributes, "hybrid");
   }
 
   /**
@@ -2191,8 +2286,8 @@ ${answerInstructions}`;
         ],
         temperature:
           effectiveMode === "list" ||
-          effectiveMode === "contact" ||
-          effectiveMode === "page_links"
+            effectiveMode === "contact" ||
+            effectiveMode === "page_links"
             ? 0
             : 0.4,
         ...chatCompletionLimitPayload(dynamicMaxTokens, chatModel),
@@ -2220,12 +2315,34 @@ ${answerInstructions}`;
   getRelevantContext(matches, options = {}) {
     const maxChunkChars = options.maxChunkChars ?? RAG_MAX_CHUNK_CHARS;
     const maxTotalChars = options.maxTotalChars ?? RAG_MAX_CONTEXT_CHARS;
+
+    // Dedupe by parent_id — child matched, parent returned to LLM
+    const byParent = new Map();
+    for (const match of matches || []) {
+      const payload = match.payload || {};
+      const parentId = payload.parent_id;
+      const key = parentId
+        ? `parent::${parentId}`
+        : `${payload.url || ""}::${String(payload.text || "").slice(0, 120)}`;
+      const score = match.score ?? 0;
+      const prev = byParent.get(key);
+      if (!prev || score > (prev.score ?? 0)) {
+        byParent.set(key, { match, score });
+      }
+    }
+
+    const deduped = [...byParent.values()]
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .map((entry) => entry.match);
+
     let totalChars = 0;
     const blocks = [];
 
-    for (const match of matches || []) {
+    for (const match of deduped) {
       const payload = match.payload || {};
-      let text = stripHtmlForContext(payload.text || payload.pageContent || "");
+      let text = stripHtmlForContext(
+        payload.parent_text || payload.text || payload.pageContent || "",
+      );
       const url = payload.url || "";
       const title = payload.title || url || "";
       if (!text) continue;
@@ -2391,9 +2508,9 @@ ${answerInstructions}`;
 
     console.log(
       `[QueryController] buildPageMergeContext: expanding ${rankedUrls.length} URL(s) — ` +
-        rankedUrls
-          .map((u) => `${u.url || u.title} (score=${u.rankScore.toFixed(3)})`)
-          .join(", "),
+      rankedUrls
+        .map((u) => `${u.url || u.title} (score=${u.rankScore.toFixed(3)})`)
+        .join(", "),
     );
 
     // --- Steps 3–7: fetch, dedup, filter, merge per URL ---
@@ -2553,6 +2670,12 @@ ${answerInstructions}`;
             match: { value: userId.toString() },
           });
         }
+        if (options.agentId) {
+          must.push({
+            key: "agent_id",
+            match: { value: options.agentId.toString() },
+          });
+        }
         if (withSizeBoost && sizeTokens.length > 0) {
           must.push({
             key: "sizes",
@@ -2560,6 +2683,37 @@ ${answerInstructions}`;
           });
         }
         return must.length > 0 ? { must } : undefined;
+      };
+
+      const vectorStore = new QdrantVectorStoreManager(collectionName);
+      const queryText = options.queryText || "";
+
+      const executeSearch = async (filter) => {
+        const mode = await vectorStore.getCollectionVectorMode();
+        if (mode === "hybrid") {
+          return vectorStore.hybridQuery({
+            queryEmbedding,
+            queryText,
+            topK,
+            filter,
+          });
+        }
+        const searchParams = {
+          vector: queryEmbedding,
+          limit: topK,
+          with_payload: true,
+        };
+        if (filter) searchParams.filter = filter;
+        const results = await this.qdrantClient.search(
+          collectionName,
+          searchParams,
+        );
+        return (results || []).map((result) => ({
+          id: result.id,
+          score: result.score,
+          metadata: result.payload || {},
+          payload: result.payload || {},
+        }));
       };
 
       if (userId) {
@@ -2579,24 +2733,14 @@ ${answerInstructions}`;
 
           const sizedFilter = buildFilter(sizeTokens.length > 0);
           if (sizedFilter) {
-            searchResult = await this.qdrantClient.search(collectionName, {
-              vector: queryEmbedding,
-              limit: topK,
-              with_payload: true,
-              filter: sizedFilter,
-            });
+            searchResult = await executeSearch(sizedFilter);
             console.log(
               `[QueryController] Query with size filter [${sizeTokens.join(", ")}] returned ${searchResult.length} results`,
             );
           }
 
           if (searchResult.length === 0) {
-            searchResult = await this.qdrantClient.search(collectionName, {
-              vector: queryEmbedding,
-              limit: topK,
-              with_payload: true,
-              filter: buildFilter(false),
-            });
+            searchResult = await executeSearch(buildFilter(false));
             console.log(
               `[QueryController] Query with user_id filter returned ${searchResult.length} results`,
             );
@@ -2624,24 +2768,24 @@ ${answerInstructions}`;
           );
           console.log(
             `[QueryController] Query WITHOUT filter returned ${unfilteredResult.length} results. ` +
-              `Sample user_ids found: ${unfilteredResult
-                .slice(0, 3)
-                .map((r) => r.payload?.user_id)
-                .filter(Boolean)
-                .join(", ")}`,
+            `Sample user_ids found: ${unfilteredResult
+              .slice(0, 3)
+              .map((r) => r.payload?.user_id)
+              .filter(Boolean)
+              .join(", ")}`,
           );
 
           // If we found results without filter, it means user_id mismatch
           if (unfilteredResult.length > 0) {
             console.error(
               `[QueryController] CRITICAL: Data exists but user_id filter is excluding all results! ` +
-                `Expected user_id: ${userId}, Found user_ids: ${[
-                  ...new Set(
-                    unfilteredResult
-                      .map((r) => r.payload?.user_id)
-                      .filter(Boolean),
-                  ),
-                ].join(", ")}`,
+              `Expected user_id: ${userId}, Found user_ids: ${[
+                ...new Set(
+                  unfilteredResult
+                    .map((r) => r.payload?.user_id)
+                    .filter(Boolean),
+                ),
+              ].join(", ")}`,
             );
           }
         } catch (unfilteredError) {
@@ -2650,22 +2794,17 @@ ${answerInstructions}`;
           );
         }
       } else if (!userId) {
-        // No userId provided, query without filter
-        searchResult = await this.qdrantClient.search(collectionName, {
-          vector: queryEmbedding,
-          limit: topK,
-          with_payload: true,
-        });
+        searchResult = await executeSearch(undefined);
         console.log(
           `[QueryController] Query without user_id filter returned ${searchResult.length} results`,
         );
       }
 
-      return searchResult.map((result) => ({
+      return (searchResult || []).map((result) => ({
         id: result.id,
         score: result.score,
-        metadata: result.payload || {},
-        payload: result.payload || {}, // Keep original payload for compatibility
+        metadata: result.payload || result.metadata || {},
+        payload: result.payload || result.metadata || {},
       }));
     } catch (error) {
       console.error("[QueryController] Error querying Qdrant:", error);
@@ -2820,12 +2959,6 @@ ${answerInstructions}`;
         agentData,
       });
 
-      // await this.getChatModelName({
-      //   agentId,
-      //   websiteData,
-      //   query: question,
-      //   conversationId,
-      // });
 
       if (
         !clientData ||
@@ -2906,41 +3039,6 @@ ${answerInstructions}`;
       const langOpts = { userLanguage: routing.userLanguage };
 
       if (routing.route === ROUTES.GREETING) {
-        // if (!isPureGreeting(question)) {
-        //   console.log(
-        //     `[QueryController] GREETING route overridden for compound message: "${question.substring(0, 60)}..."`,
-        //   );
-        //   routing.route = ROUTES.SEMANTIC_RAG;
-        //   routing.subIntent = null;
-        // } else if (USE_LIGHTWEIGHT_RESPONSES) {
-        //   return await this.respondToGreeting({
-        //     question,
-        //     companyName,
-        //     routing,
-        //     websiteLanguage,
-        //     options,
-        //     conversationId,
-        //   });
-        // } else {
-        //   const greetingHistory = getChatHistoryFormatted(
-        //     CHAT_HISTORY_LIMIT_BRIEF,
-        //   );
-        //   const greetingResult = await this.generateAnswer(
-        //     question,
-        //     `This is a greeting. The user said: "${question}". Respond warmly and naturally, as a human customer support agent would. Ask how you can help regarding ${companyName} in a friendly, conversational way.`,
-        //     greetingHistory,
-        //     companyName,
-        //     websiteData,
-        //     langOpts,
-        //   );
-        //   this.logAnswerUsage(userId, agentId, greetingResult);
-        //   return {
-        //     success: true,
-        //     answer: greetingResult.answer,
-        //     conversationId,
-        //     isAgentRequest: false,
-        //   };
-        // }
 
         return await this.respondToGreeting({
           question,
@@ -3083,27 +3181,27 @@ ${answerInstructions}`;
 
       const subIntent = routing.subIntent || null;
       let effectiveSubIntent = subIntent;
-      const hasSizeFilter =
-        (queryNorm.sizes?.length > 0 || currentSizes?.length > 0) &&
-        /\b(lash|lashes|product|style|collection)\b/i.test(normalizedQuestion);
+      // const hasSizeFilter =
+      //   (queryNorm.sizes?.length > 0 || currentSizes?.length > 0) &&
+      //   /\b(lash|lashes|product|style|collection)\b/i.test(normalizedQuestion);
 
-      console.log("effective sub intent check : ", effectiveSubIntent);
+      // console.log("effective sub intent check : ", effectiveSubIntent);
 
-      if (wantsProductLinks && !effectiveSubIntent) {
-        effectiveSubIntent = /\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(retrievalQuery)
-          ? "IN_PAGE_LIST"
-          : "PAGE_LINKS";
-      } else if (
-        isCatalogQuery &&
-        (wasExpanded || hasSizeFilter) &&
-        !effectiveSubIntent
-      ) {
-        effectiveSubIntent = "IN_PAGE_LIST";
-      } else if (hasSizeFilter && !effectiveSubIntent) {
-        effectiveSubIntent = "IN_PAGE_LIST";
-      }
+      // if (wantsProductLinks && !effectiveSubIntent) {
+      //   effectiveSubIntent = /\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(retrievalQuery)
+      //     ? "IN_PAGE_LIST"
+      //     : "PAGE_LINKS";
+      // } else if (
+      //   isCatalogQuery &&
+      //   (wasExpanded || hasSizeFilter) &&
+      //   !effectiveSubIntent
+      // ) {
+      //   effectiveSubIntent = "IN_PAGE_LIST";
+      // } else if (hasSizeFilter && !effectiveSubIntent) {
+      //   effectiveSubIntent = "IN_PAGE_LIST";
+      // }
 
-      console.log("Effective sub intent check 1  : ", effectiveSubIntent);
+      // console.log("Effective sub intent check 1  : ", effectiveSubIntent);
 
       const queryAttributes = extractQueryAttributes({
         normalizedQuestion,
@@ -3113,9 +3211,9 @@ ${answerInstructions}`;
         subIntent: effectiveSubIntent,
       });
 
-      // console.log(
-      //   `[QueryController] Attributes: sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length} flags=${JSON.stringify(queryAttributes.flags)}`
-      // );
+      console.log(
+        `[QueryController] Attributes: sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length} flags=${JSON.stringify(queryAttributes.flags)}`
+      );
 
       // const embeddingQuery = queryAttributes.embeddingQuery;
       // if (embeddingQuery !== retrievalQuery) {
@@ -3128,11 +3226,11 @@ ${answerInstructions}`;
         queryAttributes.keywords.length > 0
           ? queryAttributes.keywords
           : this.buildCatalogKeywords(queryAttributes.keywordSource, {
-              ...queryNorm,
-              sizes: queryNorm.sizes?.length
-                ? queryNorm.sizes
-                : currentSizes || [],
-            });
+            ...queryNorm,
+            sizes: queryNorm.sizes?.length
+              ? queryNorm.sizes
+              : currentSizes || [],
+          });
 
       let questionEmbedding = null;
       const getQuestionEmbedding = async () => {
@@ -3212,24 +3310,24 @@ ${answerInstructions}`;
       let semanticTopK =
         effectiveSubIntent === "IN_PAGE_LIST"
           ? Math.max(
-              10,
-              Math.min(
-                20,
-                this.extractRequestedCount(question, requestedTopK) * 3,
-              ),
-            )
+            10,
+            Math.min(
+              20,
+              this.extractRequestedCount(question, requestedTopK) * 3,
+            ),
+          )
           : effectiveSubIntent === "CONTACT_INFO"
             ? 12
             : effectiveSubIntent === "PAGE_LINKS"
               ? Math.max(
-                  requestedTopK,
-                  this.extractRequestedCount(question, requestedTopK) * 2,
-                )
+                requestedTopK,
+                this.extractRequestedCount(question, requestedTopK) * 2,
+              )
               : requestedTopK;
 
-      if (isCatalogQuery || wantsProductLinks) {
-        semanticTopK = Math.max(semanticTopK, 15);
-      }
+      // if (isCatalogQuery || wantsProductLinks) {
+      //   semanticTopK = Math.max(semanticTopK, 15);
+      // }
 
       let queryResponse = await this.runHybridRetrieval({
         collectionName,
@@ -3238,121 +3336,123 @@ ${answerInstructions}`;
         catalogKeywords,
         getQuestionEmbedding,
         queryAttributes,
+        queryText: retrievalQuery,
+        agentId,
       });
 
       // console.log("queryResponse data is : ", queryResponse);
 
       console.log("Effective : ", effectiveSubIntent);
 
-      if (effectiveSubIntent) {
-        const specialized = await this.trySpecializedRetrieval({
-          subIntent: effectiveSubIntent,
-          question,
-          keywordSource: queryAttributes.keywordSource,
-          collectionName,
-          userIdString,
-          requestedTopK,
-          companyName,
-          semanticMatches: queryResponse,
-          getQuestionEmbedding,
-          wantsProductLinks,
-          catalogKeywords,
-          queryAttributes,
-        });
+      // if (effectiveSubIntent) {
+      //   const specialized = await this.trySpecializedRetrieval({
+      //     subIntent: effectiveSubIntent,
+      //     question,
+      //     keywordSource: queryAttributes.keywordSource,
+      //     collectionName,
+      //     userIdString,
+      //     requestedTopK,
+      //     companyName,
+      //     semanticMatches: queryResponse,
+      //     getQuestionEmbedding,
+      //     wantsProductLinks,
+      //     catalogKeywords,
+      //     queryAttributes,
+      //   });
 
-        // console.log("Specialized retrieval result: ", specialized);
-        if (specialized) {
-          const specializedResult = await this.generateAnswerFromMatches({
-            question,
-            matches: specialized.matches,
-            chatHistory: getChatHistoryFormatted(CHAT_HISTORY_LIMIT),
-            organisation: companyName,
-            websiteData,
-            answerOptions: {
-              responseMode: specialized.responseMode,
-              requestedCount: specialized.requestedCount,
-              wantsProductUrls: wantsProductLinks,
-              prebuiltContext: specialized.context,
-              wasExpanded,
-              retrievalMaxScore: this.getMaxSemanticScore(specialized.matches),
-              userId: userIdString,
-              agentId: agentId?.toString(),
-              ...langOpts,
-            },
-          });
+      //   // console.log("Specialized retrieval result: ", specialized);
+      //   if (specialized) {
+      //     const specializedResult = await this.generateAnswerFromMatches({
+      //       question,
+      //       matches: specialized.matches,
+      //       chatHistory: getChatHistoryFormatted(CHAT_HISTORY_LIMIT),
+      //       organisation: companyName,
+      //       websiteData,
+      //       answerOptions: {
+      //         responseMode: specialized.responseMode,
+      //         requestedCount: specialized.requestedCount,
+      //         wantsProductUrls: wantsProductLinks,
+      //         prebuiltContext: specialized.context,
+      //         wasExpanded,
+      //         retrievalMaxScore: this.getMaxSemanticScore(specialized.matches),
+      //         userId: userIdString,
+      //         agentId: agentId?.toString(),
+      //         ...langOpts,
+      //       },
+      //     });
 
-          this.logAnswerUsage(userId, agentId, specializedResult, conversationId);
+      //     this.logAnswerUsage(userId, agentId, specializedResult, conversationId);
 
-          await this.persistRagStateForTurn(conversationId, {
-            routing,
-            ragState,
-            retrievalQuery,
-            baseForEmbedding,
-            queryAttributes,
-            matches: specialized.matches,
-            assistantAnswer: specializedResult.answer,
-          });
+      //     await this.persistRagStateForTurn(conversationId, {
+      //       routing,
+      //       ragState,
+      //       retrievalQuery,
+      //       baseForEmbedding,
+      //       queryAttributes,
+      //       matches: specialized.matches,
+      //       assistantAnswer: specializedResult.answer,
+      //     });
 
-          return {
-            success: true,
-            answer: specializedResult.answer,
-            sources: this.matchesToSources(specialized.matches),
-            conversationId,
-            isAgentRequest: false,
-          };
-        }
-      }
+      //     return {
+      //       success: true,
+      //       answer: specializedResult.answer,
+      //       sources: this.matchesToSources(specialized.matches),
+      //       conversationId,
+      //       isAgentRequest: false,
+      //     };
+      //   }
+      // }
 
-      const forcedCatalog = this.tryForcedCatalogList({
-        question: normalizedQuestion,
-        queryResponse,
-        queryAttributes,
-        companyName,
-        requestedTopK,
-      });
+      // const forcedCatalog = this.tryForcedCatalogList({
+      //   question: normalizedQuestion,
+      //   queryResponse,
+      //   queryAttributes,
+      //   companyName,
+      //   requestedTopK,
+      // });
 
-      console.log("Forced catalog check: ", forcedCatalog);
+      // console.log("Forced catalog check: ", forcedCatalog);
 
-      if (forcedCatalog) {
-        const forcedResult = await this.generateAnswerFromMatches({
-          question,
-          matches: forcedCatalog.matches,
-          chatHistory: getChatHistoryFormatted(CHAT_HISTORY_LIMIT),
-          organisation: companyName,
-          websiteData,
-          answerOptions: {
-            responseMode: forcedCatalog.responseMode,
-            requestedCount: forcedCatalog.requestedCount,
-            wantsProductUrls: wantsProductLinks,
-            prebuiltContext: forcedCatalog.context,
-            wasExpanded,
-            retrievalMaxScore: this.getMaxSemanticScore(forcedCatalog.matches),
-            userId: userIdString,
-            agentId: agentId?.toString(),
-            ...langOpts,
-          },
-        });
+      // if (forcedCatalog) {
+      //   const forcedResult = await this.generateAnswerFromMatches({
+      //     question,
+      //     matches: forcedCatalog.matches,
+      //     chatHistory: getChatHistoryFormatted(CHAT_HISTORY_LIMIT),
+      //     organisation: companyName,
+      //     websiteData,
+      //     answerOptions: {
+      //       responseMode: forcedCatalog.responseMode,
+      //       requestedCount: forcedCatalog.requestedCount,
+      //       wantsProductUrls: wantsProductLinks,
+      //       prebuiltContext: forcedCatalog.context,
+      //       wasExpanded,
+      //       retrievalMaxScore: this.getMaxSemanticScore(forcedCatalog.matches),
+      //       userId: userIdString,
+      //       agentId: agentId?.toString(),
+      //       ...langOpts,
+      //     },
+      //   });
 
-        this.logAnswerUsage(userId, agentId, forcedResult, conversationId);
+      //   this.logAnswerUsage(userId, agentId, forcedResult, conversationId);
 
-        await this.persistRagStateForTurn(conversationId, {
-          routing,
-          ragState,
-          retrievalQuery,
-          baseForEmbedding,
-          queryAttributes,
-          matches: forcedCatalog.matches,
-          assistantAnswer: forcedResult.answer,
-        });
+      //   await this.persistRagStateForTurn(conversationId, {
+      //     routing,
+      //     ragState,
+      //     retrievalQuery,
+      //     baseForEmbedding,
+      //     queryAttributes,
+      //     matches: forcedCatalog.matches,
+      //     assistantAnswer: forcedResult.answer,
+      //   });
 
-        return {
-          success: true,
-          answer: forcedResult.answer,
-          sources: this.matchesToSources(forcedCatalog.matches),
-          conversationId,
-          isAgentRequest: false,
-        };
-      }
+      //   return {
+      //     success: true,
+      //     answer: forcedResult.answer,
+      //     sources: this.matchesToSources(forcedCatalog.matches),
+      //     conversationId,
+      //     isAgentRequest: false,
+      //   };
+      // }
 
       // Standard semantic RAG path (always runs; specialized path only when quality passes)
 
@@ -3360,10 +3460,10 @@ ${answerInstructions}`;
       if (queryResponse.length === 0) {
         console.warn(
           `[QueryController] WARNING: No results found in collection "${collectionName}" for user "${userIdString}". This could mean:\n` +
-            `  1. Collection is empty or has no data for this user\n` +
-            `  2. Data hasn't been indexed yet\n` +
-            `  3. Collection name is incorrect\n` +
-            `  4. agent_id filter is too restrictive`,
+          `  1. Collection is empty or has no data for this user\n` +
+          `  2. Data hasn't been indexed yet\n` +
+          `  3. Collection name is incorrect\n` +
+          `  4. agent_id filter is too restrictive`,
         );
       }
 
@@ -3391,8 +3491,8 @@ ${answerInstructions}`;
       // Filter matches by score threshold (bypass for explicit catalog list queries)
       let relevantMatches = catalogListQuery
         ? this.selectCatalogMatches(queryResponse, queryAttributes, {
-            strictSize: sizedCatalogQuery,
-          }).slice(0, Math.max(requestedTopK * 2, 15))
+          strictSize: sizedCatalogQuery,
+        }).slice(0, Math.max(requestedTopK * 2, 15))
         : queryResponse.filter((match) => match.score >= effectiveThreshold);
 
       if (catalogListQuery && relevantMatches.length > 0) {
@@ -3477,39 +3577,36 @@ ${answerInstructions}`;
       }
 
       // Enhanced logging for threshold tuning
-      const scoreStats =
-        queryResponse.length > 0
-          ? {
-              min: Math.min(...queryResponse.map((m) => m.score)),
-              max: Math.max(...queryResponse.map((m) => m.score)),
-              avg:
-                queryResponse.reduce((sum, m) => sum + m.score, 0) /
-                queryResponse.length,
-              scores: queryResponse.map((m) => m.score.toFixed(3)),
-            }
-          : null;
+      // const scoreStats =
+      //   queryResponse.length > 0
+      //     ? {
+      //         min: Math.min(...queryResponse.map((m) => m.score)),
+      //         max: Math.max(...queryResponse.map((m) => m.score)),
+      //         avg:
+      //           queryResponse.reduce((sum, m) => sum + m.score, 0) /
+      //           queryResponse.length,
+      //         scores: queryResponse.map((m) => m.score.toFixed(3)),
+      //       }
+      //     : null;
 
-      console.log(
-        `[QueryController] Query: "${question.substring(
-          0,
-          50,
-        )}..." | Collection: ${collectionName} | Found: ${
-          queryResponse.length
-        } matches, ${
-          relevantMatches.length
-        } relevant (threshold: ${effectiveThreshold})`,
-      );
-      if (scoreStats) {
-        console.log(
-          `[QueryController] Score stats - Min: ${scoreStats.min.toFixed(
-            3,
-          )}, Max: ${scoreStats.max.toFixed(3)}, Avg: ${scoreStats.avg.toFixed(
-            3,
-          )} | Scores: [${scoreStats.scores.slice(0, 5).join(", ")}${
-            scoreStats.scores.length > 5 ? "..." : ""
-          }]`,
-        );
-      }
+      // console.log(
+      //   `[QueryController] Query: "${question.substring(
+      //     0,
+      //     50,
+      //   )}..." | Collection: ${collectionName} | Found: ${queryResponse.length
+      //   } matches, ${relevantMatches.length
+      //   } relevant (threshold: ${effectiveThreshold})`,
+      // );
+      // if (scoreStats) {
+      //   console.log(
+      //     `[QueryController] Score stats - Min: ${scoreStats.min.toFixed(
+      //       3,
+      //     )}, Max: ${scoreStats.max.toFixed(3)}, Avg: ${scoreStats.avg.toFixed(
+      //       3,
+      //     )} | Scores: [${scoreStats.scores.slice(0, 5).join(", ")}${scoreStats.scores.length > 5 ? "..." : ""
+      //     }]`,
+      //   );
+      // }
       // if (queryResponse.length > 0 && relevantMatches.length === 0) {
       //   console.warn(
       //     `[QueryController] WARNING: Found ${queryResponse.length} matches but ALL were below threshold ${effectiveThreshold}. Consider lowering threshold or checking data quality.`,
@@ -3644,27 +3741,32 @@ ${answerInstructions}`;
           this.logAnswerUsage(userId, agentId, offTopicResult, conversationId);
         }
       } else {
-        const wantsUrls = wantsProductLinks || isProductLinkRequest(question);
-        const listFallback =
-          wantsUrls ||
-          hasSizeFilter ||
-          (effectiveSubIntent === "IN_PAGE_LIST" &&
-            this.isExplicitInPageListQuestion(normalizedQuestion));
-        const contactFallback =
-          effectiveSubIntent === "CONTACT_INFO" &&
-          this.isPrimarilyContactQuestion(question);
-        const requestedCount = this.extractRequestedCount(
-          question,
-          requestedTopK,
-        );
-        const responseMode = listFallback
-          ? "list"
-          : contactFallback
-            ? "contact"
-            : "brief";
-        const historyLimit = isPremiumResponseMode(responseMode)
-          ? CHAT_HISTORY_LIMIT
-          : CHAT_HISTORY_LIMIT_BRIEF;
+        // const wantsUrls = wantsProductLinks || isProductLinkRequest(question);
+        // const listFallback =
+        //   wantsUrls ||
+        //   hasSizeFilter ||
+        //   (effectiveSubIntent === "IN_PAGE_LIST" &&
+        //     this.isExplicitInPageListQuestion(normalizedQuestion));
+        // const contactFallback =
+        //   effectiveSubIntent === "CONTACT_INFO" &&
+        //   this.isPrimarilyContactQuestion(question);
+        // const requestedCount = this.extractRequestedCount(
+        //   question,
+        //   requestedTopK,
+        // );
+        // const responseMode = listFallback
+        //   ? "list"
+        //   : contactFallback
+        //     ? "contact"
+        //     : "brief";
+        // const historyLimit = isPremiumResponseMode(responseMode)
+        //   ? CHAT_HISTORY_LIMIT
+        //   : CHAT_HISTORY_LIMIT_BRIEF;
+
+        let historyLimit = 10;
+
+        let responseMode = "brief";
+        let requestedCount = 1;
 
         const answerResult = await this.generateAnswerFromMatches({
           question,
@@ -3675,7 +3777,7 @@ ${answerInstructions}`;
           answerOptions: {
             responseMode,
             requestedCount,
-            wantsProductUrls: wantsUrls,
+            wantsProductUrls: false,
             wasExpanded,
             retrievalMaxScore: maxScore,
             // Pass the LLM router's subIntent so determineMaxTokens uses it

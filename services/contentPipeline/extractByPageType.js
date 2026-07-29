@@ -12,6 +12,7 @@ const { extractWithReadability } = require("./extractors/contentReadability");
 const { extractFaqContent } = require("./extractors/faq");
 const { processResidualSections } = require("./residualSections");
 const { GRID_SELECTORS } = require("./extractors/listing");
+const { resolveProductId } = require("./productId");
 
 /**
  * Build a section descriptor for multi-entity indexing of one URL.
@@ -26,6 +27,7 @@ function buildSection({
   classification_confidence = 0,
   classification_reason = "",
   extraction_source = "generic",
+  product_id = null,
 }) {
   return {
     pageType,
@@ -38,6 +40,7 @@ function buildSection({
     classification_confidence,
     classification_reason,
     extraction_source,
+    product_id,
   };
 }
 
@@ -189,11 +192,10 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
   let entity_name = typed?.entity_name || null;
   let attributes = typed?.attributes || {};
 
+  const PDP_THIN_THRESHOLD = 250;
+
   if (!content || content.length < 80) {
-    if (isPdp && content && content.length >= 40) {
-      // PDP: keep thin structured shell; residual adds body sections.
-      extraction_source = typed?.extraction_source || extraction_source;
-    } else if (isListing && content && content.length >= 40) {
+    if (isListing && content && content.length >= 40) {
       // PLP: keep listing markdown even if modest; do not replace with noisy generic.
       extraction_source = typed?.extraction_source || extraction_source;
     } else {
@@ -203,6 +205,23 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
       if (!entity_name && detection.pageType !== "product") {
         entity_name = generic.title || null;
       }
+    }
+  } else if (
+    isPdp &&
+    content.length < PDP_THIN_THRESHOLD &&
+    generic?.content &&
+    generic.content.length > content.length
+  ) {
+    // PDP still thin after structured+cleaned body → merge chrome-stripped generic
+    const genericBody = String(generic.content || "").trim();
+    const alreadyHas = content
+      .toLowerCase()
+      .includes(genericBody.slice(0, 80).toLowerCase());
+    if (!alreadyHas && genericBody.length >= 80) {
+      content = `${content}\n\n## Page content\n${genericBody}`
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+      extraction_source = `${extraction_source}+generic`;
     }
   }
 
@@ -230,6 +249,25 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     validated.pageType = "product";
   }
 
+  const pageProductId = isPdp
+    ? resolveProductId({
+        url,
+        canonicalUrl: validated.canonicalUrl || pageMetadata.canonicalUrl,
+        attributes: validated.attributes,
+        entity_name: validated.entity_name,
+        entity_type: "product",
+        jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
+        html: sourceCode,
+      })
+    : null;
+
+  if (pageProductId) {
+    validated.attributes = {
+      ...validated.attributes,
+      product_id: pageProductId,
+    };
+  }
+
   // 5) Multi-section: primary + optional product FAQ + residual DOM sections
   const sections = [];
   const primarySection = buildSection({
@@ -242,6 +280,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     classification_confidence: validated.classification_confidence,
     classification_reason: validated.classification_reason,
     extraction_source: validated.extraction_source,
+    product_id: pageProductId,
   });
   sections.push(primarySection);
 
@@ -280,6 +319,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
             classification_confidence: faq.extraction_confidence || 0.85,
             classification_reason: `secondary_section:${faq.extraction_source}`,
             extraction_source: faq.extraction_source,
+            product_id: pageProductId,
           }),
         );
       }
@@ -334,6 +374,10 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
           classification_confidence: sec.classification_confidence,
           classification_reason: sec.classification_reason,
           extraction_source: sec.extraction_source,
+          product_id:
+            sec.entity_type === "product" || sec.pageType === "product"
+              ? pageProductId
+              : null,
         }),
       );
     }
@@ -362,6 +406,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     entity_name: validated.entity_name,
     attributes: validated.attributes,
     search_terms: validated.search_terms,
+    product_id: pageProductId,
     classification_confidence: validated.classification_confidence,
     classification_reason: validated.classification_reason,
     extraction_source: validated.extraction_source,

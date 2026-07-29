@@ -1,5 +1,5 @@
 const crypto = require("crypto");
-const { buildQdrantChunkPayload } = require("./schema");
+const { buildQdrantChunkPayload, PIPELINE_VERSION } = require("./schema");
 const { applyEmbeddingPrefix } = require("./contextPrefix");
 
 function hashContent(text) {
@@ -78,11 +78,17 @@ function normalizeChunkList(chunks) {
           pageType: c.pageType,
           entity_type: c.entity_type,
           entity_name: c.entity_name,
+          product_id: c.product_id,
           attributes: c.attributes,
           search_terms: c.search_terms,
           classification_confidence: c.classification_confidence,
           classification_reason: c.classification_reason,
           quality_score: c.quality_score,
+          parent_text: c.parent_text,
+          parent_id: c.parent_id,
+          parent_index: c.parent_index,
+          child_index: c.child_index,
+          chunk_role: c.chunk_role,
         };
       }
       return null;
@@ -110,6 +116,10 @@ function pageToUpsertDocuments(page, chunks) {
         chunk.entity_name !== undefined && chunk.entity_name !== null
           ? chunk.entity_name
           : page.entity_name,
+      product_id:
+        chunk.product_id !== undefined && chunk.product_id !== null
+          ? chunk.product_id
+          : page.product_id,
       attributes:
         chunk.attributes && typeof chunk.attributes === "object"
           ? chunk.attributes
@@ -128,6 +138,14 @@ function pageToUpsertDocuments(page, chunks) {
           ? chunk.quality_score
           : page.quality_score,
       source_type: chunk.pageType || page.source_type || page.pageType,
+      parent_text: chunk.parent_text || chunk.text,
+      parent_id: chunk.parent_id || null,
+      parent_index:
+        typeof chunk.parent_index === "number" ? chunk.parent_index : null,
+      child_index:
+        typeof chunk.child_index === "number" ? chunk.child_index : index,
+      chunk_role: chunk.chunk_role || "child",
+      pipeline_version: page.pipeline_version || PIPELINE_VERSION,
     };
     const payload = buildQdrantChunkPayload(pageForChunk, chunk.text, {
       chunkIndex: index,
@@ -137,6 +155,14 @@ function pageToUpsertDocuments(page, chunks) {
       heading_path: chunk.heading_path,
     });
 
+    // Sparse lexical signal: child text + title/sku (no embed prefix)
+    const sparseText = chunk.text;
+    const sparseBoost = {
+      title: pageForChunk.title,
+      sku: pageForChunk.attributes?.sku,
+      url: pageForChunk.url,
+    };
+
     const { text, ...metadata } = payload;
     return {
       pageContent: text,
@@ -144,6 +170,8 @@ function pageToUpsertDocuments(page, chunks) {
         ...metadata,
         heading_path: chunk.heading_path || "",
         embeddingText,
+        sparseText,
+        sparseBoost,
       },
     };
   });

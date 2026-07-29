@@ -4,10 +4,12 @@ const { normalizeToCommonSchema, hashContent } = require("./normalizeSchema");
 const { upsertPageToQdrant } = require("./upsertPageToQdrant");
 const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
 const {
-  structureAwareChunk,
-  DEFAULT_CHUNK_CHARS,
-  DEFAULT_OVERLAP_CHARS,
+  structureAwareParentChildChunk,
+  DEFAULT_PARENT_CHARS,
+  DEFAULT_CHILD_CHARS,
 } = require("./chunking");
+
+const USE_PARENT_CHILD = process.env.RAG_PARENT_CHILD !== "false";
 
 const DEFAULT_CHUNK_SIZE = 500; // tokens (compat export)
 const DEFAULT_CHUNK_OVERLAP = 100;
@@ -45,6 +47,7 @@ function resolveSections(doc) {
         classification_reason:
           s.classification_reason || meta.classification_reason || "phase3",
         extraction_source: s.extraction_source || meta.extraction_source,
+        product_id: s.product_id ?? meta.product_id ?? null,
       }))
       .filter((s) => s.content);
   }
@@ -63,6 +66,7 @@ function resolveSections(doc) {
           : 0,
       classification_reason: meta.classification_reason || "phase3",
       extraction_source: meta.extraction_source,
+      product_id: meta.product_id ?? null,
     },
   ].filter((s) => s.content);
 }
@@ -81,16 +85,11 @@ async function processPageDocuments(
 ) {
   const { onProgress } = options;
   const qualityThreshold = options.qualityThreshold ?? QUALITY_THRESHOLD;
-  const chunkSize =
+  const parentSize =
+    options.parentSizeChars ??
     options.chunkSizeChars ??
-    (options.chunkSize != null
-      ? options.chunkSize * CHARS_PER_TOKEN
-      : DEFAULT_CHUNK_CHARS);
-  const chunkOverlap =
-    options.chunkOverlapChars ??
-    (options.chunkOverlap != null
-      ? options.chunkOverlap * CHARS_PER_TOKEN
-      : DEFAULT_OVERLAP_CHARS);
+    DEFAULT_PARENT_CHARS;
+  const childSize = options.childSizeChars ?? DEFAULT_CHILD_CHARS;
 
   const chunkCountPerUrl = {};
   const resultsByUrl = {};
@@ -174,6 +173,8 @@ async function processPageDocuments(
           meta.entity_type || keptSections[0]?.entity_type || "general",
         entity_name: meta.entity_name || keptSections[0]?.entity_name || null,
         attributes: meta.attributes || keptSections[0]?.attributes || {},
+        product_id:
+          meta.product_id || keptSections[0]?.product_id || null,
         search_terms: meta.search_terms || [],
         classification_confidence:
           typeof meta.classification_confidence === "number"
@@ -241,22 +242,47 @@ async function processPageDocuments(
         continue;
       }
 
-      // --- Phase 4: structure-aware chunking per section ---
+      // --- Parent-child chunking per section (embed children, store parent on payload) ---
       const allChunks = [];
       for (const section of keptSections) {
-        const parts = await structureAwareChunk(section.content, {
-          chunkSize,
-          chunkOverlap,
-          entity_type: section.entity_type,
-          pageType: section.pageType,
-        });
+        const parts = USE_PARENT_CHILD
+          ? await structureAwareParentChildChunk(section.content, {
+              parentSize,
+              childSize,
+              entity_type: section.entity_type,
+              pageType: section.pageType,
+            })
+          : await (async () => {
+              const { structureAwareChunk } = require("./chunking");
+              const legacy = await structureAwareChunk(section.content, {
+                chunkSize: parentSize,
+                chunkOverlap: 200,
+                entity_type: section.entity_type,
+                pageType: section.pageType,
+              });
+              return legacy.map((p, i) => ({
+                ...p,
+                parent_text: p.text,
+                parent_id: null,
+                parent_index: 0,
+                child_index: i,
+                chunk_role: "child",
+              }));
+            })();
+
         for (const part of parts) {
           allChunks.push({
             text: part.text,
+            parent_text: part.parent_text,
+            parent_id: part.parent_id,
+            parent_index: part.parent_index,
+            child_index: part.child_index,
+            chunk_role: part.chunk_role || "child",
             heading_path: part.heading_path || "",
             pageType: section.pageType,
             entity_type: section.entity_type,
             entity_name: section.entity_name,
+            product_id: section.product_id || null,
             attributes: section.attributes,
             search_terms: section.search_terms,
             classification_confidence: section.classification_confidence,

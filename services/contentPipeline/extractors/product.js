@@ -1,6 +1,8 @@
 const cheerio = require("cheerio");
-const TurndownService = require("turndown");
-const { stripInlineBufferImageContent } = require("../htmlCleanup");
+const {
+  stripInlineBufferImageContent,
+  extractCleanProductBody,
+} = require("../htmlCleanup");
 
 function asArray(value) {
   if (value == null) return [];
@@ -200,7 +202,39 @@ function extractProductFromDom(html, url) {
   };
 }
 
-function productToMarkdown({ entity_name, description, attributes, url }) {
+function normalizeForCompare(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[#*_`>\-\[\]()]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * True when short LD/meta description is already covered by the cleaned body.
+ */
+function descriptionCoveredByBody(shortDesc, bodyMarkdown) {
+  const shortNorm = normalizeForCompare(shortDesc);
+  const bodyNorm = normalizeForCompare(bodyMarkdown);
+  if (!shortNorm || shortNorm.length < 20) return true;
+  if (!bodyNorm) return false;
+  if (bodyNorm.includes(shortNorm)) return true;
+  // Prefix match for truncated meta descriptions
+  const prefix = shortNorm.slice(0, Math.min(80, shortNorm.length));
+  return prefix.length >= 20 && bodyNorm.includes(prefix);
+}
+
+/**
+ * Build structured shell. Optionally omit short ## Description when body will cover it.
+ */
+function productToMarkdown({
+  entity_name,
+  description,
+  attributes,
+  url,
+  includeShortDescription = true,
+}) {
   const lines = [];
   if (entity_name) lines.push(`# ${entity_name}`);
   if (url) lines.push(`\nURL: ${url}`);
@@ -224,19 +258,19 @@ function productToMarkdown({ entity_name, description, attributes, url }) {
     lines.push(attrLines.join("\n"));
   }
 
-  if (description) {
+  if (includeShortDescription && description) {
     lines.push("\n## Description");
     lines.push(description.trim());
   }
 
-  // Append a light body excerpt if description is very short
   return stripInlineBufferImageContent(
     lines.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
   );
 }
 
 /**
- * Product / listing extraction: JSON-LD first, DOM fallback.
+ * Product extraction: JSON-LD/DOM attributes + always-appended cleaned page body.
+ * FAQ / reviews / related stay out of primary (residual / secondary FAQ own them).
  */
 function extractProductContent({ url, html, jsonLdBlocks = [] }) {
   const fromLd = extractProductFromJsonLd(jsonLdBlocks);
@@ -253,76 +287,55 @@ function extractProductContent({ url, html, jsonLdBlocks = [] }) {
     source: fromLd?.source || fromDom?.source || "none",
   };
 
+  const { markdown: bodyMarkdown, source: bodySource } = extractCleanProductBody(
+    html,
+    url,
+  );
+
+  const shortCovered =
+    bodyMarkdown &&
+    merged.description &&
+    descriptionCoveredByBody(merged.description, bodyMarkdown);
+
   let content = productToMarkdown({
     entity_name: merged.entity_name,
     description: merged.description,
     attributes: merged.attributes,
     url,
+    includeShortDescription: Boolean(merged.description) && !shortCovered,
   });
 
-  // If structured content is thin, append a light cleaned body excerpt only.
-  // Residual section scan owns FAQ / reviews / related / policy blocks.
-  if (content.length < 120 && html) {
-    const $ = cheerio.load(html);
-    $("script, style, noscript, nav, footer, header").remove();
-    $(
-      [
-        "[itemtype*='FAQPage']",
-        ".faq",
-        ".faqs",
-        "#faq",
-        "[class*='faq-section']",
-        "[id*='faq']",
-        ".reviews",
-        "#reviews",
-        ".product-reviews",
-        "[class*='review']",
-        ".related",
-        ".related-products",
-        "[class*='related-product']",
-        ".recommendations",
-        "[class*='recommend']",
-        "[class*='shipping']",
-        "[class*='returns']",
-        "[class*='warranty']",
-        "aside",
-        "[role='complementary']",
-        ".facets",
-        ".filters",
-        "[class*='facet-']",
-        "[class*='Facet']",
-        "[id*='FacetFilters']",
-        "[class*='filter-sidebar']",
-        "[class*='collection-filter']",
-        "facet-filters-form",
-      ].join(", "),
-    ).remove();
-    // Drop common leftover heading blocks by walking h2+siblings is hard here;
-    // prefer main/product containers over full body.
-    const turndown = new TurndownService({ headingStyle: "atx" });
-    const bodyMd = turndown.turndown(
-      $(
-        "main .product, .product-detail, .product__description, [itemprop='description'], main, [role='main']",
-      )
-        .first()
-        .html() || "",
-    );
-    const cleaned = stripInlineBufferImageContent(
-      bodyMd.replace(/\n{3,}/g, "\n\n").trim(),
-    );
-    if (cleaned.length > 40 && cleaned.length > content.length) {
+  // Always append cleaned body when available (not only when shell is thin)
+  if (bodyMarkdown) {
+    const heading =
+      shortCovered || !merged.description
+        ? "## Description"
+        : "## Full details";
+    const bodyNorm = normalizeForCompare(bodyMarkdown);
+    const contentNorm = normalizeForCompare(content);
+    const preview = bodyNorm.slice(0, Math.min(100, bodyNorm.length));
+    const alreadyEmbedded =
+      preview.length >= 40 && contentNorm.includes(preview);
+
+    if (!alreadyEmbedded) {
       content = stripInlineBufferImageContent(
-        `${content}\n\n${cleaned}`.replace(/\n{3,}/g, "\n\n").trim(),
+        `${content}\n\n${heading}\n${bodyMarkdown}`
+          .replace(/\n{3,}/g, "\n\n")
+          .trim(),
       );
     }
   }
+
+  const sources = [merged.source];
+  if (bodySource) sources.push("cleaned_body");
 
   return {
     content,
     entity_name: merged.entity_name,
     attributes: merged.attributes,
     extraction_confidence: merged.confidence,
-    extraction_source: merged.source,
+    extraction_source: sources.filter(Boolean).join("+"),
+    body_chars: bodyMarkdown ? bodyMarkdown.length : 0,
   };
 }
 
@@ -330,4 +343,5 @@ module.exports = {
   extractProductContent,
   extractProductFromJsonLd,
   extractProductFromDom,
+  descriptionCoveredByBody,
 };

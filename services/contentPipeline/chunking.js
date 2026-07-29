@@ -1,7 +1,24 @@
 const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter");
+const { v4: uuidv4 } = require("uuid");
 
 const DEFAULT_CHUNK_CHARS = 2000; // ~500 tokens
 const DEFAULT_OVERLAP_CHARS = 400;
+
+/** Parent window for parent-child retrieval (~2000 chars). */
+const DEFAULT_PARENT_CHARS = parseInt(
+  process.env.RAG_PARENT_CHARS || "2000",
+  10,
+);
+/** Child window embedded in Qdrant (~400 chars). */
+const DEFAULT_CHILD_CHARS = parseInt(process.env.RAG_CHILD_CHARS || "400", 10);
+const DEFAULT_PARENT_OVERLAP_CHARS = parseInt(
+  process.env.RAG_PARENT_OVERLAP_CHARS || "200",
+  10,
+);
+const DEFAULT_CHILD_OVERLAP_CHARS = parseInt(
+  process.env.RAG_CHILD_OVERLAP_CHARS || "60",
+  10,
+);
 
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
 
@@ -257,12 +274,95 @@ async function structureAwareChunk(markdown, options = {}) {
   return out;
 }
 
+/**
+ * Parent-child chunking: embed small children (~400 chars), store parent (~2000 chars)
+ * on each child payload for high-precision search + broader LLM context.
+ *
+ * @returns {Promise<Array<{
+ *   text: string,
+ *   parent_text: string,
+ *   parent_id: string,
+ *   parent_index: number,
+ *   child_index: number,
+ *   heading_path: string,
+ *   chunk_role: 'child',
+ * }>>}
+ */
+async function structureAwareParentChildChunk(markdown, options = {}) {
+  const parentSize = options.parentSize ?? DEFAULT_PARENT_CHARS;
+  const parentOverlap = options.parentOverlap ?? DEFAULT_PARENT_OVERLAP_CHARS;
+  const childSize = options.childSize ?? DEFAULT_CHILD_CHARS;
+  const childOverlap = options.childOverlap ?? DEFAULT_CHILD_OVERLAP_CHARS;
+
+  // First pass: structure-aware sections at parent granularity
+  const parentParts = await structureAwareChunk(markdown, {
+    chunkSize: parentSize,
+    chunkOverlap: parentOverlap,
+    entity_type: options.entity_type,
+    pageType: options.pageType,
+  });
+
+  const children = [];
+  let globalChildIndex = 0;
+
+  for (let parentIndex = 0; parentIndex < parentParts.length; parentIndex++) {
+    const parentPart = parentParts[parentIndex];
+    const parentText = parentPart.text.trim();
+    if (!parentText) continue;
+
+    const parentId = uuidv4();
+    const headingPath = parentPart.heading_path || "";
+
+    // Small parent sections become a single child (avoid over-fragmentation)
+    if (parentText.length <= childSize * 1.15) {
+      children.push({
+        text: parentText,
+        parent_text: parentText,
+        parent_id: parentId,
+        parent_index: parentIndex,
+        child_index: globalChildIndex++,
+        heading_path: headingPath,
+        chunk_role: "child",
+      });
+      continue;
+    }
+
+    const childParts = await recursiveSplit(parentText, {
+      chunkSize: childSize,
+      chunkOverlap: childOverlap,
+    });
+
+    let localChildIndex = 0;
+    for (const part of childParts) {
+      const childText = part.trim();
+      if (!childText) continue;
+      children.push({
+        text: childText,
+        parent_text: parentText,
+        parent_id: parentId,
+        parent_index: parentIndex,
+        child_index: globalChildIndex++,
+        heading_path: headingPath,
+        chunk_role: "child",
+        parent_child_index: localChildIndex++,
+      });
+    }
+  }
+
+  return children;
+}
+
 module.exports = {
   structureAwareChunk,
+  structureAwareParentChildChunk,
   splitByHeadings,
   protectCodeBlocks,
   protectQaPairs,
   protectProductBlocks,
   DEFAULT_CHUNK_CHARS,
   DEFAULT_OVERLAP_CHARS,
+  DEFAULT_PARENT_CHARS,
+  DEFAULT_CHILD_CHARS,
+  DEFAULT_PARENT_OVERLAP_CHARS,
+  DEFAULT_CHILD_OVERLAP_CHARS,
 };
