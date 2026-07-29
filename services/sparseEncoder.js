@@ -2,8 +2,9 @@
  * Sparse vector encoder for Qdrant hybrid search.
  *
  * Uses BM25-style term frequency saturation (k1, b) with hashed feature
- * indices. Corpus IDF is not available without a separate stats store, so
- * this is "BM25-TF" — same formula at ingest and query for consistency.
+ * indices. This encoder intentionally emits the BM25-TF component only;
+ * Qdrant's `idf` sparse-vector modifier applies collection-level IDF during
+ * retrieval and maintains corpus statistics as points change.
  *
  * Query-time: pass lexicalTerms in boost to up-weight intent-layer tokens.
  */

@@ -22,7 +22,9 @@ const { encodeSparseVector } = require("./sparseEncoder");
 
 const DENSE_VECTOR_NAME = "dense";
 const SPARSE_VECTOR_NAME = "sparse";
+const SPARSE_VECTOR_MODIFIER = "idf";
 const USE_HYBRID_VECTORS = process.env.RAG_HYBRID_VECTORS !== "false";
+const USE_SPARSE_IDF = process.env.RAG_SPARSE_IDF !== "false";
 
 const PAYLOAD_INDEX_SCHEMAS = {
   user_id: "keyword",
@@ -65,6 +67,67 @@ class QdrantVectorStoreManager {
     this.embeddingInitPromise = this.initializeEmbeddings();
     /** @type {'hybrid'|'legacy'|null} */
     this._vectorModeCache = null;
+    this._sparseIdfChecked = false;
+  }
+
+  /**
+   * Enable Qdrant's collection-level IDF modifier for the existing sparse
+   * vector. IDF is applied at query time, so existing points do not need to be
+   * re-embedded or re-upserted.
+   */
+  async ensureSparseIdfModifier(collectionInfo = null) {
+    if (!USE_HYBRID_VECTORS || !USE_SPARSE_IDF || this._sparseIdfChecked) {
+      return this._sparseIdfChecked;
+    }
+
+    try {
+      const info =
+        collectionInfo ||
+        (await this.qdrantClient.getCollection(this.collectionName));
+      const sparseParams =
+        info.config?.params?.sparse_vectors?.[SPARSE_VECTOR_NAME];
+
+      if (!sparseParams) {
+        return false;
+      }
+
+      const currentModifier = String(sparseParams.modifier || "none").toLowerCase();
+      if (currentModifier !== SPARSE_VECTOR_MODIFIER) {
+        await this.qdrantClient.updateCollection(this.collectionName, {
+          sparse_vectors: {
+            [SPARSE_VECTOR_NAME]: {
+              modifier: SPARSE_VECTOR_MODIFIER,
+            },
+          },
+        });
+
+        const updated = await this.qdrantClient.getCollection(this.collectionName);
+        const updatedModifier = String(
+          updated.config?.params?.sparse_vectors?.[SPARSE_VECTOR_NAME]?.modifier ||
+            "none",
+        ).toLowerCase();
+
+        if (updatedModifier !== SPARSE_VECTOR_MODIFIER) {
+          throw new Error(
+            `Qdrant did not persist sparse modifier "${SPARSE_VECTOR_MODIFIER}"`,
+          );
+        }
+
+        console.log(
+          `Enabled collection-level IDF for "${this.collectionName}" sparse vectors.`,
+        );
+      }
+
+      this._sparseIdfChecked = true;
+      return true;
+    } catch (error) {
+      // Keep dense+sparse retrieval available on older Qdrant servers. The
+      // sparse encoder still provides BM25-TF weighting without server IDF.
+      console.warn(
+        `Could not enable collection-level IDF for "${this.collectionName}": ${error.message}`,
+      );
+      return false;
+    }
   }
 
   /**
@@ -93,6 +156,7 @@ class QdrantVectorStoreManager {
         sparse[SPARSE_VECTOR_NAME]
       ) {
         this._vectorModeCache = "hybrid";
+        await this.ensureSparseIdfModifier(info);
       } else {
         this._vectorModeCache = "legacy";
       }
@@ -542,7 +606,9 @@ class QdrantVectorStoreManager {
               },
             },
             sparse_vectors: {
-              [SPARSE_VECTOR_NAME]: {},
+              [SPARSE_VECTOR_NAME]: USE_SPARSE_IDF
+                ? { modifier: SPARSE_VECTOR_MODIFIER }
+                : {},
             },
             optimizers_config: {
               default_segment_number: 2,
@@ -550,6 +616,7 @@ class QdrantVectorStoreManager {
             replication_factor: 1,
           });
           this._vectorModeCache = "hybrid";
+          this._sparseIdfChecked = USE_SPARSE_IDF;
         } else {
           await this.qdrantClient.createCollection(this.collectionName, {
             vectors: {
@@ -923,4 +990,6 @@ class QdrantVectorStoreManager {
 module.exports = QdrantVectorStoreManager;
 module.exports.DENSE_VECTOR_NAME = DENSE_VECTOR_NAME;
 module.exports.SPARSE_VECTOR_NAME = SPARSE_VECTOR_NAME;
+module.exports.SPARSE_VECTOR_MODIFIER = SPARSE_VECTOR_MODIFIER;
 module.exports.USE_HYBRID_VECTORS = USE_HYBRID_VECTORS;
+module.exports.USE_SPARSE_IDF = USE_SPARSE_IDF;

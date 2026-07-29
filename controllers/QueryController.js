@@ -2329,8 +2329,10 @@ ${answerInstructions}`;
 
   // Context extraction for Qdrant results — always include source URL/title when available
   getRelevantContext(matches, options = {}) {
-    const maxChunkChars = options.maxChunkChars ?? RAG_MAX_CHUNK_CHARS;
-    const maxTotalChars = options.maxTotalChars ?? RAG_MAX_CONTEXT_CHARS;
+    // const maxChunkChars = options.maxChunkChars ?? RAG_MAX_CHUNK_CHARS;
+    // const maxTotalChars = options.maxTotalChars ?? RAG_MAX_CONTEXT_CHARS;
+    const maxChunkChars = 12000;
+    const maxTotalChars = 24000;
 
     // Dedupe by parent_id — child matched, parent returned to LLM
     const byParent = new Map();
