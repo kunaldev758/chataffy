@@ -148,7 +148,6 @@ function expandQueryForRetrieval(question, chatMessages = [], options = {}) {
   const topics = mergeTopicsFromSources(chatMessages, options.stateTopics);
 
   const parts = [q];
-  const qLower = q.toLowerCase();
 
   const userSizes =
     options.sizes?.length > 0 ? options.sizes : extractSizeTokens(q);
@@ -172,29 +171,17 @@ function expandQueryForRetrieval(question, chatMessages = [], options = {}) {
     parts.push(...topics.productTerms);
   }
 
-  if (isProductLinkRequest(q) && !/\b(url|link)\b/i.test(q)) {
-    parts.push("product page URLs links");
-  }
-
   const isShortFollowUp =
     wordCount <= 7 ||
-    (/\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(q) && wordCount <= 10) ||
-    /^(okay|ok|yes|share|more)\b/i.test(qLower);
+    /^(okay|ok|yes|share|more)\b/i.test(q.toLowerCase());
 
-  const hasCatalogThread =
+  const hasStateContext =
     allSizes.length > 0 ||
     topics.collections.length > 0 ||
-    topics.productTerms.length > 0 ||
-    (chatMessages || []).some((m) =>
-      /\b(mm|lash|lashes|collection|url|link|super\s*natural)\b/i.test(
-        m.message || ""
-      )
-    );
+    topics.productTerms.length > 0;
 
   let retrievalQuery = q;
-  if (isShortFollowUp && hasCatalogThread && parts.length > 1) {
-    retrievalQuery = [...new Set(parts)].join(" ");
-  } else if (isEcommerceCatalogQuery(q) && parts.length > 1) {
+  if (isShortFollowUp && hasStateContext && parts.length > 1) {
     retrievalQuery = [...new Set(parts)].join(" ");
   }
 
@@ -202,9 +189,6 @@ function expandQueryForRetrieval(question, chatMessages = [], options = {}) {
     retrievalQuery,
     topics: { ...topics, sizes: allSizes },
     currentSizes: userSizes,
-    wasExpanded: retrievalQuery.trim() !== q,
-    wantsProductLinks: isProductLinkRequest(q),
-    isCatalogQuery: isEcommerceCatalogQuery(q),
   };
 }
 

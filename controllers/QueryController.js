@@ -35,7 +35,6 @@ const {
 const {
   expandQueryForRetrieval,
   isProductLinkRequest,
-  isEcommerceCatalogQuery,
 } = require("../utils/queryContextExpansion");
 const {
   normalizeUserQuery,
@@ -1445,8 +1444,7 @@ class QuestionAnsweringSystem {
   }) {
     const isList =
       plan?.retrievalPolicy?.contextMode === "list" ||
-      queryAttributes?.subIntent === "IN_PAGE_LIST" ||
-      queryAttributes?.flags?.isCatalogQuery;
+      queryAttributes?.subIntent === "IN_PAGE_LIST";
     if (!isList) return null;
     if (!queryResponse?.length) return null;
 
@@ -1571,7 +1569,6 @@ class QuestionAnsweringSystem {
     companyName,
     semanticMatches,
     getQuestionEmbedding,
-    wantsProductLinks = false,
     catalogKeywords = null,
     queryAttributes = null,
   }) {
@@ -1580,7 +1577,7 @@ class QuestionAnsweringSystem {
     const requestedCount = this.extractRequestedCount(question, requestedTopK);
 
     if (subIntent === "IN_PAGE_LIST") {
-      if (!this.isExplicitInPageListQuestion(question) && !wantsProductLinks) {
+      if (!this.isExplicitInPageListQuestion(question)) {
         console.log(
           "[QueryController] IN_PAGE_LIST skipped: not an explicit catalog/homepage request",
         );
@@ -1725,7 +1722,7 @@ class QuestionAnsweringSystem {
     }
 
     if (subIntent === "PAGE_LINKS") {
-      if (!this.isExplicitPageLinksQuestion(question) && !wantsProductLinks) {
+      if (!this.isExplicitPageLinksQuestion(question)) {
         console.log(
           "[QueryController] PAGE_LINKS skipped: not an explicit page/URL listing request",
         );
@@ -1745,11 +1742,11 @@ class QuestionAnsweringSystem {
         keywords,
         keywordPoints,
       );
-      const minPages = wantsProductLinks ? 1 : 2;
+      const minPages = 1;
 
       if (
         uniquePages.length >= minPages &&
-        (structuralHits >= 1 || wantsProductLinks) &&
+        structuralHits >= 1 &&
         (hasGoodSemantic || uniquePages.length >= minPages)
       ) {
         const topItems = uniquePages.slice(0, requestedCount);
@@ -1781,7 +1778,7 @@ class QuestionAnsweringSystem {
         queryAttributes,
         "PAGE_LINKS",
       );
-      if (mergedMatches.length > 0 && wantsProductLinks) {
+      if (mergedMatches.length > 0 && subIntent === "PAGE_LINKS") {
         const linkLimits = getContextLimitsForMode("page_links");
         const pagesLines = this.buildCompactPageLinksContext(mergedMatches, {
           ...linkLimits,
@@ -3044,7 +3041,7 @@ ${answerInstructions}`;
       });
 
       console.log(
-        `[QueryController] Route: ${routing.route} | subIntent: ${routing.subIntent} | userLang: ${routing.userLanguage} | confidence: ${routing.confidence} | followUp: ${routing.followUp} | needsRewrite: ${routing.needsRewrite} | rewriteReason: ${routing.rewriteReason || "none"} | source: ${routing.source}`,
+        `[QueryController] Route: ${routing.route} | subIntent: ${routing.subIntent} | userLang: ${routing.userLanguage} | confidence: ${routing.confidence} | followUp: ${routing.followUp} | needsRewrite: ${routing.needsRewrite} | rewriteReason: ${routing.rewriteReason || "none"} | lexicalTerms: [${(routing.lexicalTerms || []).join(", ")}] | source: ${routing.source}`,
       );
 
       const langOpts = { userLanguage: routing.userLanguage };
@@ -3157,25 +3154,26 @@ ${answerInstructions}`;
         };
       }
 
+
+      console.log("routing data check: ",routing);
+
       const queryExpansion = expandQueryForRetrieval(
         normalizedQuestion,
         chatSession,
         { sizes: queryNorm.sizes, stateTopics },
       );
-      const {
-        retrievalQuery,
-        wasExpanded,
-        wantsProductLinks,
-        isCatalogQuery,
-        currentSizes,
-      } = queryExpansion;
+
+      console.log("query expansion check :", queryExpansion);
+      const { retrievalQuery, currentSizes } = queryExpansion;
+      const queryWasEnriched =
+        retrievalQuery.trim() !== normalizedQuestion.trim();
 
       // If the router translated the query to the website language, use that as
       // the base for embedding so query and stored vectors are in the same language.
       const baseForEmbedding = routing.rewrittenQuery || retrievalQuery;
       const embeddingQuery = queryNorm.enrichForEmbedding(baseForEmbedding);
 
-      if (wasExpanded) {
+      if (queryWasEnriched) {
         console.log(
           `[QueryController] Expanded retrieval query: "${retrievalQuery}"`,
         );
@@ -3191,36 +3189,16 @@ ${answerInstructions}`;
       }
 
       const subIntent = routing.subIntent || null;
-      let effectiveSubIntent = subIntent;
-      // const hasSizeFilter =
-      //   (queryNorm.sizes?.length > 0 || currentSizes?.length > 0) &&
-      //   /\b(lash|lashes|product|style|collection)\b/i.test(normalizedQuestion);
-
-      // console.log("effective sub intent check : ", effectiveSubIntent);
-
-      // if (wantsProductLinks && !effectiveSubIntent) {
-      //   effectiveSubIntent = /\b\d{1,2}(?:-\d{1,2})?mm\b/i.test(retrievalQuery)
-      //     ? "IN_PAGE_LIST"
-      //     : "PAGE_LINKS";
-      // } else if (
-      //   isCatalogQuery &&
-      //   (wasExpanded || hasSizeFilter) &&
-      //   !effectiveSubIntent
-      // ) {
-      //   effectiveSubIntent = "IN_PAGE_LIST";
-      // } else if (hasSizeFilter && !effectiveSubIntent) {
-      //   effectiveSubIntent = "IN_PAGE_LIST";
-      // }
-
-      // console.log("Effective sub intent check 1  : ", effectiveSubIntent);
 
       const queryAttributes = extractQueryAttributes({
         normalizedQuestion,
         queryNorm,
         queryExpansion,
         routing,
-        subIntent: effectiveSubIntent,
+        subIntent,
       });
+
+      console.log("query attribute check : ", queryAttributes);
 
       const retrievalPlan = buildRetrievalPlan({
         routing,
@@ -3231,10 +3209,12 @@ ${answerInstructions}`;
             ? widgetData.scoreThreshold
             : scoreThreshold,
       });
+
+      console.log("retrivel plan check :", retrievalPlan);
       logRetrievalPlan(retrievalPlan);
 
       console.log(
-        `[QueryController] Attributes: sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length} flags=${JSON.stringify(queryAttributes.flags)}`
+        `[QueryController] Attributes: subIntent=${subIntent || "none"} sizes=[${queryAttributes.sizes.join(", ")}] collections=[${queryAttributes.collections.join(", ")}] keywords=${queryAttributes.keywords.length}`,
       );
 
       const catalogKeywords =
@@ -3246,6 +3226,8 @@ ${answerInstructions}`;
               ? queryNorm.sizes
               : currentSizes || [],
           });
+
+      console.log("catalog keywords check : ",catalogKeywords);
 
       let questionEmbedding = null;
       const getQuestionEmbedding = async () => {
@@ -3324,7 +3306,7 @@ ${answerInstructions}`;
 
       let semanticTopK =
         retrievalPlan.retrievalPolicy.semanticTopK ||
-        (effectiveSubIntent === "IN_PAGE_LIST"
+        (subIntent === "IN_PAGE_LIST"
           ? Math.max(
               10,
               Math.min(
@@ -3332,9 +3314,9 @@ ${answerInstructions}`;
                 this.extractRequestedCount(question, requestedTopK) * 3,
               ),
             )
-          : effectiveSubIntent === "CONTACT_INFO"
+          : subIntent === "CONTACT_INFO"
             ? 12
-            : effectiveSubIntent === "PAGE_LINKS"
+            : subIntent === "PAGE_LINKS"
               ? Math.max(
                   requestedTopK,
                   this.extractRequestedCount(question, requestedTopK) * 2,
@@ -3353,7 +3335,7 @@ ${answerInstructions}`;
         plan: retrievalPlan,
       });
 
-      console.log("Effective : ", effectiveSubIntent);
+      console.log("subIntent : ", subIntent);
 
       // if (effectiveSubIntent) {
       //   const specialized = await this.trySpecializedRetrieval({
@@ -3684,7 +3666,7 @@ ${answerInstructions}`;
           companyName,
           websiteData,
           langOpts,
-          wasExpanded,
+          wasExpanded: queryWasEnriched,
           maxScore,
           userId,
           agentId,
@@ -3781,9 +3763,9 @@ ${answerInstructions}`;
             responseMode,
             requestedCount,
             wantsProductUrls: false,
-            wasExpanded,
+            wasExpanded: queryWasEnriched,
             retrievalMaxScore: maxScore,
-            subIntent: effectiveSubIntent || null,
+            subIntent: subIntent || null,
             collectionName,
             userId: userIdString,
             agentId: agentId?.toString(),

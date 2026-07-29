@@ -376,6 +376,7 @@ function buildRouteResult({
   userLanguage = "en",
   confidence = 1,
   rewrittenQuery = null,
+  lexicalTerms = [],
   followUp = false,
   needsRewrite = false,
   rewriteReason = null,
@@ -387,6 +388,7 @@ function buildRouteResult({
     userLanguage: normalizeLanguageCode(userLanguage) || "en",
     confidence,
     rewrittenQuery,
+    lexicalTerms: Array.isArray(lexicalTerms) ? lexicalTerms.slice(0, 8) : [],
     followUp,
     needsRewrite,
     rewriteReason,
@@ -588,12 +590,20 @@ function parseRouterJson(content, question = "") {
       finalRoute = ROUTES.SEMANTIC_RAG;
     }
 
+    const lexicalTerms = Array.isArray(parsed.lexicalTerms)
+      ? parsed.lexicalTerms
+          .filter((t) => typeof t === "string" && t.trim())
+          .map((t) => t.trim().toLowerCase())
+          .slice(0, 8)
+      : [];
+
     return buildRouteResult({
       route: finalRoute,
       subIntent,
       userLanguage,
       confidence,
       rewrittenQuery,
+      lexicalTerms,
       followUp,
       needsRewrite,
       rewriteReason,
@@ -675,6 +685,11 @@ Set followUp=true when the message continues the same topic from conversation st
 Set needsRewrite=true when rewrittenQuery is provided or the message cannot be searched without resolving context.
 Set rewriteReason to one of: PRONOUN, ELLIPSIS, TRANSLATE, CATALOG_EXPAND, NONE.
 
+Also extract lexicalTerms: an array of 3–6 key search tokens from the user's message (or rewrittenQuery if provided). Include product names, brand names, sizes, colors, and domain-specific terms. Exclude stop words. These are used for sparse keyword search. If the query is very short (1–2 words), return those words. Examples:
+- "do you have white adidas shoes in size 8?" → ["adidas", "shoes", "size 8", "white"]
+- "16mm super natural lashes price" → ["16mm", "super natural", "lashes", "price"]
+- "contact information" → ["contact", "information"]
+
 Respond with JSON only:
 {
   "route": "SEMANTIC_RAG",
@@ -682,6 +697,7 @@ Respond with JSON only:
   "userLanguage": "en",
   "confidence": 0.85,
   "rewrittenQuery": null,
+  "lexicalTerms": [],
   "followUp": false,
   "needsRewrite": false,
   "rewriteReason": "NONE",

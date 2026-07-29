@@ -49,15 +49,20 @@ function buildFacets(queryAttributes = {}) {
     facets.push({ key: "collection", value, confidence: 0.75 });
   }
 
-  if (queryAttributes.flags?.wantsPrices) {
+  if (queryAttributes.subIntent === "IN_PAGE_LIST") {
     facets.push({ key: "intent_signal", value: "price", confidence: 0.7 });
   }
 
   return facets;
 }
 
-function buildLexicalTerms(queryAttributes = {}, facets = []) {
+function buildLexicalTerms(queryAttributes = {}, facets = [], routing = {}) {
   const terms = new Set();
+
+  for (const rt of routing.lexicalTerms || []) {
+    const t = normalizeFacetValue(rt);
+    if (t.length > 1) terms.add(t);
+  }
 
   for (const kw of queryAttributes.keywords || []) {
     const t = normalizeFacetValue(kw);
@@ -66,7 +71,6 @@ function buildLexicalTerms(queryAttributes = {}, facets = []) {
 
   for (const f of facets) {
     if (f.value) terms.add(f.value);
-    // size variants: 16mm → 16
     if (f.key === "size") {
       const num = f.value.replace(/\s/g, "").replace(/mm$/i, "");
       if (num.length > 0) terms.add(num);
@@ -81,13 +85,8 @@ function buildLexicalTerms(queryAttributes = {}, facets = []) {
   return [...terms].slice(0, 40);
 }
 
-function resolveContextMode(subIntent, queryAttributes = {}) {
-  if (
-    subIntent === "IN_PAGE_LIST" ||
-    queryAttributes.flags?.isCatalogQuery
-  ) {
-    return "list";
-  }
+function resolveContextMode(subIntent) {
+  if (subIntent === "IN_PAGE_LIST") return "list";
   if (subIntent === "PAGE_LINKS") return "links";
   if (subIntent === "CONTACT_INFO") return "contact";
   if (subIntent === "COMPARE") return "page_merge";
@@ -172,11 +171,14 @@ function buildRetrievalPlan({
     queryAttributes.subIntent || routing.subIntent || null;
 
   const facets = buildFacets(queryAttributes);
-  const lexicalTerms = buildLexicalTerms(queryAttributes, facets);
-  const contextMode = resolveContextMode(subIntent, queryAttributes);
+  const lexicalTerms = buildLexicalTerms(queryAttributes, facets, routing);
+  const contextMode = resolveContextMode(subIntent);
   const tokenBudget = resolveTokenBudget(contextMode);
   const topK = resolveTopK(subIntent, requestedTopK);
   const hardFilters = buildHardFilters(facets);
+
+
+  console.log("check facets :",facets);
 
   const softBoostKeys = [
     ...new Set(

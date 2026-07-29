@@ -45,8 +45,6 @@ function extractQueryAttributes({
 }) {
   const {
     retrievalQuery = normalizedQuestion,
-    wantsProductLinks = false,
-    isCatalogQuery = false,
     currentSizes = [],
     topics = {},
   } = queryExpansion || {};
@@ -64,8 +62,6 @@ function extractQueryAttributes({
 
   const collections = [
     ...new Set([
-      ...extractCollectionHints(normalizedQuestion),
-      ...extractCollectionHints(retrievalQuery),
       ...extractCollectionHints(keywordSource),
       ...(topics.collections || []),
     ]),
@@ -78,8 +74,13 @@ function extractQueryAttributes({
     return [compact, numOnly].filter((k) => k.length > 2);
   });
 
+  const routerTerms = (routing.lexicalTerms || [])
+    .map((t) => String(t).trim().toLowerCase())
+    .filter((t) => t.length > 1);
+
   const keywords = [
     ...new Set([
+      ...routerTerms,
       ...tokenizeKeywords(keywordSource),
       ...buildRetrievalKeywords(keywordSource, sizes),
       ...(queryNorm?.retrievalKeywords || []),
@@ -88,15 +89,6 @@ function extractQueryAttributes({
       ...collections.map((c) => c.toLowerCase()),
     ]),
   ].filter((k) => k.length > 2);
-
-  const q = (normalizedQuestion || "").toLowerCase();
-  const wantsHomepage =
-    /\b(homepage|home\s*page|main\s*page|featured)\b/i.test(q);
-  const wantsContact =
-    subIntent === "CONTACT_INFO" ||
-    /\b(social\s*media|phone|email|address|hours|contact)\b/i.test(q);
-  const wantsPrices =
-    /\b(price|prices|cost|pricing|how\s+much)\b/i.test(q);
 
   return {
     normalizedQuestion,
@@ -111,26 +103,17 @@ function extractQueryAttributes({
     route: routing.route || ROUTES.SEMANTIC_RAG,
     subIntent,
     userLanguage: routing.userLanguage || "en",
-    flags: {
-      wantsProductLinks,
-      isCatalogQuery,
-      wantsHomepage,
-      wantsContact,
-      wantsPrices,
-      wasExpanded: queryExpansion?.wasExpanded || false,
-    },
   };
 }
 
 function needsKeywordRetrieval(attributes) {
   if (!attributes) return false;
-  const { flags, sizes, keywords } = attributes;
+  const { subIntent, sizes } = attributes;
   return (
-    flags?.isCatalogQuery ||
-    flags?.wasExpanded ||
-    sizes.length > 0 ||
-    flags?.wantsProductLinks ||
-    (keywords?.length > 0 && flags?.wantsHomepage)
+    subIntent === "IN_PAGE_LIST" ||
+    subIntent === "PAGE_LINKS" ||
+    subIntent === "CONTACT_INFO" ||
+    sizes.length > 0
   );
 }
 
@@ -147,8 +130,7 @@ function isExplicitSizedCatalogQuery(question, queryAttributes) {
     /\b(lash|lashes|product|style|collection|catalog)\b/i.test(q);
   const hasListIntent =
     /\b(all|every|each|list|show|give\s+me|what\s+are)\b/i.test(q) ||
-    queryAttributes?.subIntent === "IN_PAGE_LIST" ||
-    queryAttributes?.flags?.isCatalogQuery;
+    queryAttributes?.subIntent === "IN_PAGE_LIST";
 
   return hasProductWord && hasListIntent;
 }

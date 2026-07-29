@@ -78,28 +78,28 @@ function collectionOverlap(queryCollections, docCollections) {
   return matches;
 }
 
-function urlBonus(url, attributes, subIntent) {
+function urlBonus(url, subIntent) {
   const u = (url || "").toLowerCase();
   if (!u) return 0;
 
   let bonus = 0;
-  const { flags } = attributes || {};
 
-  if (flags?.wantsHomepage && (u.endsWith("/") || /\/index|\/home\b/.test(u))) {
+  if (
+    subIntent === "IN_PAGE_LIST" &&
+    (u.endsWith("/") || /\/index|\/home\b/.test(u))
+  ) {
     bonus += 0.12;
   }
 
   if (
-    (flags?.isCatalogQuery ||
-      flags?.wantsProductLinks ||
-      subIntent === "IN_PAGE_LIST") &&
+    subIntent === "IN_PAGE_LIST" &&
     /\/product|\/collections?\/|\/shop|\/catalog/i.test(u)
   ) {
     bonus += 0.08;
   }
 
   if (
-    (flags?.wantsContact || subIntent === "CONTACT_INFO") &&
+    subIntent === "CONTACT_INFO" &&
     /contact|about|footer|social/i.test(u)
   ) {
     bonus += 0.1;
@@ -112,13 +112,11 @@ function urlBonus(url, attributes, subIntent) {
   return bonus;
 }
 
-function typePenalty(text, url, attributes, subIntent) {
+function typePenalty(text, url, subIntent) {
   const combined = `${text} ${url}`.toLowerCase();
-  const { flags } = attributes || {};
 
   if (
-    (flags?.isCatalogQuery || subIntent === "IN_PAGE_LIST") &&
-    !flags?.wantsContact &&
+    subIntent === "IN_PAGE_LIST" &&
     combined.includes("footer links") &&
     !/\b(product|lash|price|\dmm)\b/i.test(combined)
   ) {
@@ -196,8 +194,8 @@ function rerankByAttributes(candidates, attributes, options = {}) {
     bonus += Math.min(collectionMatches * 0.12, 0.24);
     bonus += Math.min(titleHits * 0.06, 0.18);
     bonus += Math.min(textHits * 0.03, 0.12);
-    bonus += urlBonus(url, attributes, subIntent);
-    bonus -= typePenalty(text, url, attributes, subIntent);
+    bonus += urlBonus(url, subIntent);
+    bonus -= typePenalty(text, url, subIntent);
 
     const rerankScore = baseScore + bonus;
 
