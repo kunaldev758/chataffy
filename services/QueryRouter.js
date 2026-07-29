@@ -523,11 +523,11 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
 // unambiguous cases (greeting / live-agent / gibberish).  Structural
 // sub-intent (IN_PAGE_LIST, PAGE_LINKS, CONTACT_INFO) and follow-up
 // detection must always be confirmed by the LLM because:
-//   1. Regex is English-only; non-English queries need LLM translation.
+//   1. Regex is English-only; non-English queries need LLM classification.
 //   2. Product-name queries ("Premium Drone Kit pricing") won't match
 //      patterns that require the word "product" or "item".
-//   3. The LLM provides rewrittenQuery so Qdrant keyword search works
-//      across all languages.
+//   3. The query rewriter LLM provides rewrittenQuery so Qdrant keyword
+//      search works across all languages.
 function shouldDeferToLlmRouter(question, ruleOutcome) {
   if (!ruleOutcome.confident) return true;
   return !TRUSTED_RULE_SOURCES.has(ruleOutcome.result.source);
@@ -563,26 +563,15 @@ function parseRouterJson(content, question = "") {
     const userLanguage =
       normalizeLanguageCode(parsed.userLanguage) || "en";
 
-    const rewrittenQuery =
-      typeof parsed.rewrittenQuery === "string" && parsed.rewrittenQuery.trim()
-        ? parsed.rewrittenQuery.trim()
-        : null;
-
     const followUp = Boolean(parsed.followUp);
-    const needsRewrite = Boolean(parsed.needsRewrite) || Boolean(rewrittenQuery);
-    const rewriteReason =
-      typeof parsed.rewriteReason === "string" && parsed.rewriteReason.trim()
-        ? parsed.rewriteReason.trim().toUpperCase()
-        : rewrittenQuery
-          ? "TRANSLATE"
-          : null;
+    const needsRewrite = Boolean(parsed.needsRewrite);
 
     if (
       resolvedRoute === ROUTES.STRUCTURAL ||
       resolvedRoute === ROUTES.HYBRID
     ) {
       if (!subIntent) {
-        subIntent = classifyStructuralSubIntent(rewrittenQuery || "");
+        subIntent = classifyStructuralSubIntent(question || "");
       }
       if (resolvedRoute === ROUTES.STRUCTURAL) {
         resolvedRoute = ROUTES.HYBRID;
@@ -596,12 +585,8 @@ function parseRouterJson(content, question = "") {
     } else if (confidence < 0.65 && finalRoute !== ROUTES.LIVE_AGENT) {
       finalRoute = ROUTES.SEMANTIC_RAG;
       subIntent = isCompareIntent ? SUB_INTENTS.COMPARE : null;
-    } else if (
-      finalRoute === ROUTES.HYBRID &&
-      !subIntent
-    ) {
-      finalRoute = ROUTES.SEMANTIC_RAG;
     }
+    // HYBRID without subIntent is resolved after rewrite merge in routeQuery.
 
     const compareAspect =
       typeof parsed.compareAspect === "string" && parsed.compareAspect.trim()
@@ -613,10 +598,8 @@ function parseRouterJson(content, question = "") {
       subIntent,
       userLanguage,
       confidence,
-      rewrittenQuery,
       followUp,
       needsRewrite,
-      rewriteReason,
       source: "llm_router",
       entities: isCompareIntent ? parsedEntities : [],
       compareAspect,
@@ -630,16 +613,31 @@ function parseRouterJson(content, question = "") {
   }
 }
 
-async function llmRoute(question, options = {}) {
-  const {
-    chatHistorySnippet = "",
-    conversationStateSnippet = "",
-    websiteLanguage = "en",
-    openaiClient = null,
-    logOpenAIUsage = null,
-    routerModel = null,
-  } = options;
+function parseRewriteJson(content) {
+  try {
+    const parsed = JSON.parse(content || "{}");
+    const rewrittenQuery =
+      typeof parsed.rewrittenQuery === "string" && parsed.rewrittenQuery.trim()
+        ? parsed.rewrittenQuery.trim()
+        : null;
+    const rewriteReason =
+      typeof parsed.rewriteReason === "string" && parsed.rewriteReason.trim()
+        ? parsed.rewriteReason.trim().toUpperCase()
+        : rewrittenQuery
+          ? "TRANSLATE"
+          : null;
 
+    return {
+      rewrittenQuery,
+      rewriteReason:
+        rewriteReason && rewriteReason !== "NONE" ? rewriteReason : null,
+    };
+  } catch {
+    return { rewrittenQuery: null, rewriteReason: null };
+  }
+}
+
+async function resolveIntentModel(routerModel = null) {
   let modelName = routerModel;
   let provider = "openai";
   let apiKey = process.env.OPENAI_API_KEY || "";
@@ -659,15 +657,99 @@ async function llmRoute(question, options = {}) {
     }
   }
 
+  return { modelName, provider, apiKey, timeoutMs };
+}
+
+async function completeIntentJson({
+  systemPrompt,
+  userContent,
+  modelName,
+  provider,
+  apiKey,
+  timeoutMs,
+  openaiClient = null,
+  logOpenAIUsage = null,
+  logType = "intent",
+  logLabel = "LLM",
+  question = "",
+}) {
+  let content;
+  let usage = null;
+
+  if (provider === "openai" && openaiClient) {
+    const response = await openaiClient.chat.completions.create({
+      model: modelName,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+      temperature: 0,
+      response_format: { type: "json_object" },
+    });
+    content = response.choices[0]?.message?.content;
+    usage = response.usage || null;
+  } else {
+    if (!apiKey) {
+      throw new Error(`Missing API key for intent provider: ${provider}`);
+    }
+    const result = await providerChatComplete({
+      provider,
+      model: modelName,
+      apiKey,
+      timeoutMs,
+      system: systemPrompt,
+      prompt: userContent,
+      temperature: 0,
+    });
+    content = result.text;
+    usage = result.usage;
+  }
+
+  console.log(`[QueryRouter] ${logLabel} response:`, {
+    question: question.substring(0, 80),
+    provider,
+    model: modelName,
+    content,
+  });
+
+  if (logOpenAIUsage && usage) {
+    try {
+      await logOpenAIUsage({
+        usage,
+        modelName,
+        type: logType,
+      });
+    } catch (logError) {
+      console.warn(
+        `[QueryRouter] Error logging ${logLabel} usage: ${logError.message}`
+      );
+    }
+  }
+
+  return content;
+}
+
+async function llmRoute(question, options = {}) {
+  const {
+    conversationStateSnippet = "",
+    websiteLanguage = "en",
+    openaiClient = null,
+    logOpenAIUsage = null,
+    routerModel = null,
+  } = options;
+
+  const { modelName, provider, apiKey, timeoutMs } =
+    await resolveIntentModel(routerModel);
+
   const systemPrompt = `You are a query router for a multilingual customer-support chatbot.
 
 Classify the visitor message into exactly one route:
 - GREETING: simple hello/hi with no real question
 - LIVE_AGENT: wants a human agent, representative, or live support
 - ACCIDENTAL: random characters, keyboard mash, or test input with no real meaning
-- ACKNOWLEDGEMENT: pure social acknowledgement with NO new question or intent (e.g. "thanks", "got it", "understood", "merci", "ありがとう", "धन्यवाद", "gracias"). Use chat history and conversation state to resolve ambiguity:
+- ACKNOWLEDGEMENT: pure social acknowledgement with NO new question or intent (e.g. "thanks", "got it", "understood", "merci", "ありがとう", "धन्यवाद", "gracias"). Use conversation state to resolve ambiguity:
   - Soft closes that invite more detail ("let me know", "feel free", "anything else", "if you need further details", questions ending with an offer) count as OFFERS, not finished answers.
-  - Short affirmatives ("ok", "yes", "sure", "go ahead") after an offer OR when conversation state has awaiting: follow_up = SEMANTIC_RAG (follow-up acceptance) with rewrittenQuery from the last query/topic.
+  - Short affirmatives ("ok", "yes", "sure", "go ahead") after an offer OR when conversation state has awaiting: follow_up = SEMANTIC_RAG (follow-up acceptance).
   - "thanks" / gratitude after a finished answer = ACKNOWLEDGEMENT.
   - ANY new question, request, or new topic = SEMANTIC_RAG, not ACKNOWLEDGEMENT.
 - HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), homepage product catalog with prices, or contact/social profiles
@@ -698,11 +780,8 @@ Detect userLanguage: ISO 639-1 code for the language the visitor WROTE IN (e.g. 
 
 Conversation state summarizes the active topic and entities from prior turns. Use it to resolve short follow-ups, pronouns, and elliptical questions (e.g. "how much?", "send the link", "what about pricing?"). When awaiting: follow_up is set, treat short affirmatives as continuing that topic.
 
-When the message depends on conversation state OR userLanguage differs from website language (${websiteLanguage}), provide rewrittenQuery: a self-contained search query in ${websiteLanguage} suitable for embedding similarity search and keyword matching. Preserve product names, brand names, numbers, and measurements. If the message is already a clear standalone query in ${websiteLanguage}, rewrittenQuery can be null.
-
 Set followUp=true when the message continues the same topic from conversation state.
-Set needsRewrite=true when rewrittenQuery is provided or the message cannot be searched without resolving context.
-Set rewriteReason to one of: PRONOUN, ELLIPSIS, TRANSLATE, CATALOG_EXPAND, NONE.
+Set needsRewrite=true when the message depends on conversation state (pronouns, ellipsis, short follow-ups) OR userLanguage differs from website language (${websiteLanguage}) and must be rewritten into a standalone search query. Set needsRewrite=false when the message is already a clear standalone query in ${websiteLanguage}.
 
 Respond with JSON only:
 {
@@ -710,13 +789,83 @@ Respond with JSON only:
   "subIntent": null,
   "userLanguage": "en",
   "confidence": 0.85,
-  "rewrittenQuery": null,
   "followUp": false,
   "needsRewrite": false,
-  "rewriteReason": "NONE",
   "isTrulyOffTopic": false,
   "compareAspect": null,
   "entities": []
+}`;
+
+  const userContentParts = [`Website language: ${websiteLanguage}`];
+
+  if (conversationStateSnippet) {
+    userContentParts.push(`Conversation state:\n${conversationStateSnippet}`);
+  } else {
+    userContentParts.push("Conversation state: (none)");
+  }
+
+  userContentParts.push(`User message: ${question}`);
+  const userContent = userContentParts.join("\n\n");
+
+  try {
+    const content = await completeIntentJson({
+      systemPrompt,
+      userContent,
+      modelName,
+      provider,
+      apiKey,
+      timeoutMs,
+      openaiClient,
+      logOpenAIUsage,
+      logType: "intent",
+      logLabel: "LLM routing",
+      question,
+    });
+
+    console.log("parsed content data check : ", parseRouterJson(content, question));
+
+    return parseRouterJson(content, question);
+  } catch (error) {
+    console.error("[QueryRouter] LLM routing failed:", error.message);
+    return buildRouteResult({
+      route: ROUTES.SEMANTIC_RAG,
+      confidence: 0.5,
+      source: "llm_router_error",
+    });
+  }
+}
+
+/**
+ * Separate LLM that rewrites the visitor message into a standalone search query.
+ * Returns rewrittenQuery + rewriteReason only.
+ */
+async function llmRewrite(question, options = {}) {
+  const {
+    chatHistorySnippet = "",
+    conversationStateSnippet = "",
+    websiteLanguage = "en",
+    openaiClient = null,
+    logOpenAIUsage = null,
+    routerModel = null,
+  } = options;
+
+  const { modelName, provider, apiKey, timeoutMs } =
+    await resolveIntentModel(routerModel);
+
+  const systemPrompt = `You are a query rewriter for a multilingual customer-support chatbot.
+
+Rewrite the visitor message into a self-contained search query when needed.
+
+Use recent conversation and conversation state to resolve pronouns, ellipsis, and short follow-ups (e.g. "how much?", "send the link", "what about pricing?", "yes" after an offer).
+
+When the message depends on conversation context OR the visitor language differs from website language (${websiteLanguage}), provide rewrittenQuery: a self-contained search query in ${websiteLanguage} suitable for embedding similarity search and keyword matching. Preserve product names, brand names, numbers, and measurements. If the message is already a clear standalone query in ${websiteLanguage}, rewrittenQuery can be null.
+
+Set rewriteReason to one of: PRONOUN, ELLIPSIS, TRANSLATE, CATALOG_EXPAND, NONE.
+
+Respond with JSON only:
+{
+  "rewrittenQuery": null,
+  "rewriteReason": "NONE"
 }`;
 
   const userContentParts = [`Website language: ${websiteLanguage}`];
@@ -735,74 +884,30 @@ Respond with JSON only:
   const userContent = userContentParts.join("\n\n");
 
   try {
-    let content;
-    let usage = null;
-
-    // Prefer injected OpenAI client when provider is openai (tests / callers)
-    if (provider === "openai" && openaiClient) {
-      const response = await openaiClient.chat.completions.create({
-        model: modelName,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userContent },
-        ],
-        temperature: 0,
-        response_format: { type: "json_object" },
-      });
-      content = response.choices[0]?.message?.content;
-      usage = response.usage || null;
-    } else {
-      if (!apiKey) {
-        throw new Error(`Missing API key for intent provider: ${provider}`);
-      }
-      const result = await providerChatComplete({
-        provider,
-        model: modelName,
-        apiKey,
-        timeoutMs,
-        system: systemPrompt,
-        prompt: userContent,
-        temperature: 0,
-      });
-      content = result.text;
-      usage = result.usage;
-    }
-
-    console.log("[QueryRouter] LLM routing response:", {
-      question: question.substring(0, 80),
+    const content = await completeIntentJson({
+      systemPrompt,
+      userContent,
+      modelName,
       provider,
-      model: modelName,
-      content,
+      apiKey,
+      timeoutMs,
+      openaiClient,
+      logOpenAIUsage,
+      logType: "intent",
+      logLabel: "LLM rewrite",
+      question,
     });
-    if (logOpenAIUsage && usage) {
-      try {
-        await logOpenAIUsage({
-          usage,
-          modelName,
-          type: "intent",
-        });
-      } catch (logError) {
-        console.warn(
-          `[QueryRouter] Error logging routing usage: ${logError.message}`
-        );
-      }
-    }
 
-    console.log("parsed content data check : ",parseRouterJson(content));
-
-    return parseRouterJson(content);
+    return parseRewriteJson(content);
   } catch (error) {
-    console.error("[QueryRouter] LLM routing failed:", error.message);
-    return buildRouteResult({
-      route: ROUTES.SEMANTIC_RAG,
-      confidence: 0.5,
-      source: "llm_router_error",
-    });
+    console.error("[QueryRouter] LLM rewrite failed:", error.message);
+    return { rewrittenQuery: null, rewriteReason: null };
   }
 }
 
 /**
  * Route a visitor query: fast rules first, then GPT nano fallback.
+ * Query rewrite runs after routing, only when the router sets needsRewrite.
  */
 async function routeQuery(question, options = {}) {
   const {
@@ -832,27 +937,78 @@ async function routeQuery(question, options = {}) {
   }
 
   const conversationStateSnippet = formatStateForRouter(conversationState);
-  // Always include recent turns so soft offers / last assistant lines are visible
-  // even when ragState already summarizes the topic.
-  const chatHistorySnippet = formatRecentChatForRouter(chatMessages);
 
   console.log("conversation state for LLM routing:", conversationStateSnippet);
-  console.log("chat history snippet for LLM routing:", chatHistorySnippet);
 
   console.log(
     `[QueryRouter] LLM routing (rules deferred: ${ruleOutcome.confident ? ruleOutcome.result?.source : "no_match"}) for: ${question.substring(0, 80)}`
   );
 
-  const llmResult = await llmRoute(question, {
-    chatHistorySnippet,
+  const sharedLlmOptions = {
     conversationStateSnippet,
     websiteLanguage,
     openaiClient,
     logOpenAIUsage,
     routerModel,
-  });
+  };
 
-  return applyFollowUpAcceptanceOverride(llmResult, question, {
+  const llmResult = await llmRoute(question, sharedLlmOptions);
+
+  let merged = { ...llmResult };
+
+  if (llmResult.needsRewrite && isRagRoute(llmResult.route)) {
+    const chatHistorySnippet = formatRecentChatForRouter(chatMessages);
+    console.log("chat history snippet for LLM rewrite:", chatHistorySnippet);
+    console.log(
+      `[QueryRouter] LLM rewrite (needsRewrite=true) for: ${question.substring(0, 80)}`
+    );
+
+    const rewriteResult = await llmRewrite(question, {
+      ...sharedLlmOptions,
+      chatHistorySnippet,
+    });
+
+    let rewrittenQuery = rewriteResult.rewrittenQuery || null;
+    let rewriteReason = rewrittenQuery
+      ? rewriteResult.rewriteReason || "TRANSLATE"
+      : null;
+
+    // If rewrite LLM returns nothing but router flagged follow-up context, fall back to state.
+    if (!rewrittenQuery && llmResult.followUp) {
+      rewrittenQuery = rewriteFromConversationState(conversationState);
+      if (rewrittenQuery) {
+        rewriteReason = "ELLIPSIS";
+      }
+    }
+
+    merged = {
+      ...merged,
+      rewrittenQuery,
+      rewriteReason,
+      needsRewrite: Boolean(rewrittenQuery),
+    };
+  } else {
+    merged = {
+      ...merged,
+      rewrittenQuery: null,
+      rewriteReason: null,
+      needsRewrite: false,
+    };
+  }
+
+  // Fill HYBRID subIntent from rewritten query (or original), else fall back to RAG.
+  if (merged.route === ROUTES.HYBRID && !merged.subIntent) {
+    const fromRewrite = classifyStructuralSubIntent(
+      merged.rewrittenQuery || question || ""
+    );
+    if (fromRewrite) {
+      merged = { ...merged, subIntent: fromRewrite };
+    } else {
+      merged = { ...merged, route: ROUTES.SEMANTIC_RAG };
+    }
+  }
+
+  return applyFollowUpAcceptanceOverride(merged, question, {
     chatMessages,
     conversationState,
   });
