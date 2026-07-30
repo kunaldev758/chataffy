@@ -1314,7 +1314,13 @@ class QuestionAnsweringSystem {
     return expanded.sort((a, b) => (b.score || 0) - (a.score || 0));
   }
 
-  applyAttributeRerank(matches, queryAttributes, label = "hybrid", lexicalTerms = []) {
+  applyAttributeRerank(
+    matches,
+    queryAttributes,
+    label = "hybrid",
+    lexicalTerms = [],
+    softBoosts = [],
+  ) {
     if (!matches?.length || !queryAttributes) return matches || [];
     const before = matches.slice(0, 8);
     const reranked = rerankByAttributes(matches, queryAttributes, {
@@ -1323,6 +1329,7 @@ class QuestionAnsweringSystem {
         lexicalTerms?.length > 0
           ? lexicalTerms
           : queryAttributes.keywords || [],
+      softBoosts,
     });
     logRerankStats(label, before, reranked);
     return reranked;
@@ -1405,6 +1412,7 @@ class QuestionAnsweringSystem {
       queryAttributes || plan?.queryAttributes,
       "hybrid",
       lexicalTerms,
+      policy.softBoosts || [],
     );
   }
 
@@ -2692,7 +2700,10 @@ ${answerInstructions}`;
             match: { value: options.agentId.toString() },
           });
         }
-        // High-confidence identity facets only (product_id / sku) — never sizes
+        // Hard filters are pre-classified by the retrieval policy engine
+        // (retrievalPolicy.js) — only high-confidence identity facets
+        // (product_id / sku) ever reach here. The size/sizes exclusion is
+        // a defense-in-depth guard in case tenant policy is misconfigured.
         for (const hf of options.hardFilters || []) {
           if (!hf?.key || !hf?.value) continue;
           if (hf.key === "size" || hf.key === "sizes") continue;
@@ -3057,7 +3068,7 @@ ${answerInstructions}`;
       });
 
       console.log(
-        `[QueryController] Route: ${routing.route} | subIntent: ${routing.subIntent} | userLang: ${routing.userLanguage} | confidence: ${routing.confidence} | followUp: ${routing.followUp} | needsRewrite: ${routing.needsRewrite} | rewriteReason: ${routing.rewriteReason || "none"} | lexicalTerms: [${(routing.lexicalTerms || []).join(", ")}] | source: ${routing.source}`,
+        `[QueryController] Route: ${routing.route} | subIntent: ${routing.subIntent} | userLang: ${routing.userLanguage} | confidence: ${routing.confidence} | followUp: ${routing.followUp} | needsRewrite: ${routing.needsRewrite} | rewriteReason: ${routing.rewriteReason || "none"} | lexicalTerms: [${(routing.lexicalTerms || []).join(", ")}] | constraints: [${(routing.constraints || []).map((c) => `${c.field}${c.operator === "eq" ? "=" : ":" + c.operator + ":"}${c.value}@${c.confidence}`).join(", ")}] | source: ${routing.source}`,
       );
 
       const langOpts = { userLanguage: routing.userLanguage };

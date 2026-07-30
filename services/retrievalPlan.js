@@ -1,20 +1,34 @@
 /**
  * Intent-driven Retrieval Plan.
- * Facets are soft signals for rerank/sparse — not hard Qdrant filters
- * (except tenant isolation and rare high-confidence indexed ids).
+ *
+ * Orchestrates the pipeline:
+ *   routing.constraints[] --(constraintFacetMapper, pure transform)--> facets[]
+ *   facets[] --(retrievalPolicy, decides usage)--> hardFilters/softBoosts/lexicalHints
+ *
+ * This module wires the two together and adds the retrieval-depth /
+ * context-mode policy (topK, contextMode, tokenBudget) that is orthogonal
+ * to facet classification. It does NOT decide hard/soft/lexical itself —
+ * that lives in retrievalPolicy.js so tenant-specific retrieval strategy
+ * never has to touch the mapper.
  *
  * Industry pattern: retrieve deep → multi-signal rerank → take top-N by rank.
  * RRF fusion scores are rank-based — never gate on absolute thresholds.
  */
 
-const HARD_FILTER_KEYS = new Set(["product_id", "sku"]);
-const HIGH_CONFIDENCE = 0.9;
+const { mapConstraintsToFacets } = require("./constraintFacetMapper");
+const {
+  applyRetrievalPolicy,
+  DEFAULT_HARD_FILTER_KEYS,
+  DEFAULT_HARD_FILTER_MIN_CONFIDENCE,
+} = require("./retrievalPolicy");
 
 /**
  * @typedef {Object} Facet
  * @property {string} key
  * @property {string} value
+ * @property {string} operator
  * @property {number} confidence
+ * @property {string} source
  */
 
 /**
@@ -35,25 +49,46 @@ function normalizeFacetValue(value) {
 }
 
 /**
- * Build facets from queryAttributes (sizes/collections stay as soft facets only).
+ * Heuristic facet fallback, used only when the intent router produced no
+ * constraints (e.g. a rule-engine short-circuit route that never called
+ * the LLM). Once constraints are present, they are the single source of
+ * truth for facets — this is a compatibility shim, not the primary path.
  */
-function buildFacets(queryAttributes = {}) {
+function buildHeuristicFacets(queryAttributes = {}) {
   const facets = [];
 
   for (const size of queryAttributes.sizes || []) {
     const value = normalizeFacetValue(size);
     if (!value) continue;
-    facets.push({ key: "size", value, confidence: 0.85 });
+    facets.push({
+      key: "size",
+      value,
+      operator: "eq",
+      confidence: 0.85,
+      source: "inferred",
+    });
   }
 
   for (const collection of queryAttributes.collections || []) {
     const value = normalizeFacetValue(collection);
     if (!value) continue;
-    facets.push({ key: "collection", value, confidence: 0.75 });
+    facets.push({
+      key: "collection",
+      value,
+      operator: "eq",
+      confidence: 0.75,
+      source: "inferred",
+    });
   }
 
   if (queryAttributes.subIntent === "IN_PAGE_LIST") {
-    facets.push({ key: "intent_signal", value: "price", confidence: 0.7 });
+    facets.push({
+      key: "intent_signal",
+      value: "price",
+      operator: "eq",
+      confidence: 0.7,
+      source: "inferred",
+    });
   }
 
   return facets;
@@ -150,59 +185,54 @@ function resolveTopK(subIntent, requestedTopK = 10) {
 }
 
 /**
- * Hard filters only for high-confidence indexed identity facets.
- * Size/collection never become hard Qdrant filters.
- */
-function buildHardFilters(facets = []) {
-  return facets.filter(
-    (f) =>
-      HARD_FILTER_KEYS.has(f.key) &&
-      typeof f.confidence === "number" &&
-      f.confidence >= HIGH_CONFIDENCE &&
-      f.value,
-  );
-}
-
-/**
  * @param {object} params
- * @param {object} params.routing - from routeQuery
- * @param {object} params.queryAttributes - from extractQueryAttributes
+ * @param {object} params.routing - from routeQuery (route, subIntent, lexicalTerms, constraints)
+ * @param {object} params.queryAttributes - from extractQueryAttributes (fallback facet source only)
  * @param {number} [params.requestedTopK]
+ * @param {object} [params.tenantPolicy] - per-tenant retrieval policy overrides
  */
 function buildRetrievalPlan({
   routing = {},
   queryAttributes = {},
   requestedTopK = 10,
+  tenantPolicy = {},
 } = {}) {
   const intent = routing.route || queryAttributes.route || "SEMANTIC_RAG";
   const subIntent =
     queryAttributes.subIntent || routing.subIntent || null;
 
-  const facets = buildFacets(queryAttributes);
-  const lexicalTerms = buildLexicalTerms(queryAttributes, facets, routing);
+  // Constraints from the intent router are the source of truth for facets.
+  // Heuristic extraction only fills in when the router provided none.
+  const routerFacets = mapConstraintsToFacets(routing.constraints);
+  const facets =
+    routerFacets.length > 0 ? routerFacets : buildHeuristicFacets(queryAttributes);
+
+  const baseLexicalTerms = buildLexicalTerms(queryAttributes, facets, routing);
   const contextMode = resolveContextMode(subIntent);
   const tokenBudget = resolveTokenBudget(contextMode);
   const topK = resolveTopK(subIntent, requestedTopK);
-  const hardFilters = buildHardFilters(facets);
 
-  const softBoostKeys = [
-    ...new Set(
-      facets
-        .filter((f) => !HARD_FILTER_KEYS.has(f.key))
-        .map((f) => f.key),
-    ),
-  ];
+  // Policy engine decides hard filter / soft boost / lexical hint per facet.
+  const policy = applyRetrievalPolicy({
+    intent,
+    subIntent,
+    facets,
+    lexicalTerms: baseLexicalTerms,
+    tenantPolicy,
+  });
 
   /** @type {RetrievalPlan} */
   const plan = {
     intent,
     subIntent,
     facets,
-    lexicalTerms,
+    lexicalTerms: policy.lexicalTerms,
     queryAttributes,
     retrievalPolicy: {
-      hardFilters,
-      softBoostKeys,
+      hardFilters: policy.hardFilters,
+      softBoosts: policy.softBoosts,
+      softBoostKeys: policy.softBoostKeys,
+      ignoredFacets: policy.ignored,
       topKDense: topK.topKDense,
       topKSparse: topK.topKSparse,
       finalTopK: topK.finalTopK,
@@ -253,6 +283,7 @@ function logRetrievalPlan(plan) {
       `context=${plan.retrievalPolicy?.contextMode} ` +
       `facets=[${facetStr}] lexical=${(plan.lexicalTerms || []).length} ` +
       `hardFilters=${(plan.retrievalPolicy?.hardFilters || []).length} ` +
+      `softBoosts=${(plan.retrievalPolicy?.softBoosts || []).length} ` +
       `candidates=${plan.retrievalPolicy?.semanticTopK} final=${plan.retrievalPolicy?.finalTopK}`,
   );
 }
@@ -261,8 +292,10 @@ module.exports = {
   buildRetrievalPlan,
   selectMatchesByPlan,
   logRetrievalPlan,
-  buildFacets,
+  buildHeuristicFacets,
   buildLexicalTerms,
-  HARD_FILTER_KEYS,
-  HIGH_CONFIDENCE,
+  // Re-exported for backward compatibility with any existing callers/tests
+  // that referenced the old defaults directly from this module.
+  HARD_FILTER_KEYS: DEFAULT_HARD_FILTER_KEYS,
+  HIGH_CONFIDENCE: DEFAULT_HARD_FILTER_MIN_CONFIDENCE,
 };

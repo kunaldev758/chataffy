@@ -342,6 +342,7 @@ function applyFollowUpAcceptanceOverride(
     userLanguage: result?.userLanguage || "en",
     confidence: Math.max(result?.confidence || 0, 0.92),
     rewrittenQuery,
+    constraints: result?.constraints,
     followUp: true,
     needsRewrite: Boolean(rewrittenQuery),
     rewriteReason: rewrittenQuery
@@ -370,6 +371,61 @@ function detectUserLanguageFromQuestion(question) {
   return fromText?.language || "en";
 }
 
+const CONSTRAINT_OPERATORS = new Set([
+  "eq",
+  "neq",
+  "gt",
+  "gte",
+  "lt",
+  "lte",
+  "in",
+  "contains",
+]);
+const CONSTRAINT_SOURCES = new Set(["user", "inferred", "rewrite", "history"]);
+
+/**
+ * Normalize raw LLM constraint objects. Every constraint always carries
+ * field/value/operator/confidence/source — defaults are applied here so
+ * downstream consumers (constraint→facet mapper) never see partial shapes.
+ * Field vocabulary is intentionally NOT restricted to a fixed list.
+ */
+function normalizeConstraints(rawConstraints) {
+  if (!Array.isArray(rawConstraints)) return [];
+
+  const constraints = [];
+  for (const raw of rawConstraints) {
+    if (!raw || typeof raw !== "object") continue;
+
+    const field = typeof raw.field === "string" ? raw.field.trim() : "";
+    const value =
+      raw.value === null || raw.value === undefined
+        ? ""
+        : String(raw.value).trim();
+    if (!field || !value) continue;
+
+    const operator = CONSTRAINT_OPERATORS.has(
+      String(raw.operator || "").toLowerCase(),
+    )
+      ? String(raw.operator).toLowerCase()
+      : "eq";
+
+    const confidence =
+      typeof raw.confidence === "number"
+        ? Math.max(0, Math.min(1, raw.confidence))
+        : 0.7;
+
+    const source = CONSTRAINT_SOURCES.has(
+      String(raw.source || "").toLowerCase(),
+    )
+      ? String(raw.source).toLowerCase()
+      : "user";
+
+    constraints.push({ field, value, operator, confidence, source });
+  }
+
+  return constraints.slice(0, 12);
+}
+
 function buildRouteResult({
   route,
   subIntent = null,
@@ -377,6 +433,7 @@ function buildRouteResult({
   confidence = 1,
   rewrittenQuery = null,
   lexicalTerms = [],
+  constraints = [],
   followUp = false,
   needsRewrite = false,
   rewriteReason = null,
@@ -389,6 +446,7 @@ function buildRouteResult({
     confidence,
     rewrittenQuery,
     lexicalTerms: Array.isArray(lexicalTerms) ? lexicalTerms.slice(0, 8) : [],
+    constraints: normalizeConstraints(constraints),
     followUp,
     needsRewrite,
     rewriteReason,
@@ -604,6 +662,7 @@ function parseRouterJson(content, question = "") {
       confidence,
       rewrittenQuery,
       lexicalTerms,
+      constraints: parsed.constraints,
       followUp,
       needsRewrite,
       rewriteReason,
@@ -690,6 +749,18 @@ Also extract lexicalTerms: an array of 3–6 key search tokens from the user's m
 - "16mm super natural lashes price" → ["16mm", "super natural", "lashes", "price"]
 - "contact information" → ["contact", "information"]
 
+Also extract constraints: an array of structured filters the user explicitly (or clearly implicitly) asked for — the specific attributes they want results narrowed to. Each constraint is:
+{ "field": string, "value": string, "operator": "eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"in"|"contains", "confidence": 0-1, "source": "user"|"inferred"|"rewrite"|"history" }
+- "field" is a free-form snake_case attribute name (e.g. size, color, brand, collection, sku, product_id, price, material). Do NOT force-fit into a fixed list — use whatever field name best describes the constraint.
+- "operator" defaults to "eq" for simple matches; use gt/gte/lt/lte for numeric comparisons (e.g. "under $100" → {field: "price", value: "100", operator: "lte"}); use "in" when the user gives multiple acceptable values for one field.
+- "confidence" reflects how explicit/certain the constraint is (0.9+ for exact stated values like a SKU, ~0.6-0.8 for inferred/implied values).
+- "source" is "user" for values stated directly in this message, "rewrite" if it came from rewrittenQuery, "history" if resolved from conversation state, "inferred" if you deduced it rather than the user stating it.
+- Only include real constraints; return an empty array when the message has none. Do not invent constraints that aren't supported by the message or context.
+Examples:
+- "do you have white adidas shoes in size 8?" → [{"field":"color","value":"white","operator":"eq","confidence":0.9,"source":"user"},{"field":"brand","value":"adidas","operator":"eq","confidence":0.9,"source":"user"},{"field":"size","value":"8","operator":"eq","confidence":0.9,"source":"user"}]
+- "16mm super natural lashes price" → [{"field":"size","value":"16mm","operator":"eq","confidence":0.9,"source":"user"},{"field":"collection","value":"super natural","operator":"eq","confidence":0.8,"source":"user"}]
+- "contact information" → []
+
 Respond with JSON only:
 {
   "route": "SEMANTIC_RAG",
@@ -698,6 +769,7 @@ Respond with JSON only:
   "confidence": 0.85,
   "rewrittenQuery": null,
   "lexicalTerms": [],
+  "constraints": [],
   "followUp": false,
   "needsRewrite": false,
   "rewriteReason": "NONE",

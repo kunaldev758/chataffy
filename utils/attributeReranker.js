@@ -160,9 +160,60 @@ function typePenalty(text, url, subIntent) {
 }
 
 /**
+ * Generic soft-facet payload lookup. Checks the facet key against a few
+ * conventional payload locations (top-level field, attributes.<key>,
+ * search_terms) without assuming any fixed field vocabulary. Facet keys
+ * that aren't indexed in the payload simply fail this lookup and fall
+ * back to the text-overlap check below (and to lexical scoring elsewhere).
+ */
+function facetMatchesPayload(match, facet) {
+  const p = match.payload || match;
+  const value = facet.value;
+  if (!value) return false;
+
+  const candidates = [];
+  if (p[facet.key] !== undefined) candidates.push(p[facet.key]);
+  if (p.attributes && p.attributes[facet.key] !== undefined) {
+    candidates.push(p.attributes[facet.key]);
+  }
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      if (candidate.some((v) => String(v).toLowerCase().includes(value))) {
+        return true;
+      }
+    } else if (candidate !== null && candidate !== undefined) {
+      if (String(candidate).toLowerCase().includes(value)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Generic soft-facet signal in [0, 1] — averaged hit rate across all soft
+ * boost facets from the retrieval plan (any field, not a fixed list).
+ * Payload-indexed matches count fully; text-only matches count partially
+ * (lexical scoring already rewards these, so this stays a light nudge).
+ */
+function genericFacetScore(match, softBoosts) {
+  if (!softBoosts?.length) return 0;
+  const text = payloadText(match);
+
+  let hits = 0;
+  for (const facet of softBoosts) {
+    if (facetMatchesPayload(match, facet)) {
+      hits += 1;
+    } else if (facet.value && text.includes(facet.value)) {
+      hits += 0.5;
+    }
+  }
+  return Math.min(1, hits / softBoosts.length);
+}
+
+/**
  * Attribute / structural signal in [0, 1].
  */
-function attributeScore(match, attributes, subIntent) {
+function attributeScore(match, attributes, subIntent, softBoosts = []) {
   const { sizes, collections, keywords } = attributes || {};
   const text = payloadText(match);
   const url = (match.payload?.url || "").toLowerCase();
@@ -175,12 +226,14 @@ function attributeScore(match, attributes, subIntent) {
   );
   const titleHits = countKeywordHits(title, keywords);
   const textHits = countKeywordHits(text, (keywords || []).slice(0, 12));
+  const facetScore = genericFacetScore(match, softBoosts);
 
   let raw = 0;
   raw += Math.min(sizeMatches * 0.35, 0.7);
   raw += Math.min(collectionMatches * 0.3, 0.6);
   raw += Math.min(titleHits * 0.12, 0.36);
   raw += Math.min(textHits * 0.06, 0.24);
+  raw += Math.min(facetScore * 0.4, 0.4);
   raw += urlBonus(url, subIntent);
   raw -= typePenalty(text, url, subIntent);
 
@@ -233,7 +286,7 @@ function filterMatchesBySizes(matches, querySizes, { strict = false } = {}) {
 /**
  * @param {object[]} candidates - merged retrieval matches
  * @param {object} attributes - from extractQueryAttributes()
- * @param {{ subIntent?: string, lexicalTerms?: string[] }} [options]
+ * @param {{ subIntent?: string, lexicalTerms?: string[], softBoosts?: object[] }} [options]
  * @returns {object[]}
  */
 function rerankByAttributes(candidates, attributes, options = {}) {
@@ -246,6 +299,7 @@ function rerankByAttributes(candidates, attributes, options = {}) {
     options.lexicalTerms?.length > 0
       ? options.lexicalTerms
       : attributes.keywords || [];
+  const softBoosts = options.softBoosts || [];
 
   const baseScores = candidates.map((m) => m.score ?? 0);
   const normRrf = minMaxNormalize(baseScores);
@@ -255,7 +309,7 @@ function rerankByAttributes(candidates, attributes, options = {}) {
     const title = (match.payload?.title || "").toLowerCase();
     const rrfNorm = normRrf[i];
     const lex = lexicalOverlapScore(title, text, lexicalTerms);
-    const attr = attributeScore(match, attributes, subIntent);
+    const attr = attributeScore(match, attributes, subIntent, softBoosts);
 
     const finalScore =
       W_RRF * rrfNorm + W_LEXICAL * lex + W_ATTR * attr;
@@ -302,4 +356,6 @@ module.exports = {
   payloadSizes,
   sizeOverlap,
   lexicalOverlapScore,
+  facetMatchesPayload,
+  genericFacetScore,
 };
