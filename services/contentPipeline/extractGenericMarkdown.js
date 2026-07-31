@@ -8,6 +8,7 @@ const {
   stripInlineBufferImageContent,
 } = require("./htmlCleanup");
 const { extractPageMetadata } = require("./extractPageMetadata");
+const { extractBusinessInfoFromJsonLd } = require("./extractors/businessInfo");
 
 /**
  * Generic Cheerio → Markdown extraction (Phase 1 default path).
@@ -48,12 +49,24 @@ function extractGenericMarkdown(url, sourceCode, chromeCache = {}) {
     markdown += `\n\n---\n**Footer Links (from ${domain})**\n${footerMarkdown}`;
   }
 
-  const content = stripInlineBufferImageContent(
+  let content = stripInlineBufferImageContent(
     markdown
       .replace(/[ \t]+/g, " ")
       .replace(/\n{3,}/g, "\n\n")
       .trim(),
   );
+
+  // Business identity/contact JSON-LD (LocalBusiness, Organization, etc.) is
+  // otherwise only used for page-type classification and never indexed.
+  // Capture once per domain (like header/footer) since Organization schema
+  // is often duplicated site-wide and would otherwise repeat on every page.
+  if (!chromeState.businessInfoCaptured) {
+    const businessInfo = extractBusinessInfoFromJsonLd(pageMetadata.jsonLdBlocks);
+    if (businessInfo?.content) {
+      content = `${businessInfo.content}\n\n${content}`.trim();
+      chromeState.businessInfoCaptured = true;
+    }
+  }
 
   return {
     content,

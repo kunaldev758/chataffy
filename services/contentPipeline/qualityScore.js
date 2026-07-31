@@ -5,6 +5,63 @@
 
 const QUALITY_THRESHOLD = 0.35;
 
+/**
+ * Utility/account URL paths that are never useful RAG content, even if the
+ * rendered page happens to contain enough words to pass the heuristic score
+ * (e.g. a cart page listing product names). Checked once per URL, before any
+ * per-section scoring, so we don't waste an LLM/extraction pass on them.
+ */
+const EXCLUDED_URL_PATTERNS = [
+  /\/cart(\/|$|\?)/i,
+  /\/checkout(\/|$|\?)/i,
+  /\/account(\/|$|\?)/i,
+  /\/(login|signin|sign-in)(\/|$|\?)/i,
+  /\/(register|signup|sign-up)(\/|$|\?)/i,
+  /\/search(\/|$|\?)/i,
+  /\/wishlist(\/|$|\?)/i,
+  /\/(order|orders)(\/|$|\?)/i,
+  /sitemap[^/]*\.xml(\?|$)/i,
+];
+
+/**
+ * Explicit soft-404 / HTTP-error page signals. These are deterministic hard
+ * fails checked against page title + a leading content sample, independent
+ * of (and stricter than) the heuristic BOILERPLATE_PHRASES score below —
+ * a page that literally says "404 - Page Not Found" should never be trained
+ * on regardless of how many other words happen to be on it (nav, footer...).
+ */
+const SOFT_404_PATTERNS = [
+  /404\s*[-—:]?\s*page\s*not\s*found/i,
+  /\bpage\s*not\s*found\b/i,
+  /\b403\s*forbidden\b/i,
+  /\baccess\s*denied\b/i,
+  /\b500\s*internal\s*server\s*error\b/i,
+  /\bservice\s*unavailable\b/i,
+  /the\s*requested\s*url\s*was\s*not\s*found/i,
+  /this\s*domain\s*is\s*parked/i,
+  /\bsite\s*(?:is\s*)?under\s*maintenance\b/i,
+];
+
+/**
+ * @param {string} url
+ * @returns {boolean} true when the URL matches a known non-content utility path.
+ */
+function isExcludedUtilityUrl(url = "") {
+  const u = String(url || "");
+  if (!u) return false;
+  return EXCLUDED_URL_PATTERNS.some((re) => re.test(u));
+}
+
+/**
+ * @param {string} text - page title + leading content sample
+ * @returns {boolean} true when the text is a soft-404 / HTTP error page.
+ */
+function isSoft404Content(text = "") {
+  const sample = String(text || "");
+  if (!sample.trim()) return false;
+  return SOFT_404_PATTERNS.some((re) => re.test(sample));
+}
+
 const BOILERPLATE_PHRASES = [
   "accept cookies",
   "cookie policy",
@@ -98,4 +155,8 @@ function scoreQuality(text, { title = "" } = {}) {
 module.exports = {
   scoreQuality,
   QUALITY_THRESHOLD,
+  isExcludedUtilityUrl,
+  isSoft404Content,
+  EXCLUDED_URL_PATTERNS,
+  SOFT_404_PATTERNS,
 };

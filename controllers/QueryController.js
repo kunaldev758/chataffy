@@ -54,6 +54,7 @@ const {
   logRerankStats,
   filterMatchesBySizes,
 } = require("../utils/attributeReranker");
+const { rerankMatches } = require("../services/reranker");
 const QdrantVectorStoreManager = require("../services/QdrantService");
 const {
   isClearlyOnTopicCompanyQuestion: detectClearlyOnTopicQuestion,
@@ -3346,6 +3347,12 @@ ${answerInstructions}`;
         plan: retrievalPlan,
       });
 
+      // Cross-encoder rerank (Jina by default; see services/reranker/) on top of
+      // the RRF + heuristic attribute rerank above. Safe no-op on any failure.
+      queryResponse = await rerankMatches(retrievalQuery, queryResponse, {
+        label: "hybrid",
+      });
+
       console.log("subIntent : ", subIntent);
 
       // if (effectiveSubIntent) {
@@ -3751,7 +3758,7 @@ ${answerInstructions}`;
             responseMode,
             contextMode: retrievalPlan.retrievalPolicy.contextMode,
             requestedCount,
-            wantsProductUrls: false,
+            wantsProductUrls: isProductLinkRequest(question),
             wasExpanded: queryWasEnriched,
             retrievalMaxScore: maxScore,
             subIntent: subIntent || null,

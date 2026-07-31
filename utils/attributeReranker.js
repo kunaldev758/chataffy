@@ -111,7 +111,7 @@ function collectionOverlap(queryCollections, docCollections) {
   return matches;
 }
 
-function urlBonus(url, subIntent) {
+function urlBonus(url, subIntent, entityType) {
   const u = (url || "").toLowerCase();
   if (!u) return 0;
 
@@ -142,7 +142,39 @@ function urlBonus(url, subIntent) {
     bonus += 0.15;
   }
 
-  return Math.min(bonus, 0.5);
+  // Catalog/collection-style questions ("what catalogs/collections do you have")
+  // route to PAGE_LINKS or IN_PAGE_LIST, but the generic checks above treat every
+  // URL the same regardless of what the page actually is. Use the entity_type
+  // already computed at ingestion time (detectPageType.js) to favor real
+  // collection/listing pages over blog posts or other content pages, which
+  // otherwise win on lexical overlap alone (e.g. a blog post that happens to
+  // mention "catalog" in passing).
+  if (
+    (subIntent === "PAGE_LINKS" || subIntent === "IN_PAGE_LIST") &&
+    entityType === "listing"
+  ) {
+    bonus += 0.3;
+  }
+  if (
+    (subIntent === "PAGE_LINKS" || subIntent === "IN_PAGE_LIST") &&
+    entityType === "blog_post"
+  ) {
+    bonus -= 0.2;
+  }
+
+  // The captured site nav/mega-menu chunk (tagged entity_type="navigation" in
+  // processPageDocuments.js) IS the literal answer to "what catalogs/pages do
+  // you have" — it has zero lexical overlap with words like "catalog" since
+  // it's just a list of collection names, so without this boost it loses to
+  // unrelated content that happens to mention the word.
+  if (
+    (subIntent === "PAGE_LINKS" || subIntent === "IN_PAGE_LIST") &&
+    entityType === "navigation"
+  ) {
+    bonus += 0.45;
+  }
+
+  return Math.max(-0.2, Math.min(bonus, 0.6));
 }
 
 function typePenalty(text, url, subIntent) {
@@ -218,6 +250,7 @@ function attributeScore(match, attributes, subIntent, softBoosts = []) {
   const text = payloadText(match);
   const url = (match.payload?.url || "").toLowerCase();
   const title = (match.payload?.title || "").toLowerCase();
+  const entityType = match.payload?.entity_type || null;
 
   const sizeMatches = sizeOverlap(sizes, payloadSizes(match));
   const collectionMatches = collectionOverlap(
@@ -234,7 +267,7 @@ function attributeScore(match, attributes, subIntent, softBoosts = []) {
   raw += Math.min(titleHits * 0.12, 0.36);
   raw += Math.min(textHits * 0.06, 0.24);
   raw += Math.min(facetScore * 0.4, 0.4);
-  raw += urlBonus(url, subIntent);
+  raw += urlBonus(url, subIntent, entityType);
   raw -= typePenalty(text, url, subIntent);
 
   return Math.max(0, Math.min(1, raw));

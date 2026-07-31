@@ -36,14 +36,15 @@ const { extractProductContent } = require("./extractors/product");
 const { extractListingContent } = require("./extractors/listing");
 const { extractWithReadability } = require("./extractors/contentReadability");
 const { extractFaqContent } = require("./extractors/faq");
+const { extractBusinessInfoFromJsonLd } = require("./extractors/businessInfo");
 const {
   structureAwareChunk,
   structureAwareParentChildChunk,
   splitByHeadings,
-  DEFAULT_CHUNK_CHARS,
-  DEFAULT_OVERLAP_CHARS,
-  DEFAULT_PARENT_CHARS,
-  DEFAULT_CHILD_CHARS,
+  DEFAULT_CHUNK_TOKENS,
+  DEFAULT_OVERLAP_TOKENS,
+  DEFAULT_PARENT_TOKENS,
+  DEFAULT_CHILD_TOKENS,
 } = require("./chunking");
 const { resolveProductId } = require("./productId");
 const { buildContextPrefix, applyEmbeddingPrefix } = require("./contextPrefix");
@@ -88,14 +89,15 @@ module.exports = {
   extractListingContent,
   extractWithReadability,
   extractFaqContent,
+  extractBusinessInfoFromJsonLd,
   resolveProductId,
   structureAwareChunk,
   structureAwareParentChildChunk,
   splitByHeadings,
-  DEFAULT_CHUNK_CHARS,
-  DEFAULT_OVERLAP_CHARS,
-  DEFAULT_PARENT_CHARS,
-  DEFAULT_CHILD_CHARS,
+  DEFAULT_CHUNK_TOKENS,
+  DEFAULT_OVERLAP_TOKENS,
+  DEFAULT_PARENT_TOKENS,
+  DEFAULT_CHILD_TOKENS,
   buildContextPrefix,
   applyEmbeddingPrefix,
   processResidualSections,

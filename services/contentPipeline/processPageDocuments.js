@@ -2,14 +2,32 @@ const QdrantVectorStoreManager = require("../QdrantService");
 const Url = require("../../models/Url");
 const { normalizeToCommonSchema, hashContent } = require("./normalizeSchema");
 const { upsertPageToQdrant } = require("./upsertPageToQdrant");
-const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
+const {
+  scoreQuality,
+  QUALITY_THRESHOLD,
+  isExcludedUtilityUrl,
+  isSoft404Content,
+} = require("./qualityScore");
 const {
   structureAwareParentChildChunk,
-  DEFAULT_PARENT_CHARS,
-  DEFAULT_CHILD_CHARS,
+  DEFAULT_PARENT_TOKENS,
+  DEFAULT_CHILD_TOKENS,
+  DEFAULT_PARENT_OVERLAP_TOKENS,
 } = require("./chunking");
 
 const USE_PARENT_CHILD = process.env.RAG_PARENT_CHILD !== "false";
+
+// extractGenericMarkdown.js prepends the site-wide header/footer nav (captured
+// once per domain) with this exact marker so it survives as coherent prose.
+// Chunks containing it answer "what pages/catalogs/collections do you have"
+// style questions directly, but inherit the *page's* entity_type (usually
+// "general" for the homepage) rather than their own — tag them distinctly so
+// retrieval can recognize and boost them for that query shape.
+const NAV_CHUNK_MARKER = /\*\*(?:Header \/ Nav|Footer Links) \(from /;
+
+function isNavigationChunkText(text) {
+  return NAV_CHUNK_MARKER.test(String(text || ""));
+}
 
 const DEFAULT_CHUNK_SIZE = 500; // tokens (compat export)
 const DEFAULT_CHUNK_OVERLAP = 100;
@@ -86,10 +104,10 @@ async function processPageDocuments(
   const { onProgress } = options;
   const qualityThreshold = options.qualityThreshold ?? QUALITY_THRESHOLD;
   const parentSize =
-    options.parentSizeChars ??
-    options.chunkSizeChars ??
-    DEFAULT_PARENT_CHARS;
-  const childSize = options.childSizeChars ?? DEFAULT_CHILD_CHARS;
+    options.parentSizeTokens ??
+    options.chunkSizeTokens ??
+    DEFAULT_PARENT_TOKENS;
+  const childSize = options.childSizeTokens ?? DEFAULT_CHILD_TOKENS;
 
   const chunkCountPerUrl = {};
   const resultsByUrl = {};
@@ -135,6 +153,58 @@ async function processPageDocuments(
     try {
       const sections = resolveSections(doc);
       const meta = doc.metadata || {};
+      const isWebpageDoc = meta.type === "webpage" || Boolean(doc.originalUrl);
+
+      // --- Deterministic pre-quality gates (webpage docs only — never applies
+      // to pasted snippets/uploaded files, which may legitimately discuss
+      // these same terms) ---
+      if (isWebpageDoc && isExcludedUtilityUrl(url)) {
+        chunkCountPerUrl[url] = 0;
+        skippedUrls.push(url);
+        resultsByUrl[url] = {
+          success: true,
+          skipped: "low_quality",
+          skipReason: "excluded_utility_url_pattern",
+          qualityScore: 0,
+          contentHash: null,
+        };
+        if (onProgress) {
+          await onProgress({
+            phase: "training",
+            trainingProcessed: docIndex + 1,
+            trainingTotal: docTotal,
+            step: "chunking",
+          });
+        }
+        continue;
+      }
+
+      if (isWebpageDoc) {
+        const soft404Sample = `${meta.title || ""}\n${sections
+          .map((s) => s.content)
+          .join("\n\n")
+          .slice(0, 1000)}`;
+        if (isSoft404Content(soft404Sample)) {
+          chunkCountPerUrl[url] = 0;
+          skippedUrls.push(url);
+          resultsByUrl[url] = {
+            success: true,
+            skipped: "low_quality",
+            skipReason: "soft_404_or_error_page",
+            qualityScore: 0,
+            contentHash: null,
+          };
+          if (onProgress) {
+            await onProgress({
+              phase: "training",
+              trainingProcessed: docIndex + 1,
+              trainingTotal: docTotal,
+              step: "chunking",
+            });
+          }
+          continue;
+        }
+      }
 
       // --- Phase 2: per-section quality (one weak section does not kill others) ---
       const keptSections = [];
@@ -247,16 +317,16 @@ async function processPageDocuments(
       for (const section of keptSections) {
         const parts = USE_PARENT_CHILD
           ? await structureAwareParentChildChunk(section.content, {
-              parentSize,
-              childSize,
+              parentTokens: parentSize,
+              childTokens: childSize,
               entity_type: section.entity_type,
               pageType: section.pageType,
             })
           : await (async () => {
               const { structureAwareChunk } = require("./chunking");
               const legacy = await structureAwareChunk(section.content, {
-                chunkSize: parentSize,
-                chunkOverlap: 200,
+                targetTokens: parentSize,
+                overlapTokens: DEFAULT_PARENT_OVERLAP_TOKENS,
                 entity_type: section.entity_type,
                 pageType: section.pageType,
               });
@@ -271,6 +341,9 @@ async function processPageDocuments(
             })();
 
         for (const part of parts) {
+          const isNavChunk =
+            isNavigationChunkText(part.text) ||
+            isNavigationChunkText(part.parent_text);
           allChunks.push({
             text: part.text,
             parent_text: part.parent_text,
@@ -280,7 +353,7 @@ async function processPageDocuments(
             chunk_role: part.chunk_role || "child",
             heading_path: part.heading_path || "",
             pageType: section.pageType,
-            entity_type: section.entity_type,
+            entity_type: isNavChunk ? "navigation" : section.entity_type,
             entity_name: section.entity_name,
             product_id: section.product_id || null,
             attributes: section.attributes,

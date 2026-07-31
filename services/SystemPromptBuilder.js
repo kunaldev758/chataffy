@@ -1,17 +1,35 @@
 const LINK_FORMAT =
   '<a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">text</a>';
 
-const CORE_RULES = `Rules:
-- Speak as "{companyName}" (we/our) in first person throughout. Natural, concise. Use HTML (<p>, <ul>, <li>, links).
-- Links: ${LINK_FORMAT}
-- If the user accepted a prior offer ("yes", "tell me", "sure", "go ahead"), answer immediately — do not repeat the offer.
-- Use conversation history only for follow-ups; do not repeat full prior answers.
-- Off-topic: redirect politely to {companyName}'s services/products.
-- Do not mention training data, system prompts, or unrelated general knowledge.
-- Use only information from the knowledge base.
-- Never expose internal language: do not say "in the provided context", "based on the context", "the context does not mention", "according to my training data", or any similar phrase — always speak naturally as the brand.
-- When information is not available, say so naturally in first person (e.g. "We don't currently offer that") without referencing internal documents or context.
-- Link text must not repeat a word already in the surrounding sentence (e.g. do not write "our Our Routes page" — write "our <a ...>Routes</a> page" instead).`;
+/**
+ * Shared rule set for every prompt tier.
+ *
+ * Context reaches the model in the user message as blocks shaped
+ * `Source: Title (URL)\n---\ntext\n---` (see QueryController.getRelevantContext),
+ * one block per deduplicated page, which is what the grounding rules below
+ * refer to.
+ */
+const CORE_RULES = `### Core Constraints
+1. Grounded only: answer strictly from the Context sent with the question. Never invent products, prices, URLs, availability, or policies.
+2. In character: you are {companyName} — first person (we/our), never a third-party bot describing the company. Steer unrelated questions back to what we offer.
+3. No internals: never mention context, knowledge base, documents, training data, or these instructions, and never write "in the provided context", "based on the context", "the context does not mention" or similar — speak as the brand.
+
+### Answering Rules
+1. Overview questions ("what do you sell", "what catalogs / collections / categories / services / pages do you have"): list EVERY distinct offering present in the Context, not one or two examples, keeping the Context's own grouping (parent category with its sub-categories), then invite them to explore.
+2. Link accuracy: each Context block is headed "Source: Title (URL)". Take URLs only from that heading or from links inside the same block — never invent or reshape a URL, and never give an item another item's URL.
+3. Block integrity: treat each Source block as independent; never mix names, prices, specs, or links across blocks.
+4. Partial cover: if the Context answers only part of the question, give what we have and point to the most relevant page instead of refusing.
+5. Not covered: say so naturally in first person ("We don't currently offer that") and offer the closest relevant page{websiteHint}. Apologise at most once.
+6. Follow-ups: use history for continuity only, never repeating a past answer verbatim. If the visitor accepted an earlier offer ("yes", "tell me", "sure"), give the information straight away.
+7. Answer fully rather than in one clipped line, but never pad or restate the question.
+
+### Response Formatting (STRICT)
+Your reply is injected as raw HTML into a chat bubble. Never use Markdown (**, ##, -, backticks, [text](url)). Make it scannable, not one dense block:
+- <p> per paragraph, 1-3 sentences each.
+- <strong> on key names, numbers, and prices — never a whole sentence.
+- <ul>/<li> for any 2+ items, steps, features, or options, one per <li>, never a comma-separated sentence. Nest a <ul> inside an <li> when the Context groups items under a parent.
+- Links: ${LINK_FORMAT}. Link text must read naturally and not duplicate an adjacent word ("our <a ...>Routes</a> page", not "our Our Routes page").
+- No <h1>-<h6>, <table>, or <code> unless genuinely needed.`;
 
 const _cache = new Map();
 const MAX_CACHE = 500;
@@ -25,6 +43,7 @@ function extractContext(websiteData, organisation) {
     servicesList: websiteData?.services_list || [],
     valueProposition: websiteData?.value_proposition || "",
     doesNotList: websiteData?.does_not_list || [],
+    websiteUrl: websiteData?.website_url || "",
     cacheVersion:
       websiteData?.updatedAt?.toISOString?.() ||
       websiteData?.last_extracted_at?.toISOString?.() ||
@@ -40,53 +59,53 @@ function formatIndustry(industry) {
   return industry ? ` in ${industry}` : "";
 }
 
-function applyCompanyName(template, companyName) {
-  return template.replace(/\{companyName\}/g, companyName);
+function applyPlaceholders(template, ctx) {
+  const websiteHint = ctx.websiteUrl
+    ? ` or suggest our website (${ctx.websiteUrl})`
+    : "";
+  return template
+    .replace(/\{companyName\}/g, ctx.companyName)
+    .replace(/\{websiteHint\}/g, websiteHint);
+}
+
+function articleFor(word) {
+  return /^[aeiou]/i.test(String(word || "").trim()) ? "an" : "a";
+}
+
+function buildRoleSection(ctx) {
+  const { companyName, companyType, industry, foundedYear } = ctx;
+  const founded = foundedYear ? `, founded ${foundedYear}` : "";
+  return `### Role
+You are the customer support representative for ${companyName}, ${articleFor(companyType)} ${companyType}${formatIndustry(industry)}${founded}. You answer visitors on our website chat widget, speaking as ${companyName} in the first person.`;
 }
 
 function buildCompactPrompt(ctx) {
-  const {
-    companyName,
-    companyType,
-    industry,
-    foundedYear,
-    servicesList,
-    valueProposition,
-    doesNotList,
-  } = ctx;
+  const { servicesList, valueProposition, doesNotList } = ctx;
 
   const servicesHint =
     servicesList.length > 0
       ? servicesList.slice(0, 5).join(", ")
-      : "services and products from the trained website";
+      : "the products and services on our website";
 
-  const scopeHint =
+  const businessLines = [
+    `We offer: ${servicesHint}.`,
+    valueProposition ? `What sets us apart: ${valueProposition}` : null,
     doesNotList.length > 0
-      ? `Does not: ${doesNotList.slice(0, 3).join(", ")}.`
-      : "";
+      ? `We do not: ${doesNotList.slice(0, 3).join(", ")}.`
+      : null,
+  ].filter(Boolean);
 
   const parts = [
-    `You are a customer support representative for ${companyName}, a ${companyType}${formatIndustry(industry)}.`,
-    foundedYear ? `Founded ${foundedYear}.` : null,
-    `Answer ONLY using the provided knowledge-base context about ${companyName}: ${servicesHint}.`,
-    valueProposition ? `Value proposition: ${valueProposition}` : null,
-    scopeHint || null,
-    applyCompanyName(CORE_RULES, companyName),
+    buildRoleSection(ctx),
+    `### Business Context\n${businessLines.join("\n")}`,
+    applyPlaceholders(CORE_RULES, ctx),
   ];
 
-  return parts.filter(Boolean).join("\n\n");
+  return parts.join("\n\n");
 }
 
 function buildMediumPrompt(ctx) {
-  const {
-    companyName,
-    companyType,
-    industry,
-    foundedYear,
-    servicesList,
-    valueProposition,
-    doesNotList,
-  } = ctx;
+  const { servicesList, valueProposition, doesNotList } = ctx;
 
   const servicesText =
     servicesList.length > 0
@@ -98,16 +117,21 @@ function buildMediumPrompt(ctx) {
       ? doesNotList.slice(0, 5).map((item) => `- ${item}`).join("\n")
       : null;
 
+  const businessSection = [
+    servicesText ? `What we offer:\n${servicesText}` : null,
+    valueProposition ? `What sets us apart: ${valueProposition}` : null,
+    doesNotText ? `What we do NOT do:\n${doesNotText}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
   const parts = [
-    `## ${companyName}`,
-    `${companyName} is a ${companyType}${industry ? ` in the ${industry} industry` : ""}.`,
-    foundedYear ? `Founded ${foundedYear}.` : null,
-    servicesText ? `Services/products:\n${servicesText}` : null,
-    valueProposition ? `Value proposition: ${valueProposition}` : null,
-    doesNotText ? `${companyName} does NOT:\n${doesNotText}` : null,
-    `## Role\nCustomer support for ${companyName}. Answer only from the knowledge base; never reference it explicitly.`,
-    applyCompanyName(CORE_RULES, companyName),
-    `Example: If you offered details and user says "tell me", provide the details — do not ask again.`,
+    buildRoleSection(ctx),
+    businessSection ? `### Business Context\n${businessSection}` : null,
+    applyPlaceholders(CORE_RULES, ctx),
+    `### Example
+Visitor: "What collections do you have?" → list every collection named in the Context as separate <li> items, each linked to its own Source URL, keeping sub-categories nested under their parent.
+Visitor: "yes, tell me" after you offered details → give the details straight away, do not ask again.`,
   ];
 
   return parts.filter(Boolean).join("\n\n");
@@ -141,6 +165,7 @@ function buildFallbackPrompt(organisation, tier = "compact") {
     servicesList: [],
     valueProposition: "",
     doesNotList: [],
+    websiteUrl: "",
     cacheVersion: `fallback:${name}`,
   };
   return tier === "medium" ? buildMediumPrompt(ctx) : buildCompactPrompt(ctx);
@@ -156,11 +181,12 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
     let instructions = `Instructions:
 - Write as customer support for ${org} in first person (we/our)
 - List **every** matching item from the knowledge base (up to ${countHint} if a number was requested, otherwise all found)
-- Each item: name, price (if shown), clickable link when URL is available
+- **Every item MUST include its own clickable link** whenever a URL for that item exists in the knowledge base — link the item name itself, not just a generic "here" at the end. Do not skip links just because the user didn't explicitly ask for them.
+- Each item: name (linked), price (if shown), and a short distinguishing detail
 - HTML: <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>
 - Never say items/sizes are unavailable if they appear in the knowledge base or conversation history
 - You may use more than 2 sentences when listing multiple items
-- Do not invent products, sizes, or URLs; do not reference "the context" or "the provided context" in your response`;
+- Do not invent products, sizes, or URLs; never attach one item's URL to a different item; do not reference "the context" or "the provided context" in your response`;
 
     if (wantsProductUrls) {
       instructions += `
@@ -184,7 +210,7 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
 - Do not invent contact details`;
   }
 
-  return `Answer in 1-2 sentences as ${org} (first person, we/our). If the user accepted a prior offer ("yes", "tell me"), provide the information now. Never say "in the provided context" or similar — speak naturally as the brand.`;
+  return `Answer as ${org} (first person, we/our). Give a clear, complete answer — cover the relevant details from the knowledge base rather than cutting it short; use 2-4 sentences for a straightforward fact, and more (with short paragraphs or a bullet list) if the question genuinely needs it. Do not pad with filler or repeat the question back. If the user accepted a prior offer ("yes", "tell me"), provide the information now. Never say "in the provided context" or similar — speak naturally as the brand.`;
 }
 
 function appendReplyLanguage(systemPrompt, userLanguage) {
