@@ -13,6 +13,7 @@ const SIZE_PATTERN = /\b\d{1,2}(?:-\d{1,2})?mm\b/gi;
 const W_RRF = 0.5;
 const W_LEXICAL = 0.3;
 const W_ATTR = 0.2;
+const W_PAGE_TYPE = 0.8;
 
 function normalizeSize(s) {
   return (s || "").replace(/\s/g, "").toLowerCase();
@@ -42,7 +43,7 @@ function payloadCollections(match) {
   const fromPayload = (p.collections || []).map((c) => c.toLowerCase());
   const text = payloadText(match);
   const hints = [];
-  if (/\bsuper\s*natural\b/i.test(text)) hints.push("super natural");
+  // if (/\bsuper\s*natural\b/i.test(text)) hints.push("super natural");
   return [...new Set([...fromPayload, ...hints])];
 }
 
@@ -196,18 +197,40 @@ function facetMatchesPayload(match, facet) {
  * (lexical scoring already rewards these, so this stays a light nudge).
  */
 function genericFacetScore(match, softBoosts) {
-  if (!softBoosts?.length) return 0;
+  const genericBoosts = (softBoosts || []).filter(
+    (facet) => facet?.key !== "pageType",
+  );
+  if (!genericBoosts.length) return 0;
   const text = payloadText(match);
 
   let hits = 0;
-  for (const facet of softBoosts) {
+  for (const facet of genericBoosts) {
     if (facetMatchesPayload(match, facet)) {
       hits += 1;
     } else if (facet.value && text.includes(facet.value)) {
       hits += 0.5;
     }
   }
-  return Math.min(1, hits / softBoosts.length);
+  return Math.min(1, hits / genericBoosts.length);
+}
+
+function pageTypeBoostScore(match, softBoosts) {
+  const payload = match.payload || match;
+  const actualType = String(payload.pageType || "").trim().toLowerCase();
+  if (!actualType) return 0;
+
+  let best = 0;
+  for (const facet of softBoosts || []) {
+    if (facet?.key !== "pageType" || facet.value !== actualType) continue;
+    const strength =
+      facet.boostStrength === "strong"
+        ? 1
+        : facet.boostStrength === "normal"
+          ? 0.67
+          : 0.33;
+    best = Math.max(best, strength);
+  }
+  return best;
 }
 
 /**
@@ -310,9 +333,13 @@ function rerankByAttributes(candidates, attributes, options = {}) {
     const rrfNorm = normRrf[i];
     const lex = lexicalOverlapScore(title, text, lexicalTerms);
     const attr = attributeScore(match, attributes, subIntent, softBoosts);
+    const pageTypeBoost = pageTypeBoostScore(match, softBoosts);
 
     const finalScore =
-      W_RRF * rrfNorm + W_LEXICAL * lex + W_ATTR * attr;
+      W_RRF * rrfNorm +
+      W_LEXICAL * lex +
+      W_ATTR * attr +
+      W_PAGE_TYPE * pageTypeBoost;
 
     return {
       ...match,
@@ -321,6 +348,7 @@ function rerankByAttributes(candidates, attributes, options = {}) {
       _rrfNorm: rrfNorm,
       _lexicalScore: lex,
       _attrScore: attr,
+      _pageTypeBoost: pageTypeBoost,
       _rerankBonus: finalScore - rrfNorm,
       _lexicalHits: Math.round(lex * (lexicalTerms.length || 1)),
     };
@@ -340,7 +368,9 @@ function logRerankStats(label, before, after, limit = 5) {
       m._lexicalScore != null ? ` L${m._lexicalScore.toFixed(2)}` : "";
     const attr =
       m._attrScore != null ? ` A${m._attrScore.toFixed(2)}` : "";
-    return `${(m.score ?? 0).toFixed(3)}${lex}${attr}`;
+    const pageType =
+      m._pageTypeBoost > 0 ? ` P${m._pageTypeBoost.toFixed(2)}` : "";
+    return `${(m.score ?? 0).toFixed(3)}${lex}${attr}${pageType}`;
   });
 
   console.log(
@@ -358,4 +388,5 @@ module.exports = {
   lexicalOverlapScore,
   facetMatchesPayload,
   genericFacetScore,
+  pageTypeBoostScore,
 };

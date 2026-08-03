@@ -151,7 +151,7 @@ function extractCard($, el, pageUrl) {
   const url = absolutize(href, pageUrl);
 
   const name = cleanText(
-    $el.find(".card__heading, .product-card__title, .product-title, .product-item__title, h2, h3, .card__title, [itemprop='name']").first().text() ||
+    $el.find(".card__heading, .product-card__title, .product-title, .product-item__title, h2, h3, .card__title, [itemprop='name'],").first().text() ||
       $el.find("a[href*='/products/']").first().text() ||
       $el.find("img[alt]").first().attr("alt") ||
       "",

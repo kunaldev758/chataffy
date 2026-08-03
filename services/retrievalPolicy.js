@@ -13,6 +13,9 @@ const DEFAULT_HARD_FILTER_KEYS = new Set(["product_id", "sku"]);
 const DEFAULT_HARD_FILTER_OPERATORS = new Set(["eq", "in"]);
 const DEFAULT_HARD_FILTER_MIN_CONFIDENCE = 0.9;
 const DEFAULT_MIN_USABLE_CONFIDENCE = 0.3;
+const DEFAULT_PAGE_TYPE_IGNORE_BELOW = 0.5;
+const DEFAULT_PAGE_TYPE_NORMAL_FROM = 0.6;
+const DEFAULT_PAGE_TYPE_STRONG_ABOVE = 0.9;
 
 /**
  * @typedef {import("./constraintFacetMapper").Facet} Facet
@@ -23,6 +26,9 @@ const DEFAULT_MIN_USABLE_CONFIDENCE = 0.3;
  * @property {string[]} [hardFilterKeys] - facet keys allowed to become hard Qdrant filters
  * @property {number} [hardFilterMinConfidence]
  * @property {number} [minUsableConfidence] - below this, a facet is ignored entirely
+ * @property {number} [pageTypeIgnoreBelow]
+ * @property {number} [pageTypeNormalFrom]
+ * @property {number} [pageTypeStrongAbove]
  */
 
 function resolvePolicyConfig(tenantPolicy = {}) {
@@ -45,6 +51,18 @@ function resolvePolicyConfig(tenantPolicy = {}) {
       typeof tenantPolicy.minUsableConfidence === "number"
         ? tenantPolicy.minUsableConfidence
         : DEFAULT_MIN_USABLE_CONFIDENCE,
+    pageTypeIgnoreBelow:
+      typeof tenantPolicy.pageTypeIgnoreBelow === "number"
+        ? tenantPolicy.pageTypeIgnoreBelow
+        : DEFAULT_PAGE_TYPE_IGNORE_BELOW,
+    pageTypeNormalFrom:
+      typeof tenantPolicy.pageTypeNormalFrom === "number"
+        ? tenantPolicy.pageTypeNormalFrom
+        : DEFAULT_PAGE_TYPE_NORMAL_FROM,
+    pageTypeStrongAbove:
+      typeof tenantPolicy.pageTypeStrongAbove === "number"
+        ? tenantPolicy.pageTypeStrongAbove
+        : DEFAULT_PAGE_TYPE_STRONG_ABOVE,
   };
 }
 
@@ -72,6 +90,23 @@ function classifyFacets(facets = [], policyConfig) {
   const ignored = [];
 
   for (const facet of facets) {
+    if (facet?.key === "pageType") {
+      if (facet.confidence < policyConfig.pageTypeIgnoreBelow) {
+        ignored.push(facet);
+        continue;
+      }
+
+      const boostStrength =
+        facet.confidence > policyConfig.pageTypeStrongAbove
+          ? "strong"
+          : facet.confidence >= policyConfig.pageTypeNormalFrom
+            ? "normal"
+            : "weak";
+      softBoosts.push({ ...facet, boostStrength });
+      // pageType is structured metadata, not useful sparse-query text.
+      continue;
+    }
+
     if (!facet || facet.confidence < policyConfig.minUsableConfidence) {
       if (facet) ignored.push(facet);
       continue;
@@ -134,4 +169,7 @@ module.exports = {
   DEFAULT_HARD_FILTER_OPERATORS,
   DEFAULT_HARD_FILTER_MIN_CONFIDENCE,
   DEFAULT_MIN_USABLE_CONFIDENCE,
+  DEFAULT_PAGE_TYPE_IGNORE_BELOW,
+  DEFAULT_PAGE_TYPE_NORMAL_FROM,
+  DEFAULT_PAGE_TYPE_STRONG_ABOVE,
 };

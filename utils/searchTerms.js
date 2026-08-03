@@ -100,9 +100,9 @@ function extractPayloadAttributes({ text = "", title = "", url = "", source_type
   );
 
   const collections = [];
-  if (/\bsuper\s*natural\b/i.test(combined)) {
-    collections.push("Super Natural");
-  }
+  // if (/\bsuper\s*natural\b/i.test(combined)) {
+  //   collections.push("Super Natural");
+  // }
 
   const urlLower = (url || "").toLowerCase();
   let inferredType = source_type || "page";

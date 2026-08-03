@@ -21,6 +21,9 @@ const {
   DEFAULT_HARD_FILTER_KEYS,
   DEFAULT_HARD_FILTER_MIN_CONFIDENCE,
 } = require("./retrievalPolicy");
+const { PAGE_TYPES } = require("./contentPipeline/schema");
+
+const PAGE_TYPE_SET = new Set(PAGE_TYPES);
 
 /**
  * @typedef {Object} Facet
@@ -108,6 +111,7 @@ function buildLexicalTerms(queryAttributes = {}, facets = [], routing = {}) {
   }
 
   for (const f of facets) {
+    if (f.key === "pageType") continue;
     if (f.value) terms.add(f.value);
     if (f.key === "size") {
       const num = f.value.replace(/\s/g, "").replace(/mm$/i, "");
@@ -121,6 +125,26 @@ function buildLexicalTerms(queryAttributes = {}, facets = [], routing = {}) {
   }
 
   return [...terms].slice(0, 40);
+}
+
+function mapTargetPageTypesToFacets(targetPageTypes = []) {
+  if (!Array.isArray(targetPageTypes)) return [];
+
+  return targetPageTypes
+    .filter(
+      (target) =>
+        target &&
+        PAGE_TYPE_SET.has(String(target.type || "").trim().toLowerCase()),
+    )
+    .map((target) => ({
+      // Preserve payload casing: this maps directly to Qdrant's `pageType`.
+      key: "pageType",
+      value: String(target.type).trim().toLowerCase(),
+      operator: "eq",
+      confidence: Math.max(0, Math.min(1, Number(target.confidence) || 0)),
+      source: "inferred",
+    }))
+    .slice(0, 3);
 }
 
 function resolveContextMode(subIntent) {
@@ -204,8 +228,10 @@ function buildRetrievalPlan({
   // Constraints from the intent router are the source of truth for facets.
   // Heuristic extraction only fills in when the router provided none.
   const routerFacets = mapConstraintsToFacets(routing.constraints);
-  const facets =
+  const baseFacets =
     routerFacets.length > 0 ? routerFacets : buildHeuristicFacets(queryAttributes);
+  const pageTypeFacets = mapTargetPageTypesToFacets(routing.targetPageTypes);
+  const facets = [...baseFacets, ...pageTypeFacets];
 
   const baseLexicalTerms = buildLexicalTerms(queryAttributes, facets, routing);
   const contextMode = resolveContextMode(subIntent);
@@ -294,6 +320,7 @@ module.exports = {
   logRetrievalPlan,
   buildHeuristicFacets,
   buildLexicalTerms,
+  mapTargetPageTypesToFacets,
   // Re-exported for backward compatibility with any existing callers/tests
   // that referenced the old defaults directly from this module.
   HARD_FILTER_KEYS: DEFAULT_HARD_FILTER_KEYS,

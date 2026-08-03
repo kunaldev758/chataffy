@@ -95,10 +95,16 @@ function topicsFromRagState(state) {
     }
   }
 
-  return {
-    sizes: [...new Set(entities.sizes || [])],
-    collections: [...new Set(collections)],
-    productTerms: [...new Set(entities.productTerms || [])],
+  // return {
+  //   sizes: [...new Set(entities.sizes || [])],
+  //   collections: [...new Set(collections)],
+  //   productTerms: [...new Set(entities.productTerms || [])],
+  // };
+
+    return {
+    sizes: [],
+    collections:[],
+    productTerms:[],
   };
 }
 

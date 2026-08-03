@@ -19,6 +19,7 @@ const {
 } = require("./conversationStateService");
 const { normalizeQueryText } = require("../utils/queryNormalization");
 const { isContactIntentQuestion } = require("../utils/contactIntentDetection");
+const { PAGE_TYPES } = require("./contentPipeline/schema");
 const {
   normalizeGreetingInput,
   isGibberishOrAccidentalMessage,
@@ -343,6 +344,7 @@ function applyFollowUpAcceptanceOverride(
     confidence: Math.max(result?.confidence || 0, 0.92),
     rewrittenQuery,
     constraints: result?.constraints,
+    targetPageTypes: result?.targetPageTypes,
     followUp: true,
     needsRewrite: Boolean(rewrittenQuery),
     rewriteReason: rewrittenQuery
@@ -382,6 +384,57 @@ const CONSTRAINT_OPERATORS = new Set([
   "contains",
 ]);
 const CONSTRAINT_SOURCES = new Set(["user", "inferred", "rewrite", "history"]);
+const PAGE_TYPE_SET = new Set(PAGE_TYPES);
+
+/**
+ * Keep the router vocabulary aligned with ingestion classification.
+ * Accepts both preferred objects and common LLM shortcuts:
+ *   [{ "type": "product", "confidence": 0.9 }]
+ *   ["product"]
+ *   [{ "pageType": "product" }]
+ * Confidence values are independent and do not need to sum to one.
+ */
+function normalizeTargetPageTypes(rawTargetPageTypes) {
+  if (!Array.isArray(rawTargetPageTypes)) return [];
+
+  const byType = new Map();
+
+  const upsert = (rawType, rawConfidence) => {
+    const type = String(rawType || "")
+      .trim()
+      .toLowerCase();
+    if (!PAGE_TYPE_SET.has(type)) return;
+
+    const numericConfidence = Number(rawConfidence);
+    const confidence = Number.isFinite(numericConfidence)
+      ? Math.max(0, Math.min(1, numericConfidence))
+      : 0.7;
+
+    const current = byType.get(type);
+    if (!current || confidence > current.confidence) {
+      byType.set(type, { type, confidence });
+    }
+  };
+
+  for (const raw of rawTargetPageTypes) {
+    if (raw == null) continue;
+
+    // Bare string from small models: ["product"]
+    if (typeof raw === "string") {
+      upsert(raw, 0.7);
+      continue;
+    }
+
+    if (typeof raw !== "object" || Array.isArray(raw)) continue;
+
+    // Preferred: { type, confidence }. Tolerate pageType alias.
+    upsert(raw.type || raw.pageType || raw.value, raw.confidence);
+  }
+
+  return [...byType.values()]
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 3);
+}
 
 /**
  * Normalize raw LLM constraint objects. Every constraint always carries
@@ -434,6 +487,7 @@ function buildRouteResult({
   rewrittenQuery = null,
   lexicalTerms = [],
   constraints = [],
+  targetPageTypes = [],
   followUp = false,
   needsRewrite = false,
   rewriteReason = null,
@@ -447,6 +501,7 @@ function buildRouteResult({
     rewrittenQuery,
     lexicalTerms: Array.isArray(lexicalTerms) ? lexicalTerms.slice(0, 8) : [],
     constraints: normalizeConstraints(constraints),
+    targetPageTypes: normalizeTargetPageTypes(targetPageTypes),
     followUp,
     needsRewrite,
     rewriteReason,
@@ -663,6 +718,7 @@ function parseRouterJson(content, question = "") {
       rewrittenQuery,
       lexicalTerms,
       constraints: parsed.constraints,
+      targetPageTypes: parsed.targetPageTypes,
       followUp,
       needsRewrite,
       rewriteReason,
@@ -761,6 +817,24 @@ Examples:
 - "16mm super natural lashes price" → [{"field":"size","value":"16mm","operator":"eq","confidence":0.9,"source":"user"},{"field":"collection","value":"super natural","operator":"eq","confidence":0.8,"source":"user"}]
 - "contact information" → []
 
+Also predict targetPageTypes: up to 3 page types that are likely to contain
+the answer. Use ONLY the ingestion vocabulary below, and return an independent
+confidence from 0 to 1 for each prediction (the confidences do not need to sum
+to 1). Each entry MUST be an object: {"type":"<pageType>","confidence":0-1}
+(not bare strings).
+- product: product details, catalog listings, pricing, availability, SKUs
+- faq: frequently asked questions and support Q&A
+- docs: documentation, guides, technical reference, how-to content
+- blog: articles, news, posts, editorial content
+- generic: about, contact, policies, careers, services, or general pages
+
+Use [] when page type is unclear. For policy/support questions, include both
+faq and generic when both are plausible. Do not invent types outside this list.
+Examples:
+- "give me 20mm lashes along with their pricing" → [{"type":"product","confidence":0.9}]
+- "what is your return policy?" → [{"type":"faq","confidence":0.75},{"type":"generic","confidence":0.7}]
+- "contact information" → [{"type":"generic","confidence":0.85}]
+
 Respond with JSON only:
 {
   "route": "SEMANTIC_RAG",
@@ -770,6 +844,7 @@ Respond with JSON only:
   "rewrittenQuery": null,
   "lexicalTerms": [],
   "constraints": [],
+  "targetPageTypes": [],
   "followUp": false,
   "needsRewrite": false,
   "rewriteReason": "NONE",
@@ -933,4 +1008,5 @@ module.exports = {
   isShortAffirmative,
   detectFollowUpAcceptance,
   applyFollowUpAcceptanceOverride,
+  normalizeTargetPageTypes,
 };

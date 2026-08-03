@@ -8,16 +8,48 @@ const {
   buildRetrievalKeywords,
   extractSizeTokens,
 } = require("./queryNormalization");
-const {
-  extractCollectionHints,
-} = require("./queryContextExpansion");
+const { extractCollectionHints } = require("./queryContextExpansion");
 const { ROUTES, isRagRoute } = require("../services/QueryRouter");
 
 const RETRIEVAL_STOP_WORDS = new Set([
-  "the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "with",
-  "all", "show", "list", "give", "me", "how", "your", "our", "my", "what",
-  "when", "where", "have", "get", "can", "could", "would", "will", "that",
-  "this", "from", "about", "only", "just", "please", "there", "their",
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "of",
+  "for",
+  "to",
+  "in",
+  "on",
+  "with",
+  "all",
+  "show",
+  "list",
+  "give",
+  "me",
+  "how",
+  "your",
+  "our",
+  "my",
+  "what",
+  "when",
+  "where",
+  "have",
+  "get",
+  "can",
+  "could",
+  "would",
+  "will",
+  "that",
+  "this",
+  "from",
+  "about",
+  "only",
+  "just",
+  "please",
+  "there",
+  "their",
 ]);
 
 function tokenizeKeywords(text) {
@@ -78,17 +110,31 @@ function extractQueryAttributes({
     .map((t) => String(t).trim().toLowerCase())
     .filter((t) => t.length > 1);
 
+  console.log("extractQueryAttributes check at routing : ", routerTerms);
+
+  console.log(
+    "build RetrievalKeywords check at query : ",
+    buildRetrievalKeywords(keywordSource, sizes),
+  );
+
+  console.log("sized keywords check at query : ", sizeKeywords);
+
+  console.log("morphology hints check at query : ", morphologyHints);
+
+  
   const keywords = [
     ...new Set([
       ...routerTerms,
       ...tokenizeKeywords(keywordSource),
-      ...buildRetrievalKeywords(keywordSource, sizes),
+      // ...buildRetrievalKeywords(keywordSource, sizes),
       ...(queryNorm?.retrievalKeywords || []),
-      ...sizeKeywords,
+      // ...sizeKeywords,
       ...morphologyHints,
       ...collections.map((c) => c.toLowerCase()),
     ]),
   ].filter((k) => k.length > 2);
+
+  console.log("extractQueryAttributes check at query : ", keywords);
 
   return {
     normalizedQuestion,

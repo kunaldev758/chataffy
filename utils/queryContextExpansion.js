@@ -19,9 +19,9 @@ function extractCollectionHints(text) {
   const hints = new Set();
   const input = text || "";
 
-  if (/\bsuper\s*natural\b/i.test(input)) {
-    hints.add("Super Natural");
-  }
+  // if (/\bsuper\s*natural\b/i.test(input)) {
+  //   hints.add("Super Natural");
+  // }
 
   for (const m of input.matchAll(
     /\b(\d{1,2}\s*[-–]\s*\d{1,2}\s*mm)\s*(lashes?)?/gi

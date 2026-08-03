@@ -152,39 +152,41 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
   const countHint =
     requestedCount != null ? String(requestedCount) : "all found";
 
-  if (effectiveMode === "list") {
-    let instructions = `Instructions:
-- Write as customer support for ${org} in first person (we/our)
-- List **every** matching item from the knowledge base (up to ${countHint} if a number was requested, otherwise all found)
-- Each item: name, price (if shown), clickable link when URL is available
-- HTML: <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>
-- Never say items/sizes are unavailable if they appear in the knowledge base or conversation history
-- You may use more than 2 sentences when listing multiple items
-- Do not invent products, sizes, or URLs; do not reference "the context" or "the provided context" in your response`;
+    console.log("buildAnswerInstructions check :", effectiveMode, org, requestedCount, wantsProductUrls);
 
-    if (wantsProductUrls) {
-      instructions += `
-- **CRITICAL**: User asked for URLs — every product/collection MUST include its URL from the knowledge base
-- Do not contradict links or collections from earlier in the conversation
-- If a collection page exists for the requested size, link to it — do not invent different minimum sizes`;
-    }
-    return instructions;
-  }
+//   if (effectiveMode === "list") {
+//     let instructions = `Instructions:
+// - Write as customer support for ${org} in first person (we/our)
+// - List **every** matching item from the knowledge base (up to ${countHint} if a number was requested, otherwise all found)
+// - Each item: name, price (if shown), clickable link when URL is available
+// - HTML: <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>
+// - Never say items/sizes are unavailable if they appear in the knowledge base or conversation history
+// - You may use more than 2 sentences when listing multiple items
+// - Do not invent products, sizes, or URLs; do not reference "the context" or "the provided context" in your response`;
 
-  if (effectiveMode === "page_links") {
-    return `Instructions:
-- HTML list of page links from the knowledge base
-- Brief intro (1-2 sentences max)`;
-  }
+//     if (wantsProductUrls) {
+//       instructions += `
+// - **CRITICAL**: User asked for URLs — every product/collection MUST include its URL from the knowledge base
+// - Do not contradict links or collections from earlier in the conversation
+// - If a collection page exists for the requested size, link to it — do not invent different minimum sizes`;
+//     }
+//     return instructions;
+//   }
 
-  if (effectiveMode === "contact") {
-    return `Instructions:
-- List **every** social URL, phone, email, address from the knowledge base
-- HTML <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">platform name</a>
-- Do not invent contact details`;
-  }
+//   if (effectiveMode === "page_links") {
+//     return `Instructions:
+// - HTML list of page links from the knowledge base
+// - Brief intro (1-2 sentences max)`;
+//   }
 
-  return `Answer in 1-2 sentences as ${org} (first person, we/our). If the user accepted a prior offer ("yes", "tell me"), provide the information now. Never say "in the provided context" or similar — speak naturally as the brand.`;
+//   if (effectiveMode === "contact") {
+//     return `Instructions:
+// - List **every** social URL, phone, email, address from the knowledge base
+// - HTML <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">platform name</a>
+// - Do not invent contact details`;
+//   }
+
+  return `Answer in 3-4 sentences as ${org} (first person, we/our). If the user accepted a prior offer ("yes", "tell me"), provide the information now. Never say "in the provided context" or similar — speak naturally as the brand.`;
 }
 
 function appendReplyLanguage(systemPrompt, userLanguage) {
