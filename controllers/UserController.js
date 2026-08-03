@@ -28,6 +28,7 @@ const {
   clearAgentSessionCookies,
 } = require("../constants/authCookies");
 const UserSession = require("../models/userSession.js");
+const ContactUs = require("../models/ContactUs.js");
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
@@ -1723,6 +1724,116 @@ UserController.generateShortLivedToken = async (req, res) => {
       status_code: 500,
       status: false,
       message: "Failed to generate short-lived token",
+    });
+  }
+};
+
+UserController.contactUs = async (req, res) => {
+  try {
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+    const email =
+      typeof req.body.email === "string"
+        ? req.body.email.trim().toLowerCase()
+        : "";
+    const message =
+      typeof req.body.message === "string" ? req.body.message.trim() : "";
+    const phone =
+      typeof req.body.phone === "string" ? req.body.phone.trim() : "";
+    const service = req.body.services || "";
+    const website = req.body.website || "";
+    console.log("req.body is :", req.body);
+
+    if (!name || !email || !message || !service) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Name, email, and message are required",
+      });
+    }
+
+    if (name.length > 100) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Name must be at most 100 characters",
+      });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Please provide a valid email address",
+      });
+    }
+
+    if (message.length < 10) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Message must be at least 10 characters",
+      });
+    }
+
+    if (message.length > 1000) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Message must be at most 1000 characters",
+      });
+    }
+
+    if (phone) {
+      const phoneRegex = /^[\+]?[1-9][\d]{0,15}$/;
+      if (!phoneRegex.test(phone.replace(/[\s\-\(\)]/g, ""))) {
+        return res.status(400).json({
+          status_code: 400,
+          status: false,
+          message: "Please provide a valid phone number",
+        });
+      }
+    }
+
+    await ContactUs.create({
+      name,
+      email,
+      phone: phone || "",
+      message,
+      service,
+      website,
+    });
+
+    const supportEmail = process.env.SUPPORT_EMAIL;
+    const appName = process.env.APP_NAME || "Chataffy";
+    if (supportEmail) {
+      try {
+        const mailOptions = {
+          from: `${appName} <${process.env.SMTP_FROM}>`,
+          replyTo: email,
+          to: "mohammadasjad.deskmoz@gmail.com",
+          subject: "Contact Us",
+          text: `Name: ${name}\nEmail: ${email}\nPhone: ${phone || "N/A"}\nMessage: ${message}`,
+        };
+        await transporter.sendMail(mailOptions);
+      } catch (mailError) {
+        console.log("Error in sending contact us email:", mailError);
+        commonHelper.logErrorToFile(mailError);
+      }
+    }
+    console.log("Contact us email sent successfully");
+    return res.status(200).json({
+      status_code: 200,
+      status: true,
+      message: "Your message has been submitted successfully",
+    });
+  } catch (error) {
+    console.log("Error in contact us:", error);
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({
+      status_code: 500,
+      status: false,
+      message: "Failed to contact us",
     });
   }
 };

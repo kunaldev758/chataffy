@@ -106,6 +106,7 @@ router.post('/agents/logout', agentController.agentLogout);
 
 // validate token route (public)
 router.post('/validate-token', UserController.validateToken);
+router.post('/contact', UserController.contactUs);
 
 // Public widget routes (for embedded widgets)
 router.get('/widget/embed', WidgetController.resolveEmbedByOrigin);
