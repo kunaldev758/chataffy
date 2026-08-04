@@ -5,6 +5,7 @@ const { upsertPageToQdrant } = require("./upsertPageToQdrant");
 const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
 const {
   structureAwareParentChildChunk,
+  structureAwareListingChunk,
   DEFAULT_PARENT_CHARS,
   DEFAULT_CHILD_CHARS,
 } = require("./chunking");
@@ -243,34 +244,64 @@ async function processPageDocuments(
       }
 
       // --- Parent-child chunking per section (embed children, store parent on payload) ---
+      // Listing sections: 1 summary + adaptive intact product (or batch) children
       const allChunks = [];
       for (const section of keptSections) {
-        const parts = USE_PARENT_CHILD
-          ? await structureAwareParentChildChunk(section.content, {
-              parentSize,
-              childSize,
-              entity_type: section.entity_type,
-              pageType: section.pageType,
-            })
-          : await (async () => {
-              const { structureAwareChunk } = require("./chunking");
-              const legacy = await structureAwareChunk(section.content, {
-                chunkSize: parentSize,
-                chunkOverlap: 200,
-                entity_type: section.entity_type,
-                pageType: section.pageType,
-              });
-              return legacy.map((p, i) => ({
-                ...p,
-                parent_text: p.text,
-                parent_id: null,
-                parent_index: 0,
-                child_index: i,
-                chunk_role: "child",
-              }));
-            })();
+        const isListing =
+          String(section.entity_type || "").toLowerCase() === "listing";
+        const listingProducts =
+          Array.isArray(section.attributes?.products) &&
+          section.attributes.products.length > 0
+            ? section.attributes.products
+            : null;
+
+        let parts;
+        if (isListing && listingProducts) {
+          parts = await structureAwareListingChunk({
+            products: listingProducts,
+            entity_name: section.entity_name,
+            pageUrl: url,
+            description: meta.metaDescription || "",
+            content: section.content,
+            pageType: section.pageType,
+            parentSize,
+            childSize,
+          });
+        } else if (USE_PARENT_CHILD) {
+          parts = await structureAwareParentChildChunk(section.content, {
+            parentSize,
+            childSize,
+            entity_type: section.entity_type,
+            pageType: section.pageType,
+          });
+        } else {
+          const { structureAwareChunk } = require("./chunking");
+          const legacy = await structureAwareChunk(section.content, {
+            chunkSize: parentSize,
+            chunkOverlap: 200,
+            entity_type: section.entity_type,
+            pageType: section.pageType,
+          });
+          parts = legacy.map((p, i) => ({
+            ...p,
+            parent_text: p.text,
+            parent_id: null,
+            parent_index: 0,
+            child_index: i,
+            chunk_role: "child",
+          }));
+        }
 
         for (const part of parts) {
+          // Listing product children carry slim attributes_overlay (this batch only);
+          // summary keeps full products[]. Base section attrs merge with overlay.
+          const attributes = part.attributes_overlay
+            ? {
+                ...section.attributes,
+                ...part.attributes_overlay,
+              }
+            : section.attributes;
+
           allChunks.push({
             text: part.text,
             parent_text: part.parent_text,
@@ -283,7 +314,7 @@ async function processPageDocuments(
             entity_type: section.entity_type,
             entity_name: section.entity_name,
             product_id: section.product_id || null,
-            attributes: section.attributes,
+            attributes,
             search_terms: section.search_terms,
             classification_confidence: section.classification_confidence,
             classification_reason: section.classification_reason,

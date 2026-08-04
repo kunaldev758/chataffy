@@ -39,6 +39,7 @@ const { extractFaqContent } = require("./extractors/faq");
 const {
   structureAwareChunk,
   structureAwareParentChildChunk,
+  structureAwareListingChunk,
   splitByHeadings,
   DEFAULT_CHUNK_CHARS,
   DEFAULT_OVERLAP_CHARS,
@@ -91,6 +92,7 @@ module.exports = {
   resolveProductId,
   structureAwareChunk,
   structureAwareParentChildChunk,
+  structureAwareListingChunk,
   splitByHeadings,
   DEFAULT_CHUNK_CHARS,
   DEFAULT_OVERLAP_CHARS,

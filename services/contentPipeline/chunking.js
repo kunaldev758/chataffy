@@ -1,5 +1,12 @@
 const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter");
 const { v4: uuidv4 } = require("uuid");
+const {
+  productToMarkdownBlock,
+  buildListingHeader,
+  buildListingIndex,
+  resolveListingBatchSize,
+  slimProduct,
+} = require("./extractors/listing");
 
 const DEFAULT_CHUNK_CHARS = 2000; // ~500 tokens
 const DEFAULT_OVERLAP_CHARS = 400;
@@ -352,9 +359,125 @@ async function structureAwareParentChildChunk(markdown, options = {}) {
   return children;
 }
 
+/**
+ * Listing parent-child chunks for Qdrant:
+ * - 1 summary/index child (full product index; full products[] on attributes)
+ * - adaptive batches of intact product blocks (1 per child when N is normal)
+ *
+ * Never drops products. Each product block stays whole (no mid-product splits).
+ *
+ * @param {object} options
+ * @param {Array} options.products - structured product rows from listing extract
+ * @param {string} [options.entity_name]
+ * @param {string} [options.pageUrl]
+ * @param {string} [options.description]
+ * @param {string} [options.content] - fallback if products missing
+ * @returns {Promise<Array>} same shape as structureAwareParentChildChunk + chunk_role + attributes overlay
+ */
+async function structureAwareListingChunk(options = {}) {
+  let products = Array.isArray(options.products) ? options.products : [];
+  const entityName = options.entity_name || options.title || "Product listing";
+  const pageUrl = options.pageUrl || options.url || "";
+  const description = options.description || options.metaDescription || "";
+
+  // Fallback: if structured products missing, use generic parent-child on markdown
+  if (!products.length) {
+    const md = String(options.content || options.markdown || "").trim();
+    if (!md) return [];
+    return structureAwareParentChildChunk(md, {
+      entity_type: "listing",
+      pageType: options.pageType || "product",
+      parentSize: options.parentSize,
+      childSize: options.childSize,
+    });
+  }
+
+  const slimAll = products.map(slimProduct).filter(Boolean);
+  const header = buildListingHeader({
+    title: entityName,
+    pageUrl,
+    products: slimAll,
+    description,
+  });
+  const index = buildListingIndex(slimAll);
+  const summaryText = stripExcessNewlines(`${header}\n\n${index}`);
+  const summaryParentId = uuidv4();
+
+  const children = [
+    {
+      text: summaryText,
+      parent_text: summaryText,
+      parent_id: summaryParentId,
+      parent_index: 0,
+      child_index: 0,
+      heading_path: "Index",
+      chunk_role: "listing_summary",
+      attributes_overlay: {
+        product_count: slimAll.length,
+        products: slimAll,
+        product_urls: slimAll.map((p) => p.url).filter(Boolean),
+        listing_chunk: "summary",
+      },
+    },
+  ];
+
+  const batchSize = resolveListingBatchSize(slimAll.length);
+  const listingCtx = [
+    `Listing: ${entityName}`,
+    pageUrl ? `URL: ${pageUrl}` : null,
+    `Products on this page: ${slimAll.length}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  let globalChildIndex = 1;
+  let parentIndex = 1;
+
+  for (let i = 0; i < slimAll.length; i += batchSize) {
+    const batch = slimAll.slice(i, i + batchSize);
+    const blocks = batch.map((p) => productToMarkdownBlock(p));
+    const body = blocks.join("\n\n");
+    const packText = stripExcessNewlines(`${listingCtx}\n\n${body}`);
+    const parentId = uuidv4();
+
+    const heading =
+      batch.length === 1
+        ? batch[0].name || "Product"
+        : `Products ${i + 1}-${i + batch.length}`;
+
+    children.push({
+      text: packText,
+      parent_text: packText,
+      parent_id: parentId,
+      parent_index: parentIndex++,
+      child_index: globalChildIndex++,
+      heading_path: heading,
+      chunk_role: batchSize === 1 ? "listing_product" : "listing_product_batch",
+      attributes_overlay: {
+        product_count: slimAll.length,
+        // Slim payload: only products in this child (full list lives on summary)
+        products: batch,
+        product_urls: batch.map((p) => p.url).filter(Boolean),
+        listing_chunk: batchSize === 1 ? "product" : "product_batch",
+        listing_batch_size: batchSize,
+        listing_batch_index: Math.floor(i / batchSize),
+      },
+    });
+  }
+
+  return children;
+}
+
+function stripExcessNewlines(s) {
+  return String(s || "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 module.exports = {
   structureAwareChunk,
   structureAwareParentChildChunk,
+  structureAwareListingChunk,
   splitByHeadings,
   protectCodeBlocks,
   protectQaPairs,

@@ -186,7 +186,9 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
 // - Do not invent contact details`;
 //   }
 
-  return `Answer in 3-4 sentences as ${org} (first person, we/our). If the user accepted a prior offer ("yes", "tell me"), provide the information now. Never say "in the provided context" or similar — speak naturally as the brand.`;
+  // return `Answer in 3-4 sentences as ${org} (first person, we/our). If the user accepted a prior offer ("yes", "tell me"), always try to inlcude product and its link and pricing if available provide the information now. Never say "in the provided context" or similar — speak naturally as the brand.`;
+
+  return `Answer in 3–4 sentences as ${org} (first person, using "we" and "our"). If the user has accepted or shown interest in a previous offer (e.g., "yes" or "tell me"), include the product name, its link, and pricing if available. Never say "in the provided context" or similar phrases—respond naturally as the brand.`;
 }
 
 function appendReplyLanguage(systemPrompt, userLanguage) {
