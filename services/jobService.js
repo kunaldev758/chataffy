@@ -1821,10 +1821,60 @@ new Worker(
   { connection: redisConfig, concurrency: 2 },
 );
 
+const contactUsEmailQueue = new Queue("contactUsEmailQueue", {
+  connection: redisConfig,
+  defaultJobOptions: {
+    removeOnComplete: 20,
+    removeOnFail: 50,
+    attempts: 3,
+    backoff: {
+      type: "exponential",
+      delay: 2000,
+    },
+  },
+});
+
+new Worker(
+  "contactUsEmailQueue",
+  async (job) => {
+    const { name, email, phone, message, supportEmail, service, website } = job.data || {};
+    try {
+      if (!name || !email || !message || !supportEmail || !service || !website) {
+        console.warn("[contactUsEmailQueue] Missing email payload, skipping job");
+        return;
+      }
+
+      const { sendContactUsEmail } = require("./emailService");
+      const emailSent = await sendContactUsEmail({
+        name,
+        email,
+        phone,
+        message,
+        supportEmail,
+        service,
+        website,
+      });
+
+      if (!emailSent) {
+        throw new Error("Failed to send contact us email");
+      }
+
+      console.log(
+        `[contactUsEmailQueue] Contact email sent for ${email} to ${supportEmail}`,
+      );
+    } catch (error) {
+      console.error("[contactUsEmailQueue] Job failed:", error);
+      throw error;
+    }
+  },
+  { connection: redisConfig, concurrency: 2 },
+);
+
 module.exports = {
   planUpgradeQueue,
   urlProcessingQueue,
   deleteTrainingDataQueue,
   retrainTrainingDataQueue,
   transcriptEmailQueue,
+  contactUsEmailQueue,
 };

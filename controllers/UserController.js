@@ -29,6 +29,7 @@ const {
 } = require("../constants/authCookies");
 const UserSession = require("../models/userSession.js");
 const ContactUs = require("../models/ContactUs.js");
+const { contactUsEmailQueue } = require("../services/jobService");
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
@@ -36,8 +37,8 @@ const transporter = nodemailer.createTransport(
     port: process.env.SMTP_PORT, // Port for the SMTP server (587 for TLS, 465 for SSL)
     secure: false, // Set to true if using SSL
     auth: {
-      user: process.env.EMAIL_USERNAME,
-      pass: process.env.EMAIL_PASSWORD,
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
     },
   }),
 );
@@ -1740,16 +1741,33 @@ UserController.contactUs = async (req, res) => {
     const phone =
       typeof req.body.phone === "string" ? req.body.phone.trim() : "";
     const service = req.body.services || "";
-    const website = req.body.website || "";
+    let website = req.body.website || "";
     console.log("req.body is :", req.body);
 
-    if (!name || !email || !message || !service) {
+    if (!name || !email || !message || !service || !website) {
       return res.status(400).json({
         status_code: 400,
         status: false,
-        message: "Name, email, and message are required",
+        message: "Name, email, message, service, and website are required",
       });
     }
+
+    if (website) {
+      const domainRegex = /^(https?:\/\/)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(\/.*)?$/;
+    
+      if (!domainRegex.test(website)) {
+        return res.status(400).json({
+          status_code: 400,
+          status: false,
+          message: "Invalid website URL",
+        });
+      }
+    
+      if (!/^https?:\/\//i.test(website)) {
+        website = `https://${website}`;
+      }
+    }
+    
 
     if (name.length > 100) {
       return res.status(400).json({
@@ -1804,24 +1822,24 @@ UserController.contactUs = async (req, res) => {
       website,
     });
 
-    const supportEmail = process.env.SUPPORT_EMAIL;
-    const appName = process.env.APP_NAME || "Chataffy";
+    const supportEmail = process.env.SUPPORT_EMAIL || "info@chataffy.com";
     if (supportEmail) {
       try {
-        const mailOptions = {
-          from: `${appName} <${process.env.SMTP_FROM}>`,
-          replyTo: email,
-          to: "mohammadasjad.deskmoz@gmail.com",
-          subject: "Contact Us",
-          text: `Name: ${name}\nEmail: ${email}\nPhone: ${phone || "N/A"}\nMessage: ${message}`,
-        };
-        await transporter.sendMail(mailOptions);
+        await contactUsEmailQueue.add("sendContactUsEmail", {
+          name,
+          email,
+          phone: phone || "",
+          message,
+          supportEmail,
+          service,
+          website,
+        });
+        console.log("Contact us email queued successfully");
       } catch (mailError) {
-        console.log("Error in sending contact us email:", mailError);
+        console.log("Error queueing contact us email:", mailError);
         commonHelper.logErrorToFile(mailError);
       }
     }
-    console.log("Contact us email sent successfully");
     return res.status(200).json({
       status_code: 200,
       status: true,

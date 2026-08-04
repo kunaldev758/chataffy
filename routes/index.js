@@ -1,7 +1,20 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const multer = require('multer');
 const path = require('path');
+
+const contactUsLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 contact submissions per IP per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    status_code: 429,
+    status: false,
+    message: 'Too many contact requests. Please try again later.',
+  },
+});
 
 // Enhanced multer configuration with file validation
 const storage = multer.diskStorage({
@@ -106,7 +119,7 @@ router.post('/agents/logout', agentController.agentLogout);
 
 // validate token route (public)
 router.post('/validate-token', UserController.validateToken);
-router.post('/contact', UserController.contactUs);
+router.post('/contact', contactUsLimiter, UserController.contactUs);
 
 // Public widget routes (for embedded widgets)
 router.get('/widget/embed', WidgetController.resolveEmbedByOrigin);
