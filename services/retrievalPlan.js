@@ -127,7 +127,8 @@ function resolveContextMode(subIntent) {
   if (subIntent === "IN_PAGE_LIST") return "list";
   if (subIntent === "PAGE_LINKS") return "links";
   if (subIntent === "CONTACT_INFO") return "contact";
-  if (subIntent === "COMPARE") return "page_merge";
+  // COMPARE uses labeled multi-entity context (not whole-page merge).
+  if (subIntent === "COMPARE") return "compare";
   // Industry default: top ranked chunks, not whole-page merge
   return "parent_chunks";
 }
@@ -140,6 +141,9 @@ function resolveTokenBudget(contextMode) {
       return Number(process.env.RAG_MAX_CONTEXT_CHARS_LINKS) || 3000;
     case "page_merge":
       return Number(process.env.RAG_MAX_CONTEXT_CHARS) || 4000;
+    // Comparison / multi-entity needs a larger window (2–3 products × topK chunks).
+    case "compare":
+      return Number(process.env.RAG_MAX_CONTEXT_CHARS_COMPARE) || 8000;
     case "contact":
       return Number(process.env.RAG_MAX_CONTEXT_CHARS_BRIEF) || 4000;
     default:
@@ -174,6 +178,15 @@ function resolveTopK(subIntent, requestedTopK = 10) {
       topKSparse: 60,
       finalTopK: Math.max(12, Math.min(18, requestedTopK * 2)),
       semanticTopK: 60,
+    };
+  }
+  // Compare: deeper pool per entity search; final window holds interleaved tops.
+  if (subIntent === "COMPARE") {
+    return {
+      topKDense: 40,
+      topKSparse: 40,
+      finalTopK: Math.max(12, Math.min(18, Number(process.env.RAG_COMPARE_MAX_MATCHES) || 16)),
+      semanticTopK: 40,
     };
   }
   return {

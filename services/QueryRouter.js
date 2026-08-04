@@ -20,6 +20,10 @@ const {
 const { normalizeQueryText } = require("../utils/queryNormalization");
 const { isContactIntentQuestion } = require("../utils/contactIntentDetection");
 const {
+  detectMultiEntityFromRules,
+} = require("./retrieval/entityResolution");
+const { normalizeMultiEntityMode } = require("./retrieval/multiEntityModes");
+const {
   normalizeGreetingInput,
   isGibberishOrAccidentalMessage,
   detectScriptLanguage,
@@ -434,11 +438,20 @@ function buildRouteResult({
   rewrittenQuery = null,
   lexicalTerms = [],
   constraints = [],
+  multiEntityMode = null,
+  rawEntities = [],
   followUp = false,
   needsRewrite = false,
   rewriteReason = null,
   source = "rules",
 }) {
+  const normalizedRaw = Array.isArray(rawEntities)
+    ? rawEntities
+        .map((e) => String(e || "").trim())
+        .filter((e) => e.length > 1)
+        .slice(0, 5)
+    : [];
+
   return {
     route,
     subIntent,
@@ -447,6 +460,8 @@ function buildRouteResult({
     rewrittenQuery,
     lexicalTerms: Array.isArray(lexicalTerms) ? lexicalTerms.slice(0, 8) : [],
     constraints: normalizeConstraints(constraints),
+    multiEntityMode: normalizeMultiEntityMode(multiEntityMode),
+    rawEntities: normalizedRaw,
     followUp,
     needsRewrite,
     rewriteReason,
@@ -528,6 +543,24 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
         userLanguage,
         confidence: 0.88,
         source: "rules_structural",
+      }),
+    };
+  }
+
+  // Multi-entity modes (compare / multi-ask / choose-from-list) — names may be empty.
+  const multiFromRules = detectMultiEntityFromRules(normalizedQuestion);
+  if (multiFromRules.multiEntityMode) {
+    return {
+      confident: false,
+      result: buildRouteResult({
+        route: ROUTES.SEMANTIC_RAG,
+        userLanguage,
+        confidence: 0.85,
+        multiEntityMode: multiFromRules.multiEntityMode,
+        rawEntities: multiFromRules.rawEntities,
+        followUp:
+          multiFromRules.multiEntityMode === "choose_from_list",
+        source: "rules_multi_entity",
       }),
     };
   }
@@ -655,6 +688,16 @@ function parseRouterJson(content, question = "") {
           .slice(0, 8)
       : [];
 
+    const multiEntityMode = normalizeMultiEntityMode(parsed.multiEntityMode);
+    const rawEntities = Array.isArray(parsed.rawEntities)
+      ? parsed.rawEntities
+          .map((e) => String(e || "").trim())
+          .filter((e) => e.length > 1)
+          .slice(0, 5)
+      : [];
+
+    const ruleMulti = detectMultiEntityFromRules(question);
+
     return buildRouteResult({
       route: finalRoute,
       subIntent,
@@ -663,6 +706,9 @@ function parseRouterJson(content, question = "") {
       rewrittenQuery,
       lexicalTerms,
       constraints: parsed.constraints,
+      multiEntityMode: multiEntityMode || ruleMulti.multiEntityMode,
+      rawEntities:
+        rawEntities.length >= 2 ? rawEntities : ruleMulti.rawEntities,
       followUp,
       needsRewrite,
       rewriteReason,
@@ -761,6 +807,23 @@ Examples:
 - "16mm super natural lashes price" → [{"field":"size","value":"16mm","operator":"eq","confidence":0.9,"source":"user"},{"field":"collection","value":"super natural","operator":"eq","confidence":0.8,"source":"user"}]
 - "contact information" → []
 
+Also classify multi-entity intent when the user compares or asks about multiple products in ONE message, or asks which option to choose after a list:
+
+- multiEntityMode: null | "compare" | "multi_ask" | "choose_from_list"
+  - "compare": explicit comparison (vs, compare, difference between, which is better)
+  - "multi_ask": asks about two or more products together without explicit comparison wording ("tell me about A and B", "price of X and Y")
+  - "choose_from_list": recommendation or selection after a previously presented list ("which one should I choose", "help me pick", "which is best for me")
+  - null: normal single-entity request
+
+- rawEntities:
+  - MUST be an array of the relevant product/entity names whenever multiEntityMode is NOT null.
+  - First extract entity names from the current user message.
+  - If fewer than the required entities are present, resolve them from the provided chat history and conversation state.
+  - For "compare" and "multi_ask", return all referenced entities (normally 2-3).
+  - For "choose_from_list", ALWAYS return the candidate entities from the immediately preceding assistant response or conversation state. Never return an empty array.
+  - Never invent entity names. Only use entities explicitly mentioned in the current message or present in the supplied conversation history/conversation state.
+  - If no valid entities can be found in either the message or history, set multiEntityMode to null instead of returning an empty rawEntities array.
+
 Respond with JSON only:
 {
   "route": "SEMANTIC_RAG",
@@ -770,11 +833,16 @@ Respond with JSON only:
   "rewrittenQuery": null,
   "lexicalTerms": [],
   "constraints": [],
+  "multiEntityMode": null,
+  "rawEntities": [],
   "followUp": false,
   "needsRewrite": false,
   "rewriteReason": "NONE",
   "isTrulyOffTopic": false
 }`;
+
+
+// - rawEntities: array of 2-3 product/entity name strings extracted from THIS message only. Empty array when names are not in the message (e.g. choose_from_list follow-up). Do NOT invent product names.
 
   const userContentParts = [`Website language: ${websiteLanguage}`];
 

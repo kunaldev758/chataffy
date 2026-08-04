@@ -151,6 +151,10 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
   const org = organisation || "the company";
   const countHint =
     requestedCount != null ? String(requestedCount) : "all found";
+  
+
+    // effectiveMode === "" ? "compare":"brief";
+    console.log("effective mode check in buildAnswerInstructions: ", effectiveMode);
 
   if (effectiveMode === "list") {
     let instructions = `Instructions:
@@ -184,7 +188,35 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
 - Do not invent contact details`;
   }
 
-  return `Answer in 1-2 sentences as ${org} (first person, we/our). If the user accepted a prior offer ("yes", "tell me"), provide the information now. Never say "in the provided context" or similar — speak naturally as the brand.`;
+  // Comparison / multi-entity: allow a longer structured answer covering each side.
+  if (effectiveMode === "compare") {
+    const entityHint =
+      Array.isArray(options.compareEntities) && options.compareEntities.length
+        ? options.compareEntities.join(" vs ")
+        : "each mentioned product";
+    return `Instructions:
+- The user asked about multiple products/entities (${entityHint}). Write as ${org} in first person (we/our).
+- Cover EACH entity that appears in the knowledge base: name, key features, price (if shown), sizes, and a link when URL is available.
+- If this is a comparison, highlight clear differences side by side (HTML <ul>/<li> or short paragraphs per entity).
+- Do not invent products, prices, or URLs that are missing from the knowledge base.
+- Never say "in the provided context" — speak naturally as the brand.
+- You may use more than 2 sentences when comparing multiple items.`;
+  }
+
+  if (effectiveMode === "recommend" || options.multiEntityMode === "choose_from_list") {
+    const entityHint =
+      Array.isArray(options.compareEntities) && options.compareEntities.length
+        ? options.compareEntities.join(", ")
+        : "the options from the prior list";
+    return `Instructions:
+- The user wants help choosing among: ${entityHint}. Write as ${org} in first person (we/our).
+- Use ONLY the knowledge-base sections below. Explain trade-offs (price, size, features, use case) for each option.
+- Give a practical recommendation when possible; if budget/use case is unknown, state assumptions briefly or ask ONE short clarifying question.
+- HTML <ul>/<li> or short paragraphs. Include links when URLs are in the knowledge base.
+- Do not invent products or prices.`;
+  }
+
+  return `Answer in 3-4 sentences as ${org} (first person, we/our). If the user accepted a prior offer ("yes", "tell me"), provide the information now. Never say "in the provided context" or similar — speak naturally as the brand.`;
 }
 
 function appendReplyLanguage(systemPrompt, userLanguage) {

@@ -3,6 +3,9 @@ const { extractSizeTokens } = require("../utils/queryNormalization");
 const {
   extractCollectionHints,
 } = require("../utils/queryContextExpansion");
+const {
+  parseProductListFromAssistantText,
+} = require("./retrieval/entityResolution");
 
 const NON_RAG_CLEAR_ROUTES = new Set(["GREETING", "LIVE_AGENT", "ACCIDENTAL"]);
 
@@ -19,6 +22,8 @@ function createEmptyRagState() {
       collection: null,
       productTerms: [],
     },
+    /** Product names from the last catalog/list assistant reply (choose-from-list). */
+    listedProducts: [],
     lastStandaloneQuery: null,
     awaiting: null,
     turn: 0,
@@ -49,6 +54,9 @@ function normalizeRagState(raw) {
         ? entities.productTerms.filter(Boolean)
         : [],
     },
+    listedProducts: Array.isArray(raw.listedProducts)
+      ? raw.listedProducts.filter(Boolean)
+      : [],
     lastStandaloneQuery: raw.lastStandaloneQuery || null,
     awaiting: raw.awaiting || null,
     turn: typeof raw.turn === "number" && raw.turn >= 0 ? raw.turn : 0,
@@ -71,6 +79,11 @@ function formatStateForRouter(state) {
   if (entities.sizes?.length) parts.push(`sizes: ${entities.sizes.join(", ")}`);
   if (entities.productTerms?.length) {
     parts.push(`terms: ${entities.productTerms.join(", ")}`);
+  }
+  if (normalized.listedProducts?.length >= 2) {
+    parts.push(
+      `listed products: ${normalized.listedProducts.slice(0, 5).join("; ")}`,
+    );
   }
   if (normalized.lastIntent) parts.push(`last intent: ${normalized.lastIntent}`);
   if (normalized.awaiting) parts.push(`awaiting: ${normalized.awaiting}`);
@@ -166,6 +179,7 @@ function buildUpdatedRagState({
   matches = [],
   clearEntities = false,
   awaiting = null,
+  assistantAnswer = null,
 }) {
   const current = normalizeRagState(currentState);
   const standalone =
@@ -183,6 +197,15 @@ function buildUpdatedRagState({
     ? createEmptyRagState().entities
     : extractEntitiesFromMatches(matches, queryAttributes);
 
+  // Persist product names from list-style assistant answers for choose-from-list turns.
+  let listedProducts = current.listedProducts || [];
+  if (assistantAnswer) {
+    const parsedList = parseProductListFromAssistantText(assistantAnswer);
+    if (parsedList.length >= 2) {
+      listedProducts = parsedList;
+    }
+  }
+
   const nextState = {
     lastIntent: routing.route || current.lastIntent,
     topic: inferTopic({
@@ -191,6 +214,7 @@ function buildUpdatedRagState({
       routing,
     }),
     entities,
+    listedProducts,
     lastStandaloneQuery: standalone || current.lastStandaloneQuery,
     awaiting: awaiting || null,
     turn: current.turn + 1,
