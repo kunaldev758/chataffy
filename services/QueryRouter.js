@@ -21,6 +21,7 @@ const { normalizeQueryText } = require("../utils/queryNormalization");
 const { isContactIntentQuestion } = require("../utils/contactIntentDetection");
 const {
   detectMultiEntityFromRules,
+  parseProductListFromAssistantText,
 } = require("./retrieval/entityResolution");
 const { normalizeMultiEntityMode } = require("./retrieval/multiEntityModes");
 const {
@@ -119,8 +120,12 @@ const LIVE_AGENT_PHRASES = [
   "transfer to person",
 ];
 
+/**
+ * Short acceptance of a soft offer / prior recommendation.
+ * Covers pure tokens ("ok", "yes") and incomplete accepts ("yeah i want", "ok go for it").
+ */
 const FOLLOW_UP_ACCEPTANCE =
-  /^(okay\s+)?(tell\s+me|yes|yeah|yep|yup|sure|go\s+ahead|please\s+do|do\s+it|ok|okay|continue|proceed|please|alright|all\s+right)[\s!.?]*$/i;
+  /^(?:okay\s+|ok\s+)?(?:tell\s+me|yes|yeah|yep|yup|sure|go\s+ahead|go\s+for\s+it|please\s+do|do\s+it|ok|okay|continue|proceed|please|alright|all\s+right)(?:[\s,]+(?:i\s+want(?:\s+it)?|i\s+do|please|go\s+ahead|go\s+for\s+it|do\s+it|do\s+that|sounds\s+good|that\s+works|let'?s\s+do\s+it))?[\s!.?]*$/i;
 
 /** Pure thanks / closure — stay on ACKNOWLEDGEMENT even after a soft offer. */
 const PURE_THANKS =
@@ -304,7 +309,7 @@ function detectSoftOffer(assistantMessage) {
 
 function isShortAffirmative(question) {
   const q = (question || "").trim();
-  if (!q || q.length > 40) return false;
+  if (!q || q.length > 48) return false;
   if (PURE_THANKS.test(q)) return false;
   return FOLLOW_UP_ACCEPTANCE.test(q);
 }
@@ -313,17 +318,109 @@ function isPureThanks(question) {
   return PURE_THANKS.test((question || "").trim());
 }
 
+/**
+ * ragState-only rewrite fallback (prior standalone query / topic / product).
+ */
 function rewriteFromConversationState(conversationState) {
   const state = normalizeRagState(conversationState);
   return (
     (state.lastStandaloneQuery && state.lastStandaloneQuery.trim()) ||
     (state.topic && state.topic.trim()) ||
+    (state.entities?.product && String(state.entities.product).trim()) ||
+    (Array.isArray(state.listedProducts) &&
+      state.listedProducts[0] &&
+      String(state.listedProducts[0]).trim()) ||
     null
   );
 }
 
 /**
- * Force SEMANTIC_RAG + rewrite when the user accepts a soft offer / awaiting follow-up.
+ * Last non-trivial user turn (skips greetings / thanks / short accepts).
+ */
+function getLastMeaningfulUserQuery(chatMessages = []) {
+  const messages = [...(chatMessages || [])].reverse();
+  for (const msg of messages) {
+    const sender = msg.sender_type || msg.role || "";
+    if (sender === "ai" || sender === "bot" || sender === "assistant") {
+      continue;
+    }
+    const text = String(msg.message || msg.content || "").trim();
+    if (!text || text.length < 3) continue;
+    if (isShortAffirmative(text) || isPureThanks(text) || isPureGreeting(text)) {
+      continue;
+    }
+    return text;
+  }
+  return null;
+}
+
+/**
+ * Product / recommendation named in the last assistant reply (intent-layer history).
+ */
+function extractRecommendedProductFromAssistant(assistantMessage) {
+  if (!assistantMessage) return null;
+
+  const fromList = parseProductListFromAssistantText(assistantMessage);
+  if (fromList.length >= 1) return fromList[0];
+
+  const plain = stripHtmlForOfferDetection(assistantMessage);
+  if (!plain) return null;
+
+  const patterns = [
+    /(?:we\s+)?(?:suggest|recommend|recommending)\s+(?:our\s+|the\s+)?([^.!?]{4,120})/i,
+    /(?:go\s+with|choose)\s+(?:our\s+|the\s+)?([^.!?]{4,120})/i,
+  ];
+
+  for (const re of patterns) {
+    const match = plain.match(re);
+    if (!match?.[1]) continue;
+    let name = match[1]
+      .replace(/\s+(?:this|it|at)\b[\s\S]*$/i, "")
+      .replace(/[,;:]+$/g, "")
+      .trim();
+    if (name.length >= 3 && name.length <= 120) return name;
+  }
+
+  return null;
+}
+
+/**
+ * Intent-layer rewrite for follow-up acceptance using conversation state + chat history.
+ * Prefers a standalone product/topic over the user's fragment ("yeah i want").
+ */
+function rewriteFollowUpFromIntentContext({
+  conversationState = null,
+  chatMessages = [],
+  llmRewrittenQuery = null,
+} = {}) {
+  const llm =
+    typeof llmRewrittenQuery === "string" ? llmRewrittenQuery.trim() : "";
+  // Trust LLM rewrite only when it is already a standalone search query.
+  if (
+    llm &&
+    llm.length > 8 &&
+    !isShortAffirmative(llm) &&
+    !isPureThanks(llm) &&
+    !FOLLOW_UP_ACCEPTANCE.test(llm)
+  ) {
+    return llm;
+  }
+
+  const fromState = rewriteFromConversationState(conversationState);
+  const lastAssistant = getLastAssistantMessage(chatMessages);
+  const productFromHistory =
+    extractRecommendedProductFromAssistant(lastAssistant);
+  const lastUserQuery = getLastMeaningfulUserQuery(chatMessages);
+
+  // After a concrete recommendation, product name is the best retrieval query.
+  if (productFromHistory) return productFromHistory;
+  if (fromState) return fromState;
+  if (lastUserQuery) return lastUserQuery;
+  return llm || null;
+}
+
+/**
+ * Force SEMANTIC_RAG + intent-layer rewrite when the user accepts a soft offer / awaiting follow-up.
  */
 function applyFollowUpAcceptanceOverride(
   result,
@@ -337,16 +434,28 @@ function applyFollowUpAcceptanceOverride(
   const lastOffer = detectSoftOffer(getLastAssistantMessage(chatMessages));
   if (!awaiting && !lastOffer) return result;
 
-  const fallbackRewrite = rewriteFromConversationState(conversationState);
-  const rewrittenQuery = result?.rewrittenQuery || fallbackRewrite;
+  const rewrittenQuery = rewriteFollowUpFromIntentContext({
+    conversationState,
+    chatMessages,
+    llmRewrittenQuery: result?.rewrittenQuery,
+  });
+
+  if (rewrittenQuery) {
+    console.log(
+      `[QueryRouter] Follow-up rewrite (intent): "${question}" → "${rewrittenQuery}"`,
+    );
+  }
 
   return buildRouteResult({
     route: ROUTES.SEMANTIC_RAG,
-    subIntent: null,
+    subIntent: result?.subIntent || null,
     userLanguage: result?.userLanguage || "en",
     confidence: Math.max(result?.confidence || 0, 0.92),
     rewrittenQuery,
+    lexicalTerms: result?.lexicalTerms,
     constraints: result?.constraints,
+    multiEntityMode: result?.multiEntityMode,
+    rawEntities: result?.rawEntities,
     followUp: true,
     needsRewrite: Boolean(rewrittenQuery),
     rewriteReason: rewrittenQuery
@@ -517,7 +626,15 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
       conversationState
     )
   ) {
-    const rewrittenQuery = rewriteFromConversationState(conversationState);
+    const rewrittenQuery = rewriteFollowUpFromIntentContext({
+      conversationState,
+      chatMessages,
+    });
+    if (rewrittenQuery) {
+      console.log(
+        `[QueryRouter] Follow-up rewrite (rules): "${normalizedQuestion}" → "${rewrittenQuery}"`,
+      );
+    }
     return {
       confident: true,
       result: buildRouteResult({
@@ -824,6 +941,14 @@ Also classify multi-entity intent when the user compares or asks about multiple 
   - Never invent entity names. Only use entities explicitly mentioned in the current message or present in the supplied conversation history/conversation state.
   - If no valid entities can be found in either the message or history, set multiEntityMode to null instead of returning an empty rawEntities array.
 
+  IF current message does not clearly name the active entity
+AND we can resolve from the chat history
+THEN
+  rewrittenQuery = entity + user intent (strip pronouns)
+  needsRewrite = true
+  followUp = true
+  // keep SEMANTIC_RAG (or existing RAG route); never ACK for real asks
+
 Respond with JSON only:
 {
   "route": "SEMANTIC_RAG",
@@ -977,10 +1102,29 @@ async function routeQuery(question, options = {}) {
     routerModel,
   });
 
-  return applyFollowUpAcceptanceOverride(llmResult, question, {
+  let result = applyFollowUpAcceptanceOverride(llmResult, question, {
     chatMessages,
     conversationState,
   });
+
+  // Nano often labels incomplete accepts as ACK with no rewrite; force RAG + history rewrite.
+  if (
+    result.route === ROUTES.ACKNOWLEDGEMENT &&
+    !isPureThanks(question) &&
+    detectFollowUpAcceptance(question, chatMessages, conversationState)
+  ) {
+    result = applyFollowUpAcceptanceOverride(
+      {
+        ...result,
+        route: ROUTES.SEMANTIC_RAG,
+        source: result.source || "llm_router",
+      },
+      question,
+      { chatMessages, conversationState },
+    );
+  }
+
+  return result;
 }
 
 function isRagRoute(route) {
@@ -1001,4 +1145,6 @@ module.exports = {
   isShortAffirmative,
   detectFollowUpAcceptance,
   applyFollowUpAcceptanceOverride,
+  rewriteFollowUpFromIntentContext,
+  rewriteFromConversationState,
 };
