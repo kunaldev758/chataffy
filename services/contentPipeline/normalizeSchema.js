@@ -30,6 +30,7 @@ function normalizeToCommonSchema({
   classification_reason = "phase3",
   quality_score = null,
   type = 0,
+  product_id = null,
 }) {
   const text = String(content || "").trim();
   const content_hash = text ? hashContent(text) : null;
@@ -41,6 +42,7 @@ function normalizeToCommonSchema({
     pageType,
     entity_type,
     entity_name,
+    product_id: product_id ?? null,
     text,
     heading_path: "",
     title: title || url,
@@ -89,6 +91,16 @@ function normalizeChunkList(chunks) {
           parent_index: c.parent_index,
           child_index: c.child_index,
           chunk_role: c.chunk_role,
+          // test-backend style contextual prefix for dense/sparse embed
+          contextualText: c.contextualText || null,
+          priceNumeric: c.priceNumeric,
+          currency: c.currency,
+          inStock: c.inStock,
+          colors: c.colors,
+          sizes: c.sizes,
+          contactEmails: c.contactEmails,
+          contactPhones: c.contactPhones,
+          tokenCount: c.tokenCount,
         };
       }
       return null;
@@ -151,12 +163,18 @@ function pageToUpsertDocuments(page, chunks) {
       chunkIndex: index,
       totalChunks: total,
     });
-    const embeddingText = applyEmbeddingPrefix(chunk.text, pageForChunk, {
-      heading_path: chunk.heading_path,
-    });
 
-    // Sparse lexical signal: child text + title/sku (no embed prefix)
-    const sparseText = chunk.text;
+    // Prefer Anthropic-style contextualText (test-backend); else legacy prefix.
+    const embeddingText = chunk.contextualText
+      ? String(chunk.contextualText).trim()
+      : applyEmbeddingPrefix(chunk.text, pageForChunk, {
+          heading_path: chunk.heading_path,
+        });
+
+    // Sparse lexical signal: contextualText when present (title+context+child)
+    const sparseText = chunk.contextualText
+      ? String(chunk.contextualText).trim()
+      : chunk.text;
     const sparseBoost = {
       title: pageForChunk.title,
       sku: pageForChunk.attributes?.sku,
@@ -172,6 +190,27 @@ function pageToUpsertDocuments(page, chunks) {
         embeddingText,
         sparseText,
         sparseBoost,
+        // Optional ecommerce / contact fields (payload-pass-through)
+        ...(chunk.priceNumeric != null
+          ? { priceNumeric: chunk.priceNumeric }
+          : {}),
+        ...(chunk.currency ? { currency: chunk.currency } : {}),
+        ...(chunk.inStock != null ? { inStock: chunk.inStock } : {}),
+        ...(Array.isArray(chunk.colors) && chunk.colors.length
+          ? { colors: chunk.colors }
+          : {}),
+        ...(Array.isArray(chunk.sizes) && chunk.sizes.length
+          ? { sizes: chunk.sizes }
+          : {}),
+        ...(Array.isArray(chunk.contactEmails) && chunk.contactEmails.length
+          ? { contactEmails: chunk.contactEmails }
+          : {}),
+        ...(Array.isArray(chunk.contactPhones) && chunk.contactPhones.length
+          ? { contactPhones: chunk.contactPhones }
+          : {}),
+        ...(typeof chunk.tokenCount === "number"
+          ? { tokenCount: chunk.tokenCount }
+          : {}),
       },
     };
   });

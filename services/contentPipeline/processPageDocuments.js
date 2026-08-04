@@ -2,79 +2,55 @@ const QdrantVectorStoreManager = require("../QdrantService");
 const Url = require("../../models/Url");
 const { normalizeToCommonSchema, hashContent } = require("./normalizeSchema");
 const { upsertPageToQdrant } = require("./upsertPageToQdrant");
-const { scoreQuality, QUALITY_THRESHOLD } = require("./qualityScore");
-const {
-  structureAwareParentChildChunk,
-  DEFAULT_PARENT_CHARS,
-  DEFAULT_CHILD_CHARS,
-} = require("./chunking");
+const { processPageForIngestion } = require("../ingestionService");
 
-const USE_PARENT_CHILD = process.env.RAG_PARENT_CHILD !== "false";
-
-const DEFAULT_CHUNK_SIZE = 500; // tokens (compat export)
-const DEFAULT_CHUNK_OVERLAP = 100;
-const CHARS_PER_TOKEN = 4;
 const CHUNKING_SHARE = 0.15;
 const EMBEDDING_SHARE = 0.55;
 const UPSERT_SHARE = 0.3;
 
-/**
- * Resolve sections for a scraped doc. Falls back to a single primary section.
- */
-function resolveSections(doc) {
-  const meta = doc.metadata || {};
-  if (Array.isArray(meta.sections) && meta.sections.length > 0) {
-    return meta.sections
-      .map((s) => ({
-        pageType: s.pageType || meta.pageType || "generic",
-        entity_type: s.entity_type || meta.entity_type || "general",
-        entity_name:
-          s.entity_name !== undefined ? s.entity_name : meta.entity_name || null,
-        content: String(s.content || "").trim(),
-        attributes:
-          s.attributes && typeof s.attributes === "object"
-            ? s.attributes
-            : meta.attributes || {},
-        search_terms: Array.isArray(s.search_terms)
-          ? s.search_terms
-          : meta.search_terms || [],
-        classification_confidence:
-          typeof s.classification_confidence === "number"
-            ? s.classification_confidence
-            : typeof meta.classification_confidence === "number"
-              ? meta.classification_confidence
-              : 0,
-        classification_reason:
-          s.classification_reason || meta.classification_reason || "phase3",
-        extraction_source: s.extraction_source || meta.extraction_source,
-        product_id: s.product_id ?? meta.product_id ?? null,
-      }))
-      .filter((s) => s.content);
-  }
+// Compat exports (previous char/token estimates used by callers)
+const DEFAULT_CHUNK_SIZE = 350;
+const DEFAULT_CHUNK_OVERLAP = 50;
+const CHARS_PER_TOKEN = 4;
 
-  return [
-    {
-      pageType: meta.pageType || "generic",
-      entity_type: meta.entity_type || "general",
-      entity_name: meta.entity_name || null,
-      content: String(doc.content || "").trim(),
-      attributes: meta.attributes || {},
-      search_terms: meta.search_terms || [],
-      classification_confidence:
-        typeof meta.classification_confidence === "number"
-          ? meta.classification_confidence
-          : 0,
-      classification_reason: meta.classification_reason || "phase3",
-      extraction_source: meta.extraction_source,
-      product_id: meta.product_id ?? null,
-    },
-  ].filter((s) => s.content);
+/**
+ * Resolve raw input for test-backend-style ingestion.
+ * Prefer original HTML when available so normalizePage matches test-backend.
+ */
+function resolveRawInput(doc) {
+  const meta = doc.metadata || {};
+  const html =
+    doc.sourceCode ||
+    doc.rawHtml ||
+    meta.sourceCode ||
+    meta.rawHtml ||
+    null;
+  if (html && String(html).trim()) return String(html);
+  if (doc.content && String(doc.content).trim()) return String(doc.content);
+  return "";
 }
 
 /**
- * Phase 1–4 multi-page train:
- * normalize → per-section quality → hash skip → structure-aware chunk
- * (+ embed prefix) → delete-by-url → upsert (chunks may differ by entity_type).
+ * Resolve a stable synthetic URL for snippets/files/faqs (no webpage URL).
+ */
+function resolveDocUrl(doc, userId, agentId) {
+  const url = doc.originalUrl || doc.metadata?.url;
+  if (url) return url;
+  const type = doc.type !== undefined ? doc.type : doc.metadata?.type;
+  const title = doc.metadata?.title || "untitled";
+  const safeTitle = String(title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .slice(0, 48);
+  return `local://${userId}/${agentId}/${type || "doc"}/${safeTitle}-${hashContent(
+    String(doc.content || "").slice(0, 200),
+  ).slice(0, 12)}`;
+}
+
+/**
+ * Test-backend ingestion pipeline wired into Chataffy train path:
+ * normalize → quality gates → contextual summary → structure →
+ * tiktoken parent(850)/child(350) → upsert via existing QdrantService.
  */
 async function processPageDocuments(
   documents,
@@ -84,12 +60,6 @@ async function processPageDocuments(
   options = {},
 ) {
   const { onProgress } = options;
-  const qualityThreshold = options.qualityThreshold ?? QUALITY_THRESHOLD;
-  const parentSize =
-    options.parentSizeChars ??
-    options.chunkSizeChars ??
-    DEFAULT_PARENT_CHARS;
-  const childSize = options.childSizeChars ?? DEFAULT_CHILD_CHARS;
 
   const chunkCountPerUrl = {};
   const resultsByUrl = {};
@@ -131,87 +101,117 @@ async function processPageDocuments(
 
   for (let docIndex = 0; docIndex < documents.length; docIndex++) {
     const doc = documents[docIndex];
-    const url = doc.originalUrl || doc.metadata?.url;
+    const url = resolveDocUrl(doc, userId, agentId);
+    const meta = doc.metadata || {};
+
     try {
-      const sections = resolveSections(doc);
-      const meta = doc.metadata || {};
-
-      // --- Phase 2: per-section quality (one weak section does not kill others) ---
-      const keptSections = [];
-      const sectionQualityScores = [];
-      for (const section of sections) {
-        const quality = scoreQuality(section.content, {
-          title: section.entity_name || meta.title || "",
-        });
-        sectionQualityScores.push(quality.score);
-        if (quality.pass && quality.score >= qualityThreshold) {
-          keptSections.push({
-            ...section,
-            quality_score: quality.score,
-          });
-        }
-      }
-
-      const combinedText = keptSections.map((s) => s.content).join("\n\n");
-      const content_hash = combinedText ? hashContent(combinedText) : null;
-      const bestQuality =
-        sectionQualityScores.length > 0
-          ? Math.max(...sectionQualityScores)
-          : 0;
-
-      const page = normalizeToCommonSchema({
-        url,
-        userId,
-        agentId,
-        content: combinedText || doc.content,
-        title: meta.title || "",
-        metaDescription: meta.metaDescription || "",
-        canonicalUrl: meta.canonicalUrl || null,
-        language: meta.language || "en",
-        pageType: meta.pageType || keptSections[0]?.pageType || "generic",
-        entity_type:
-          meta.entity_type || keptSections[0]?.entity_type || "general",
-        entity_name: meta.entity_name || keptSections[0]?.entity_name || null,
-        attributes: meta.attributes || keptSections[0]?.attributes || {},
-        product_id:
-          meta.product_id || keptSections[0]?.product_id || null,
-        search_terms: meta.search_terms || [],
-        classification_confidence:
-          typeof meta.classification_confidence === "number"
-            ? meta.classification_confidence
-            : keptSections[0]?.classification_confidence || 0,
-        classification_reason:
-          meta.classification_reason ||
-          keptSections[0]?.classification_reason ||
-          "phase3",
-        type: doc.type !== undefined ? doc.type : 0,
-      });
-      page.quality_score = bestQuality;
-      page.content_hash = content_hash;
-
-      if (keptSections.length === 0) {
+      const rawInput = resolveRawInput(doc);
+      if (!rawInput.trim()) {
         chunkCountPerUrl[url] = 0;
         skippedUrls.push(url);
         resultsByUrl[url] = {
           success: true,
           skipped: "low_quality",
-          skipReason: "all_sections_below_threshold",
-          qualityScore: bestQuality,
-          contentHash: content_hash,
-          page,
+          skipReason: "empty_input",
+          qualityScore: 0,
+          contentHash: null,
+          page: null,
         };
-        if (onProgress) {
-          await onProgress({
-            phase: "training",
-            trainingProcessed: docIndex + 1,
-            trainingTotal: docTotal,
-            step: "chunking",
-          });
-        }
+        await emitAggregateProgress({
+          docIndex,
+          localFraction: 1,
+          step: "chunking",
+        });
         continue;
       }
 
-      // --- Phase 2: content-hash skip (unchanged) ---
+      const docType = doc.type !== undefined ? doc.type : 0;
+      // Webpage (0): strict test-backend gates. Other training types: lenient.
+      const isWebpage = docType === 0;
+      const qualityMode = isWebpage ? "strict" : "lenient";
+
+      const ingested = await processPageForIngestion(rawInput, url, {
+        userId,
+        agentId,
+        botId: agentId,
+        qualityMode,
+        // Keep extractByPageType metadata so QueryController filters still work
+        preferPageType: meta.pageType || undefined,
+        preferEntityType: meta.entity_type || undefined,
+        preferEntityName: meta.entity_name || meta.title || undefined,
+        productId: meta.product_id || null,
+        searchTerms: meta.search_terms || [],
+        extraAttributes: meta.attributes || {},
+        classificationConfidence:
+          typeof meta.classification_confidence === "number"
+            ? meta.classification_confidence
+            : undefined,
+        classificationReason:
+          meta.classification_reason || "test_backend_ingestion",
+      });
+
+      const content_hash =
+        ingested.contentHash ||
+        (ingested.normalizedText
+          ? hashContent(ingested.normalizedText)
+          : hashContent(rawInput));
+
+      const page = normalizeToCommonSchema({
+        url,
+        userId,
+        agentId,
+        content: ingested.normalizedText || rawInput,
+        title: meta.title || ingested.pageTitle || "",
+        metaDescription: meta.metaDescription || "",
+        canonicalUrl: meta.canonicalUrl || null,
+        language: meta.language || "en",
+        pageType:
+          meta.pageType || ingested.pageType || "generic",
+        entity_type:
+          meta.entity_type || ingested.entity_type || "general",
+        entity_name:
+          meta.entity_name || ingested.pageTitle || null,
+        attributes: {
+          ...(meta.attributes || {}),
+          ...(ingested.attributes || {}),
+          source_page_type: ingested.sourcePageType || null,
+        },
+        product_id: meta.product_id || null,
+        search_terms: meta.search_terms || [],
+        classification_confidence:
+          typeof meta.classification_confidence === "number"
+            ? meta.classification_confidence
+            : 1,
+        classification_reason:
+          meta.classification_reason || "test_backend_ingestion",
+        type: docType,
+      });
+      page.content_hash = content_hash;
+      page.pipeline_version = "pc_hybrid_tiktoken_v1";
+      page.quality_score = ingested.skipped
+        ? 0
+        : ingested.metrics?.wordCount || null;
+
+      if (ingested.skipped) {
+        chunkCountPerUrl[url] = 0;
+        skippedUrls.push(url);
+        resultsByUrl[url] = {
+          success: true,
+          skipped: "low_quality",
+          skipReason: ingested.skipReason || "quality_gate_fail",
+          qualityScore: page.quality_score,
+          contentHash: content_hash,
+          page,
+        };
+        await emitAggregateProgress({
+          docIndex,
+          localFraction: 1,
+          step: "chunking",
+        });
+        continue;
+      }
+
+      // Content-hash skip (unchanged product behavior)
       const existing = await Url.findOne({ url, agentId })
         .select("contentHash trainStatus")
         .lean();
@@ -227,71 +227,19 @@ async function processPageDocuments(
           success: true,
           skipped: "unchanged",
           skipReason: "content_hash_match",
-          qualityScore: bestQuality,
+          qualityScore: page.quality_score,
           contentHash: content_hash,
           page,
         };
-        if (onProgress) {
-          await onProgress({
-            phase: "training",
-            trainingProcessed: docIndex + 1,
-            trainingTotal: docTotal,
-            step: "chunking",
-          });
-        }
+        await emitAggregateProgress({
+          docIndex,
+          localFraction: 1,
+          step: "chunking",
+        });
         continue;
       }
 
-      // --- Parent-child chunking per section (embed children, store parent on payload) ---
-      const allChunks = [];
-      for (const section of keptSections) {
-        const parts = USE_PARENT_CHILD
-          ? await structureAwareParentChildChunk(section.content, {
-              parentSize,
-              childSize,
-              entity_type: section.entity_type,
-              pageType: section.pageType,
-            })
-          : await (async () => {
-              const { structureAwareChunk } = require("./chunking");
-              const legacy = await structureAwareChunk(section.content, {
-                chunkSize: parentSize,
-                chunkOverlap: 200,
-                entity_type: section.entity_type,
-                pageType: section.pageType,
-              });
-              return legacy.map((p, i) => ({
-                ...p,
-                parent_text: p.text,
-                parent_id: null,
-                parent_index: 0,
-                child_index: i,
-                chunk_role: "child",
-              }));
-            })();
-
-        for (const part of parts) {
-          allChunks.push({
-            text: part.text,
-            parent_text: part.parent_text,
-            parent_id: part.parent_id,
-            parent_index: part.parent_index,
-            child_index: part.child_index,
-            chunk_role: part.chunk_role || "child",
-            heading_path: part.heading_path || "",
-            pageType: section.pageType,
-            entity_type: section.entity_type,
-            entity_name: section.entity_name,
-            product_id: section.product_id || null,
-            attributes: section.attributes,
-            search_terms: section.search_terms,
-            classification_confidence: section.classification_confidence,
-            classification_reason: section.classification_reason,
-            quality_score: section.quality_score,
-          });
-        }
-      }
-
+      const allChunks = ingested.chunks || [];
       chunkCountPerUrl[url] = allChunks.length;
       totalChunks += allChunks.length;
 
@@ -315,8 +263,7 @@ async function processPageDocuments(
                   event.total > 0 ? event.embedded / event.total : 1;
                 await emitAggregateProgress({
                   docIndex,
-                  localFraction:
-                    CHUNKING_SHARE + ratio * EMBEDDING_SHARE,
+                  localFraction: CHUNKING_SHARE + ratio * EMBEDDING_SHARE,
                   embeddingProgress: event.embedded,
                   embeddingTotal: event.total,
                   step: "embedding",
@@ -327,9 +274,7 @@ async function processPageDocuments(
                 await emitAggregateProgress({
                   docIndex,
                   localFraction:
-                    CHUNKING_SHARE +
-                    EMBEDDING_SHARE +
-                    ratio * UPSERT_SHARE,
+                    CHUNKING_SHARE + EMBEDDING_SHARE + ratio * UPSERT_SHARE,
                   embeddingProgress: event.total,
                   embeddingTotal: event.total,
                   upsertProgress: event.upserted,
@@ -356,10 +301,12 @@ async function processPageDocuments(
         resultsByUrl[url] = {
           success: true,
           chunkCount: allChunks.length,
-          sectionCount: keptSections.length,
+          parentCount: ingested.parentCount,
+          childCount: ingested.childCount,
+          contextualSummary: ingested.contextualSummary,
           page,
           contentHash: content_hash,
-          qualityScore: bestQuality,
+          qualityScore: page.quality_score,
         };
       }
     } catch (err) {
@@ -391,7 +338,8 @@ async function processPageDocuments(
 
 module.exports = {
   processPageDocuments,
-  resolveSections,
+  resolveRawInput,
+  resolveDocUrl,
   DEFAULT_CHUNK_SIZE,
   DEFAULT_CHUNK_OVERLAP,
   CHARS_PER_TOKEN,

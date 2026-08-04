@@ -800,6 +800,9 @@ new Worker(
             scrapedDocs.push({
               type: 0,
               content,
+              // Raw HTML so test-backend normalizePage matches (chunk/embed path).
+              // Training list / WebsiteData still use extracted `content` above.
+              sourceCode,
               dataSize: contentSize,
               metadata: {
                 url: webPageURL,
@@ -1517,6 +1520,8 @@ new Worker(
             scrapedDoc: {
               type: 0,
               content,
+              // Raw HTML for test-backend-identical normalize → tiktoken chunk path
+              sourceCode: rawHtml,
               dataSize: contentSize,
               metadata: {
                 url: webPageURL,

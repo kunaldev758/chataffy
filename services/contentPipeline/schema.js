@@ -3,7 +3,7 @@
  * Keep user_id / agent_id naming for existing QueryController filters.
  */
 
-const PIPELINE_VERSION = "pc_hybrid_v1";
+const PIPELINE_VERSION = "pc_hybrid_tiktoken_v1";
 
 const PAGE_TYPES = Object.freeze([
   "product",
