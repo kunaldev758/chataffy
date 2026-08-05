@@ -33,7 +33,7 @@ function getMultiEntityRetrievalDefaults() {
   return {
     topKPerEntity: Math.max(
       2,
-      Number(process.env.RAG_COMPARE_TOPK_PER_ENTITY) || 5,
+      Number(process.env.RAG_COMPARE_TOPK_PER_ENTITY) || 8,
     ),
     maxTotalMatches: Math.max(
       4,
@@ -41,7 +41,7 @@ function getMultiEntityRetrievalDefaults() {
     ),
     maxContextChars: Math.max(
       4000,
-      Number(process.env.RAG_MAX_CONTEXT_CHARS_COMPARE) || 8000,
+      Number(process.env.RAG_MAX_CONTEXT_CHARS_COMPARE) || 12000,
     ),
   };
 }

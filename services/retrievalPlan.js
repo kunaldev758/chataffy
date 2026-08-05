@@ -134,16 +134,19 @@ function resolveContextMode(subIntent) {
 }
 
 function resolveTokenBudget(contextMode) {
+
+  console.log("resolve token budget check : ", contextMode);
   switch (contextMode) {
     case "list":
       return Number(process.env.RAG_MAX_CONTEXT_CHARS_LIST) || 3000;
     case "links":
       return Number(process.env.RAG_MAX_CONTEXT_CHARS_LINKS) || 3000;
+    // Comparison / multi-entity needs a larger window (2–3 products × topK chunks).
     case "page_merge":
       return Number(process.env.RAG_MAX_CONTEXT_CHARS) || 4000;
     // Comparison / multi-entity needs a larger window (2–3 products × topK chunks).
     case "compare":
-      return Number(process.env.RAG_MAX_CONTEXT_CHARS_COMPARE) || 8000;
+      return Number(process.env.RAG_MAX_CONTEXT_CHARS_COMPARE) || 12000;
     case "contact":
       return Number(process.env.RAG_MAX_CONTEXT_CHARS_BRIEF) || 4000;
     default:

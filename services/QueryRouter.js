@@ -26,7 +26,10 @@ const {
   detectMultiEntityFromRules,
   parseProductListFromAssistantText,
 } = require("./retrieval/entityResolution");
-const { normalizeMultiEntityMode } = require("./retrieval/multiEntityModes");
+const {
+  MULTI_ENTITY_MODES,
+  normalizeMultiEntityMode,
+} = require("./retrieval/multiEntityModes");
 const {
   normalizeGreetingInput,
   isGibberishOrAccidentalMessage,
@@ -821,6 +824,14 @@ function parseRouterJson(content, question = "") {
       : [];
 
     const ruleMulti = detectMultiEntityFromRules(question);
+    const effectiveRawEntities =
+      rawEntities.length >= 2 ? rawEntities : ruleMulti.rawEntities;
+    const effectiveMultiEntityMode =
+      multiEntityMode ||
+      ruleMulti.multiEntityMode ||
+      (effectiveRawEntities.length >= 2
+        ? MULTI_ENTITY_MODES.MULTI_ASK
+        : null);
 
     return buildRouteResult({
       route: finalRoute,
@@ -830,9 +841,8 @@ function parseRouterJson(content, question = "") {
       rewrittenQuery,
       lexicalTerms,
       constraints: parsed.constraints,
-      multiEntityMode: multiEntityMode || ruleMulti.multiEntityMode,
-      rawEntities:
-        rawEntities.length >= 2 ? rawEntities : ruleMulti.rawEntities,
+      multiEntityMode: effectiveMultiEntityMode,
+      rawEntities: effectiveRawEntities,
       followUp,
       needsRewrite,
       rewriteReason,
@@ -878,7 +888,7 @@ async function llmRoute(question, options = {}) {
 
   // user intent prompt -->
 
-  const systemPrompt = userIntentPrompt(userIntentPrompt);
+  const systemPrompt = userIntentPrompt(websiteLanguage);
 
   const userContentParts = [`Website language: ${websiteLanguage}`];
 
@@ -891,6 +901,8 @@ async function llmRoute(question, options = {}) {
   if (chatHistorySnippet) {
     userContentParts.push(`Recent conversation:\n${chatHistorySnippet}`);
   }
+
+  console.log("chat history snippet :", chatHistorySnippet);
 
   userContentParts.push(`User message: ${question}`);
   const userContent = userContentParts.join("\n\n");
@@ -949,9 +961,10 @@ async function llmRoute(question, options = {}) {
       }
     }
 
-    console.log("parsed content data check : ", parseRouterJson(content));
+    const parsedRouting = parseRouterJson(content, question);
+    console.log("parsed content data check : ", parsedRouting);
 
-    return parseRouterJson(content);
+    return parsedRouting;
   } catch (error) {
     console.error("[QueryRouter] LLM routing failed:", error.message);
     return buildRouteResult({

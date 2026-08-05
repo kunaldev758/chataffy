@@ -173,6 +173,36 @@ function parseMultiAskEntitiesRegex(query) {
     ).slice(0, getMaxEntities());
   }
 
+  // Shared-unit variants: "10 and 20 mm lashes" → "10mm lashes", "20mm lashes"
+  const sharedUnitMatch = q.match(
+    /\b(\d+(?:\.\d+)?)\s*(?:and|or)\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|in(?:ch(?:es)?)?|ft|ml|l|oz|g|kg|gb|tb|w|v)\s+(.+?)(?=\s+(?:along with|with)\b|[?!.]|$)/i,
+  );
+  if (sharedUnitMatch) {
+    const [, firstValue, secondValue, unit, rawProduct] = sharedUnitMatch;
+    const product = cleanEntity(rawProduct);
+    if (isUsableEntity(product)) {
+      return dedupeEntities([
+        `${firstValue}${unit} ${product}`,
+        `${secondValue}${unit} ${product}`,
+      ]).slice(0, getMaxEntities());
+    }
+  }
+
+  // Recommendation request: "suggest me some A and B along with their pricing"
+  const recommendationMatch = q.match(
+    /\b(?:suggest|suggests|recommend|recommends)(?:\s+me)?\s+(?:some\s+)?(.+?)\s+and\s+(.+?)(?=\s+(?:along with|with)\s+(?:their\s+)?(?:prices?|pricing|costs?)\b|[?!.]|$)/i,
+  );
+  if (recommendationMatch) {
+    const entities = dedupeEntities(
+      [recommendationMatch[1], recommendationMatch[2]]
+        .map(cleanEntity)
+        .filter(isUsableEntity),
+    );
+    if (entities.length >= 2) {
+      return entities.slice(0, getMaxEntities());
+    }
+  }
+
   // "A as well as B" / "A along with B"
   const asWell = q.match(
     /^(.{3,80}?)\s+(?:as well as|along with)\s+(.{3,80?}?)(?:\?|$)/i,

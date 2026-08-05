@@ -3314,10 +3314,9 @@ ${answerInstructions}`;
         let responseMode = "brief";
         if (isMultiEntityTurn) {
           responseMode =
-            entityResolution?.multiEntityMode ===
-            MULTI_ENTITY_MODES.CHOOSE_FROM_LIST
-              ? "recommend"
-              : "compare";
+            entityResolution?.multiEntityMode === MULTI_ENTITY_MODES.COMPARE
+              ? "compare"
+              : "recommend";
         } else if (retrievalPlan.retrievalPolicy.contextMode === "list") {
           responseMode = "list";
         } else if (retrievalPlan.retrievalPolicy.contextMode === "contact") {
@@ -3333,7 +3332,14 @@ ${answerInstructions}`;
         let requestedCount =
           responseMode === "list"
             ? this.extractRequestedCount(question, requestedTopK)
-            : 1;
+            : responseMode === "recommend"
+              ? this.extractRequestedCount(
+                  question,
+                  Math.max(5, entityResolution?.entities?.length || 0),
+                )
+              : responseMode === "compare"
+                ? entityResolution?.entities?.length || 2
+                : 1;
 
         const answerResult = await this.generateAnswerFromMatches({
           question,
@@ -3351,7 +3357,10 @@ ${answerInstructions}`;
             wasExpanded: queryWasEnriched,
             retrievalMaxScore: maxScore,
             subIntent: isMultiEntityTurn
-              ? "COMPARE"
+              ? entityResolution?.multiEntityMode ===
+                MULTI_ENTITY_MODES.COMPARE
+                ? "COMPARE"
+                : null
               : subIntent || null,
             collectionName,
             userId: userIdString,
