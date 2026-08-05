@@ -1485,7 +1485,7 @@ class QuestionAnsweringSystem {
       requestedCount,
     });
     return {
-      context: `The user wants a complete list of items from ${companyName}'s website matching their request. Use ONLY the content below. List EVERY matching item with name, price (if shown), and link. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest other sizes unless the user asked for alternatives.\n\n${contextBlocks}`,
+      context: `The user wants a complete list of items from ${companyName}'s website matching their request. Use ONLY the content below. List EVERY matching item in readable HTML. For each item, show labeled Name, Price, and Link fields in that order. Write "Not listed" or "Not available" when a value is absent; never invent a value. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest other sizes unless the user asked for alternatives.\n\n${contextBlocks}`,
       matches,
       responseMode: "list",
       requestedCount,
@@ -2830,7 +2830,7 @@ ${answerInstructions}`;
         );
         const ackResult = await this.generateAnswer(
           question,
-          `The user sent a short acknowledgement in their language. Reply warmly in the same language, invite them to ask more questions about ${companyName}. One sentence only. Use HTML <p> tag.`,
+          `The user sent a short acknowledgement in their language. Reply warmly in the same language and invite them to ask more questions about ${companyName}. Keep it brief, but follow the required HTML response structure.`,
           [],
           companyName,
           websiteData,

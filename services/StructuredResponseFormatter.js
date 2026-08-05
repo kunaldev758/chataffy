@@ -153,9 +153,11 @@ function formatContactFromMatches(matches, options = {}) {
   const facts = extractContactFacts(matches);
   if (facts.length === 0) return null;
 
+  const title = options.title || "Contact Us";
   const intro = options.intro || "Here is our contact information:";
+  const sectionTitle = options.sectionTitle || "Contact details";
   const listHtml = buildContactListHtml(facts, options.fieldLabels);
-  return `<p>${escapeHtml(intro)}</p>${listHtml}`;
+  return `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(intro)}</p><h2>${escapeHtml(sectionTitle)}</h2>${listHtml}`;
 }
 
 /**

@@ -18,6 +18,18 @@ const CONTACT_INTRO = {
   hi: "यहाँ हमारी संपर्क जानकारी है:",
 };
 
+const CONTACT_HEADINGS = {
+  en: { title: "Contact Us", section: "Contact details" },
+  ja: { title: "お問い合わせ", section: "連絡先" },
+  de: { title: "Kontakt", section: "Kontaktdaten" },
+  fr: { title: "Nous contacter", section: "Coordonnées" },
+  es: { title: "Contáctanos", section: "Datos de contacto" },
+  it: { title: "Contattaci", section: "Recapiti" },
+  pt: { title: "Fale conosco", section: "Dados de contato" },
+  ru: { title: "Свяжитесь с нами", section: "Контактные данные" },
+  hi: { title: "हमसे संपर्क करें", section: "संपर्क विवरण" },
+};
+
 const FIELD_LABELS = {
   en: { email: "Email", phone: "Phone" },
   ja: { email: "メール", phone: "電話" },
@@ -57,10 +69,23 @@ function wrapIntroParagraph(intro) {
   return `<p>${text}</p>`;
 }
 
+function buildContactHeader(intro, language) {
+  const headings = CONTACT_HEADINGS[language] || CONTACT_HEADINGS.en;
+  return `<h1>${escapeHtml(headings.title)}</h1>${wrapIntroParagraph(escapeHtml(intro))}<h2>${escapeHtml(headings.section)}</h2>`;
+}
+
+function wrapGeneratedContactHeader(header) {
+  const html = String(header || "").trim();
+  if (/<\s*h1[\s>]/i.test(html) && /<\s*h2[\s>]/i.test(html)) {
+    return html;
+  }
+  return `<h1>Contact Us</h1>${wrapIntroParagraph(html)}<h2>Contact details</h2>`;
+}
+
 function buildTemplateContactAnswer(facts, language) {
   const intro = pickIntro(language);
   const listHtml = buildContactListHtml(facts, pickFieldLabels(language));
-  return `${wrapIntroParagraph(escapeHtml(intro))}${listHtml}`;
+  return `${buildContactHeader(intro, language)}${listHtml}`;
 }
 
 function responseContainsFacts(answer, facts) {
@@ -91,8 +116,14 @@ async function generateContactResponse({
   const listHtml = buildContactListHtml(facts, pickFieldLabels(language));
 
   if (language === "en") {
+    const headings = CONTACT_HEADINGS.en;
     return {
-      answer: formatContactFromMatches(matches),
+      answer: formatContactFromMatches(matches, {
+        title: headings.title,
+        intro: CONTACT_INTRO.en,
+        sectionTitle: headings.section,
+        fieldLabels: FIELD_LABELS.en,
+      }),
       language,
       source: "structured_contact",
     };
@@ -107,9 +138,10 @@ async function generateContactResponse({
   }
 
   const system = [
-    "You write a short customer-support intro before a contact list.",
-    `Write ONE brief sentence in language code: ${language}.`,
-    "Output HTML only: a single <p> tag. No markdown, no bullet list.",
+    "You write a short customer-support heading and intro before a contact list.",
+    `Write in language code: ${language}.`,
+    "Output HTML only in this exact order: one concise <h1> title, one brief <p> intro sentence, then one <h2> contact-details heading.",
+    "Do not output markdown or a bullet list.",
     "Do not include phone numbers, emails, or URLs — only the intro sentence.",
   ].join(" ");
 
@@ -130,7 +162,7 @@ async function generateContactResponse({
   });
 
   if (introRaw) {
-    const answer = `${wrapIntroParagraph(introRaw)}${listHtml}`;
+    const answer = `${wrapGeneratedContactHeader(introRaw)}${listHtml}`;
     if (responseContainsFacts(answer, facts)) {
       return {
         answer,

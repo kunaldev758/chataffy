@@ -1,8 +1,24 @@
 const LINK_FORMAT =
   '<a href="url" target="_blank" style="color:#007bff; text-decoration:underline;">text</a>';
 
+const RESPONSE_FORMAT = `Response format:
+- Return valid HTML only; do not use Markdown syntax.
+- Start every reply with exactly one concise <h1> title.
+- Use <h2> for highlighted sections or key points.
+- Prefer <ul>/<li> for facts, options, steps, features, and other multi-point information.
+- Keep introductory <p> text to 1-2 short sentences and avoid long walls of text.
+- Even a short reply must use an <h1> and an appropriate <h2>; use a short list whenever there are multiple details.`;
+
+const PRODUCT_FORMAT = `Product format:
+- Whenever product information is shared, show every product in a separate <li>.
+- For each product, show these labeled fields in this exact order: <strong>Name:</strong>, <strong>Price:</strong>, <strong>Link:</strong>.
+- Use the price and URL only when supported by the knowledge base.
+- If a price is missing, write <strong>Price:</strong> Not listed.
+- If a URL is missing, write <strong>Link:</strong> Not available; never invent a URL.
+- When a URL exists, format the Link value with ${LINK_FORMAT}.`;
+
 const CORE_RULES = `Rules:
-- Speak as "{companyName}" (we/our) in first person throughout. Natural, concise. Use HTML (<p>, <ul>, <li>, links).
+- Speak as "{companyName}" (we/our) in first person throughout. Be natural, concise, and easy to understand.
 - Links: ${LINK_FORMAT}
 - If the user accepted a prior offer ("yes", "tell me", "sure", "go ahead"), answer immediately — do not repeat the offer.
 - Use conversation history only for follow-ups; do not repeat full prior answers.
@@ -11,7 +27,11 @@ const CORE_RULES = `Rules:
 - Use only information from the knowledge base.
 - Never expose internal language: do not say "in the provided context", "based on the context", "the context does not mention", "according to my training data", or any similar phrase — always speak naturally as the brand.
 - When information is not available, say so naturally in first person (e.g. "We don't currently offer that") without referencing internal documents or context.
-- Link text must not repeat a word already in the surrounding sentence (e.g. do not write "our Our Routes page" — write "our <a ...>Routes</a> page" instead).`;
+- Link text must not repeat a word already in the surrounding sentence (e.g. do not write "our Our Routes page" — write "our <a ...>Routes</a> page" instead).
+
+${RESPONSE_FORMAT}
+
+${PRODUCT_FORMAT}`;
 
 const _cache = new Map();
 const MAX_CACHE = 500;
@@ -160,10 +180,11 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
     let instructions = `Instructions:
 - Write as customer support for ${org} in first person (we/our)
 - List **every** matching item from the knowledge base (up to ${countHint} if a number was requested, otherwise all found)
-- Each item: name, price (if shown), clickable link when URL is available
-- HTML: <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">title</a>
+- Start with one concise <h1>, add a useful <h2>, and wrap all matching products in <ul>/<li>
+- Each product must show labeled Name, Price, and Link fields in that order
+- Write "Price: Not listed" or "Link: Not available" when either value is absent
+- Links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">View product</a>
 - Never say items/sizes are unavailable if they appear in the knowledge base or conversation history
-- You may use more than 2 sentences when listing multiple items
 - Do not invent products, sizes, or URLs; do not reference "the context" or "the provided context" in your response`;
 
     if (wantsProductUrls) {
@@ -177,12 +198,14 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
 
   if (effectiveMode === "page_links") {
     return `Instructions:
-- HTML list of page links from the knowledge base
+- Start with one concise <h1> and a descriptive <h2>
+- Use an HTML <ul>/<li> list of every matching page link from the knowledge base
 - Brief intro (1-2 sentences max)`;
   }
 
   if (effectiveMode === "contact") {
     return `Instructions:
+- Start with one concise <h1>, use <h2> for each relevant contact category, and list details with <ul>/<li>
 - List **every** social URL, phone, email, address from the knowledge base
 - HTML <ul>/<li>; links: <a href="URL" target="_blank" style="color:#007bff; text-decoration:underline;">platform name</a>
 - Do not invent contact details`;
@@ -196,11 +219,13 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
         : "each mentioned product";
     return `Instructions:
 - The user asked about multiple products/entities (${entityHint}). Write as ${org} in first person (we/our).
-- Cover EACH entity that appears in the knowledge base: name, key features, price (if shown), sizes, and a link when URL is available.
-- If this is a comparison, highlight clear differences side by side (HTML <ul>/<li> or short paragraphs per entity).
+- Start with one concise <h1> and use one <h2> for each compared product or highlighted section.
+- Cover EACH entity that appears in the knowledge base. Use <ul>/<li> for features, sizes, and differences.
+- For every product, show labeled Name, Price, and Link fields in that order. Use "Not listed" or "Not available" when missing.
+- If this is a comparison, make the differences easy to scan in lists.
 - Do not invent products, prices, or URLs that are missing from the knowledge base.
 - Never say "in the provided context" — speak naturally as the brand.
-- You may use more than 2 sentences when comparing multiple items.`;
+- Keep explanations natural and easy for a shopper to understand.`;
   }
 
   if (effectiveMode === "recommend" || options.multiEntityMode === "choose_from_list") {
@@ -212,11 +237,20 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
 - The user wants help choosing among: ${entityHint}. Write as ${org} in first person (we/our).
 - Use ONLY the knowledge-base sections below. Explain trade-offs (price, size, features, use case) for each option.
 - Give a practical recommendation when possible; if budget/use case is unknown, state assumptions briefly or ask ONE short clarifying question.
-- HTML <ul>/<li> or short paragraphs. Include links when URLs are in the knowledge base.
+- Start with one concise <h1>; use <h2> for the recommendation and product options.
+- Use <ul>/<li> for trade-offs. For every product, show labeled Name, Price, and Link fields in that order.
+- Write "Price: Not listed" or "Link: Not available" when the knowledge base does not contain that value.
 - Do not invent products or prices.`;
   }
 
-  return `Answer in 3-4 sentences as ${org} (first person, we/our). If the user accepted a prior offer ("yes", "tell me"), provide the information now. Never say "in the provided context" or similar — speak naturally as the brand.`;
+  return `Instructions:
+- Answer as ${org} in first person (we/our), using natural and easy-to-understand language.
+- Start with exactly one concise <h1> and use <h2> for highlighted points.
+- Prefer <ul>/<li> for facts, steps, options, or any answer containing multiple details.
+- If products are mentioned, put each product in a separate <li> and show labeled Name, Price, and Link fields in that order.
+- Use "Price: Not listed" or "Link: Not available" when a product value is missing; never invent either value.
+- If the user accepted a prior offer ("yes", "tell me"), provide the information now.
+- Never say "in the provided context" or similar — speak naturally as the brand.`;
 }
 
 function appendReplyLanguage(systemPrompt, userLanguage) {

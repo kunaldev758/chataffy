@@ -75,6 +75,18 @@ function parseProductListFromAssistantText(text) {
     entities.push(name);
   };
 
+  // Structured HTML is flattened by stripHtmlPreserveLinks, so scan labeled
+  // Name fields globally before applying the legacy line/price patterns.
+  const labeledNamePattern =
+    /(?:^|\s)\*{0,2}(?:product\s+)?name:\*{0,2}\s*(.+?)(?=\s+\*{0,2}(?:price|link):|$)/gi;
+  for (const match of plain.matchAll(labeledNamePattern)) {
+    tryAdd(match[1]);
+  }
+
+  if (entities.length >= 2) {
+    return entities.slice(0, getMaxEntities());
+  }
+
   // Global scan — works when HTML collapsed newlines or list is inline.
   const pricePattern =
     /([A-Za-z0-9][A-Za-z0-9\s.'″"x×\-]{2,90}?)\s+[-–—]\s+\$?\d[\d,]*(?:\.\d{2})?(?:\s+to\s+\$?\d[\d,]*(?:\.\d{2})?)?/gi;
@@ -100,6 +112,15 @@ function parseProductListFromAssistantText(text) {
     }
 
     line = line.replace(/^[-*•]\s+/, "").replace(/^\d+[.)]\s+/, "");
+
+    // Structured product replies use a labeled Name field on its own line.
+    const labeledName = line.match(
+      /^\*{0,2}(?:product\s+)?name:\*{0,2}\s*(.{2,90})$/i,
+    );
+    if (labeledName) {
+      tryAdd(labeledName[1]);
+      continue;
+    }
 
     const priceSplit = line.match(
       /^(.+?)\s+[-–—]\s+\$?\d[\d,]*(?:\.\d{2})?(?:\s+to\s+\$?\d[\d,]*(?:\.\d{2})?)?/,
