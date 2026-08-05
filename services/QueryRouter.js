@@ -4,7 +4,10 @@ const {
   providerChatComplete,
   isSupportedChatProvider,
 } = require("./providerChatComplete");
-const { normalizeLanguageCode, detectLanguageFromText } = require("../utils/websiteLanguage");
+const {
+  normalizeLanguageCode,
+  detectLanguageFromText,
+} = require("../utils/websiteLanguage");
 const {
   detectCatalogFollowUp,
   isProductLinkRequest,
@@ -29,6 +32,8 @@ const {
   isGibberishOrAccidentalMessage,
   detectScriptLanguage,
 } = require("./LightweightResponseService");
+
+const { userIntentPrompt } = require("../prompts/intent-detection-prompt.js");
 
 const ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano";
 
@@ -186,20 +191,20 @@ function classifyStructuralSubIntent(query) {
   const wantsInPageList =
     /\b(featured|homepage|home\s*page|main\s*page)\b/.test(q) ||
     /\b(list|show|give\s+me|what\s+are|tell\s+me|share)\b[\s\S]{0,50}\b(products?|items?|options?|styles?|lashes?)\b/.test(
-      q
+      q,
     ) ||
-    /\b(urls?|links?)\b/.test(q) &&
+    (/\b(urls?|links?)\b/.test(q) &&
       /\b\d{1,2}\s*mm\b/.test(q) &&
-      /\b(lash|lashes|product)\b/.test(q) ||
+      /\b(lash|lashes|product)\b/.test(q)) ||
     /\b(all|every|each)\b[\s\S]{0,40}\b(products?|items?|lashes?)\b/.test(q) ||
     /\b(products?|items?|lashes?)\b[\s\S]{0,40}\b(price|prices|cost|pricing)\b/.test(
-      q
+      q,
     ) ||
     /\b(price|prices|cost|pricing)\b[\s\S]{0,40}\b(products?|items?|lashes?)\b/.test(
-      q
+      q,
     ) ||
     /\bwhat(?:'s| is)\s+on\s+(?:the\s+|your\s+)?(?:homepage|home\s*page|main\s*page)\b/.test(
-      q
+      q,
     ) ||
     (/\b\d{1,2}\s*mm\b/.test(q) &&
       /\b(options?|styles?|products?|lashes?|share|more)\b/.test(q));
@@ -207,21 +212,21 @@ function classifyStructuralSubIntent(query) {
   const wantsContactInfo =
     /\bsocial\s*media\b/.test(q) ||
     /\b(facebook|instagram|twitter|tiktok|youtube|linkedin|pinterest)\b/.test(
-      q
+      q,
     ) ||
     /\b(follow\s+us|find\s+us\s+on)\b/.test(q) ||
     /\b(office\s+hours|business\s+hours|phone\s+number|mailing\s+address)\b/.test(
-      q
+      q,
     ) ||
     (/\b(how\s+(?:do\s+i\s+)?contact|contact\s+(?:info|details|number)|reach\s+us|call\s+us)\b/.test(
-      q
+      q,
     ) &&
       !/\b(refund|return|policy|billing|order|shipping|warranty|cancel|product)\b/.test(
-        q
+        q,
       )) ||
     (/\b(phone|email|e-mail|address|hours|fax|mailing)\b/.test(q) &&
       !/\b(support\s+ticket|submit\s+a\s+ticket|product|refund|policy|billing|order)\b/.test(
-        q
+        q,
       )) ||
     (/\b(give\s+me|show\s+me|what\s+are|list)\b/.test(q) &&
       /\bsocial\b/.test(q)) ||
@@ -246,7 +251,7 @@ function classifyStructuralSubIntent(query) {
         !/\b(products?|items?|featured|price|prices)\b/.test(q)));
 
   const hasListHint = /\b(list|show|give\s+me|how\s+many|all\b|top\b)\b/.test(
-    q
+    q,
   );
   const hasProductWord = /\b(products?|items?)\b/.test(q);
 
@@ -346,7 +351,11 @@ function getLastMeaningfulUserQuery(chatMessages = []) {
     }
     const text = String(msg.message || msg.content || "").trim();
     if (!text || text.length < 3) continue;
-    if (isShortAffirmative(text) || isPureThanks(text) || isPureGreeting(text)) {
+    if (
+      isShortAffirmative(text) ||
+      isPureThanks(text) ||
+      isPureGreeting(text)
+    ) {
       continue;
     }
     return text;
@@ -425,7 +434,7 @@ function rewriteFollowUpFromIntentContext({
 function applyFollowUpAcceptanceOverride(
   result,
   question,
-  { chatMessages = [], conversationState = null } = {}
+  { chatMessages = [], conversationState = null } = {},
 ) {
   if (!isShortAffirmative(question)) return result;
   if (isPureThanks(question)) return result;
@@ -623,7 +632,7 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
     detectFollowUpAcceptance(
       normalizedQuestion,
       chatMessages,
-      conversationState
+      conversationState,
     )
   ) {
     const rewrittenQuery = rewriteFollowUpFromIntentContext({
@@ -675,8 +684,7 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
         confidence: 0.85,
         multiEntityMode: multiFromRules.multiEntityMode,
         rawEntities: multiFromRules.rawEntities,
-        followUp:
-          multiFromRules.multiEntityMode === "choose_from_list",
+        followUp: multiFromRules.multiEntityMode === "choose_from_list",
         source: "rules_multi_entity",
       }),
     };
@@ -708,10 +716,12 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
         subIntent,
         userLanguage,
         confidence: 0.9,
-        rewrittenQuery: retrievalQuery !== normalizedQuestion ? retrievalQuery : null,
+        rewrittenQuery:
+          retrievalQuery !== normalizedQuestion ? retrievalQuery : null,
         followUp: true,
         needsRewrite: retrievalQuery !== normalizedQuestion,
-        rewriteReason: retrievalQuery !== normalizedQuestion ? "CATALOG_EXPAND" : null,
+        rewriteReason:
+          retrievalQuery !== normalizedQuestion ? "CATALOG_EXPAND" : null,
         source: "rules_catalog_follow_up",
       }),
     };
@@ -755,8 +765,7 @@ function parseRouterJson(content, question = "") {
         ? Math.max(0, Math.min(1, parsed.confidence))
         : 0.7;
 
-    const userLanguage =
-      normalizeLanguageCode(parsed.userLanguage) || "en";
+    const userLanguage = normalizeLanguageCode(parsed.userLanguage) || "en";
 
     const rewrittenQuery =
       typeof parsed.rewrittenQuery === "string" && parsed.rewrittenQuery.trim()
@@ -764,7 +773,8 @@ function parseRouterJson(content, question = "") {
         : null;
 
     const followUp = Boolean(parsed.followUp);
-    const needsRewrite = Boolean(parsed.needsRewrite) || Boolean(rewrittenQuery);
+    const needsRewrite =
+      Boolean(parsed.needsRewrite) || Boolean(rewrittenQuery);
     const rewriteReason =
       typeof parsed.rewriteReason === "string" && parsed.rewriteReason.trim()
         ? parsed.rewriteReason.trim().toUpperCase()
@@ -791,10 +801,7 @@ function parseRouterJson(content, question = "") {
     } else if (confidence < 0.65 && finalRoute !== ROUTES.LIVE_AGENT) {
       finalRoute = ROUTES.SEMANTIC_RAG;
       subIntent = null;
-    } else if (
-      finalRoute === ROUTES.HYBRID &&
-      !subIntent
-    ) {
+    } else if (finalRoute === ROUTES.HYBRID && !subIntent) {
       finalRoute = ROUTES.SEMANTIC_RAG;
     }
 
@@ -869,105 +876,9 @@ async function llmRoute(question, options = {}) {
     }
   }
 
-  const systemPrompt = `You are a query router for a multilingual customer-support chatbot.
+  // user intent prompt -->
 
-Classify the visitor message into exactly one route:
-- GREETING: simple hello/hi with no real question
-- LIVE_AGENT: wants a human agent, representative, or live support
-- ACCIDENTAL: random characters, keyboard mash, or test input with no real meaning
-- ACKNOWLEDGEMENT: pure social acknowledgement with NO new question or intent (e.g. "thanks", "got it", "understood", "merci", "ありがとう", "धन्यवाद", "gracias"). Use chat history and conversation state to resolve ambiguity:
-  - Soft closes that invite more detail ("let me know", "feel free", "anything else", "if you need further details", questions ending with an offer) count as OFFERS, not finished answers.
-  - Short affirmatives ("ok", "yes", "sure", "go ahead") after an offer OR when conversation state has awaiting: follow_up = SEMANTIC_RAG (follow-up acceptance) with rewrittenQuery from the last query/topic.
-  - "thanks" / gratitude after a finished answer = ACKNOWLEDGEMENT.
-  - ANY new question, request, or new topic = SEMANTIC_RAG, not ACKNOWLEDGEMENT.
-- HYBRID: ONLY when the user clearly wants a navigational list (pages/URLs/collections), homepage product catalog with prices, or contact/social profiles
-- SEMANTIC_RAG: factual Q&A about the business — DEFAULT when unsure
-
-IMPORTANT: Prefer SEMANTIC_RAG for pricing, features, policies, how-to, and general questions even if they contain words like "show" or "list". Only use HYBRID for explicit listing/navigation/contact requests. Real questions in any language (Japanese, Chinese, Russian, Spanish, etc.) must be SEMANTIC_RAG, not ACCIDENTAL.
-
-For HYBRID, set subIntent to one of: IN_PAGE_LIST, CONTACT_INFO, PAGE_LINKS.
-- CONTACT_INFO: phone, email, address, hours, social media profiles — in ANY language (e.g. Japanese 連絡先, お問い合わせ, 電話番号)
-- IN_PAGE_LIST: product catalog with prices/sizes
-- PAGE_LINKS: list of site pages or collection URLs
-
-Also classify business intent in ANY language:
-- isIdentityQuestion: true when the user asks who you are or to introduce yourself/the company (e.g. "who are you", "describe yourself", "介绍一下你自己", "自己紹介してください", "qui êtes-vous")
-- isBusinessQuestion: true for products, services, pricing, policies, company info, or any support question about the business
-- isTrulyOffTopic: true ONLY for unrelated general knowledge (weather, jokes, sports, recipes, crypto prices, politics) — NOT for business questions even in non-English
-
-If isIdentityQuestion or isBusinessQuestion is true, route MUST be SEMANTIC_RAG and isTrulyOffTopic MUST be false.
-
-Detect userLanguage: ISO 639-1 code for the language the visitor WROTE IN (e.g. en, es, fr, de, zh, ja, ko, ar, hi, ru, pt, th, vi, tr). Do NOT guess language from script alone.
-
-Conversation state summarizes the active topic and entities from prior turns. Use it to resolve short follow-ups, pronouns, and elliptical questions (e.g. "how much?", "send the link", "what about pricing?"). When awaiting: follow_up is set, treat short affirmatives as continuing that topic.
-
-When the message depends on conversation state OR userLanguage differs from website language (${websiteLanguage}), provide rewrittenQuery: a self-contained search query in ${websiteLanguage} suitable for embedding similarity search and keyword matching. Preserve product names, brand names, numbers, and measurements. If the message is already a clear standalone query in ${websiteLanguage}, rewrittenQuery can be null.
-
-Set followUp=true when the message continues the same topic from conversation state.
-Set needsRewrite=true when rewrittenQuery is provided or the message cannot be searched without resolving context.
-Set rewriteReason to one of: PRONOUN, ELLIPSIS, TRANSLATE, CATALOG_EXPAND, NONE.
-
-Also extract lexicalTerms: an array of 3–6 key search tokens from the user's message (or rewrittenQuery if provided). Include product names, brand names, sizes, colors, and domain-specific terms. Exclude stop words. These are used for sparse keyword search. If the query is very short (1–2 words), return those words. Examples:
-- "do you have white adidas shoes in size 8?" → ["adidas", "shoes", "size 8", "white"]
-- "16mm super natural lashes price" → ["16mm", "super natural", "lashes", "price"]
-- "contact information" → ["contact", "information"]
-
-Also extract constraints: an array of structured filters the user explicitly (or clearly implicitly) asked for — the specific attributes they want results narrowed to. Each constraint is:
-{ "field": string, "value": string, "operator": "eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"in"|"contains", "confidence": 0-1, "source": "user"|"inferred"|"rewrite"|"history" }
-- "field" is a free-form snake_case attribute name (e.g. size, color, brand, collection, sku, product_id, price, material). Do NOT force-fit into a fixed list — use whatever field name best describes the constraint.
-- "operator" defaults to "eq" for simple matches; use gt/gte/lt/lte for numeric comparisons (e.g. "under $100" → {field: "price", value: "100", operator: "lte"}); use "in" when the user gives multiple acceptable values for one field.
-- "confidence" reflects how explicit/certain the constraint is (0.9+ for exact stated values like a SKU, ~0.6-0.8 for inferred/implied values).
-- "source" is "user" for values stated directly in this message, "rewrite" if it came from rewrittenQuery, "history" if resolved from conversation state, "inferred" if you deduced it rather than the user stating it.
-- Only include real constraints; return an empty array when the message has none. Do not invent constraints that aren't supported by the message or context.
-Examples:
-- "do you have white adidas shoes in size 8?" → [{"field":"color","value":"white","operator":"eq","confidence":0.9,"source":"user"},{"field":"brand","value":"adidas","operator":"eq","confidence":0.9,"source":"user"},{"field":"size","value":"8","operator":"eq","confidence":0.9,"source":"user"}]
-- "16mm super natural lashes price" → [{"field":"size","value":"16mm","operator":"eq","confidence":0.9,"source":"user"},{"field":"collection","value":"super natural","operator":"eq","confidence":0.8,"source":"user"}]
-- "contact information" → []
-
-Also classify multi-entity intent when the user compares or asks about multiple products in ONE message, or asks which option to choose after a list:
-
-- multiEntityMode: null | "compare" | "multi_ask" | "choose_from_list"
-  - "compare": explicit comparison (vs, compare, difference between, which is better)
-  - "multi_ask": asks about two or more products together without explicit comparison wording ("tell me about A and B", "price of X and Y")
-  - "choose_from_list": recommendation or selection after a previously presented list ("which one should I choose", "help me pick", "which is best for me")
-  - null: normal single-entity request
-
-- rawEntities:
-  - MUST be an array of the relevant product/entity names whenever multiEntityMode is NOT null.
-  - First extract entity names from the current user message.
-  - If fewer than the required entities are present, resolve them from the provided chat history and conversation state.
-  - For "compare" and "multi_ask", return all referenced entities (normally 2-3).
-  - For "choose_from_list", ALWAYS return the candidate entities from the immediately preceding assistant response or conversation state. Never return an empty array.
-  - Never invent entity names. Only use entities explicitly mentioned in the current message or present in the supplied conversation history/conversation state.
-  - If no valid entities can be found in either the message or history, set multiEntityMode to null instead of returning an empty rawEntities array.
-
-  IF current message does not clearly name the active entity
-AND we can resolve from the chat history
-THEN
-  rewrittenQuery = entity + user intent (strip pronouns)
-  needsRewrite = true
-  followUp = true
-  // keep SEMANTIC_RAG (or existing RAG route); never ACK for real asks
-
-Respond with JSON only:
-{
-  "route": "SEMANTIC_RAG",
-  "subIntent": null,
-  "userLanguage": "en",
-  "confidence": 0.85,
-  "rewrittenQuery": null,
-  "lexicalTerms": [],
-  "constraints": [],
-  "multiEntityMode": null,
-  "rawEntities": [],
-  "followUp": false,
-  "needsRewrite": false,
-  "rewriteReason": "NONE",
-  "isTrulyOffTopic": false
-}`;
-
-
-// - rawEntities: array of 2-3 product/entity name strings extracted from THIS message only. Empty array when names are not in the message (e.g. choose_from_list follow-up). Do NOT invent product names.
+  const systemPrompt = userIntentPrompt();
 
   const userContentParts = [`Website language: ${websiteLanguage}`];
 
@@ -1033,12 +944,12 @@ Respond with JSON only:
         });
       } catch (logError) {
         console.warn(
-          `[QueryRouter] Error logging routing usage: ${logError.message}`
+          `[QueryRouter] Error logging routing usage: ${logError.message}`,
         );
       }
     }
 
-    console.log("parsed content data check : ",parseRouterJson(content));
+    console.log("parsed content data check : ", parseRouterJson(content));
 
     return parseRouterJson(content);
   } catch (error) {
@@ -1075,7 +986,10 @@ async function routeQuery(question, options = {}) {
     route: ruleOutcome.result?.route || null,
   });
 
-  console.log("shouldDeferToLlmRouter:", shouldDeferToLlmRouter(question, ruleOutcome));
+  console.log(
+    "shouldDeferToLlmRouter:",
+    shouldDeferToLlmRouter(question, ruleOutcome),
+  );
 
   if (!shouldDeferToLlmRouter(question, ruleOutcome)) {
     return ruleOutcome.result;
@@ -1090,7 +1004,7 @@ async function routeQuery(question, options = {}) {
   console.log("chat history snippet for LLM routing:", chatHistorySnippet);
 
   console.log(
-    `[QueryRouter] LLM routing (rules deferred: ${ruleOutcome.confident ? ruleOutcome.result?.source : "no_match"}) for: ${question.substring(0, 80)}`
+    `[QueryRouter] LLM routing (rules deferred: ${ruleOutcome.confident ? ruleOutcome.result?.source : "no_match"}) for: ${question.substring(0, 80)}`,
   );
 
   const llmResult = await llmRoute(question, {

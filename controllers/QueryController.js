@@ -290,6 +290,8 @@ function usageTypeForChatSelection({
 }
 
 function getContextLimitsForMode(responseMode) {
+
+  console.log("response mode checks :",responseMode);
   if (responseMode === "page_links" || responseMode === "links") {
     return {
       maxChunkChars: RAG_MAX_CHUNK_CHARS,
@@ -1091,6 +1093,8 @@ class QuestionAnsweringSystem {
   // queries ("give me its pricing" → 400) and gave non-English queries the
   // bare 300-token default.
   determineMaxTokens(question, responseMode = "brief", subIntent = null) {
+
+    return 1200;
     // ── Tier 1: structural modes resolved by LLM router ───────────────────
     if (responseMode === "list" || subIntent === "IN_PAGE_LIST") {
       const count = this.extractRequestedCount(question, 5);
