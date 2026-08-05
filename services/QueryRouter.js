@@ -878,7 +878,7 @@ async function llmRoute(question, options = {}) {
 
   // user intent prompt -->
 
-  const systemPrompt = userIntentPrompt();
+  const systemPrompt = userIntentPrompt(userIntentPrompt);
 
   const userContentParts = [`Website language: ${websiteLanguage}`];
 

@@ -368,7 +368,7 @@
 // }`;
 
 
-function userIntentPrompt(){
+function userIntentPrompt(websiteLanguage){
     `You are a multilingual query router and contextual query rewriter for a business-support chatbot.
 
 Website language: ${websiteLanguage}
