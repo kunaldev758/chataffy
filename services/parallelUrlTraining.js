@@ -1,0 +1,1068 @@
+/**
+ * Parallel scrape (bounded concurrency) + overlap chunk/embed/Qdrant train.
+ * Used by urlProcessingQueue and retrainTrainingDataQueue workers.
+ */
+const Client = require("../models/Client");
+const Agent = require("../models/Agent");
+const WebsiteData = require("../models/WebsiteData");
+const {
+  ConcurrencyLimiter,
+  createAsyncLock,
+  mapWithConcurrency,
+} = require("../utils/concurrency");
+const {
+  isScrapableWebUrl,
+  isNonContentPath,
+} = require("../utils/webUrlUtils");
+const {
+  markUrlFetched,
+  markUrlProcessed,
+  markUrlFailed,
+  markUrlSkipped,
+  markUrlUnchanged,
+  checkCanonicalDuplicate,
+} = require("./contentPipeline");
+
+const DEFAULT_SCRAPE_CONCURRENCY = Math.max(
+  1,
+  parseInt(process.env.TRAINING_SCRAPE_CONCURRENCY || "8", 10) || 8,
+);
+const DEFAULT_EMBED_CONCURRENCY = Math.max(
+  1,
+  parseInt(process.env.TRAINING_EMBED_CONCURRENCY || "3", 10) || 3,
+);
+
+/**
+ * @param {object} opts
+ * @param {string[]} opts.urls
+ * @param {string|object} opts.userId
+ * @param {string|object} opts.agentId
+ * @param {string} opts.qdrantIndexName
+ * @param {object} opts.plan
+ * @param {object} opts.TrainingModel
+ * @param {object} opts.batchService
+ * @param {Function} opts.processWebPage
+ * @param {object} opts.webScraper
+ * @param {string|number} opts.jobId
+ * @param {Function} opts.emitScrapingProgress
+ * @param {Function} opts.emitTrainingProgress
+ * @param {Function} opts.markWebUrlScrapeFailed
+ * @param {string} opts.nonHtmlSkipError
+ * @param {number} [opts.scrapeConcurrency]
+ * @param {number} [opts.embedConcurrency]
+ * @param {Date} opts.scrapingStartTime
+ * @param {number} opts.totalUrlsCount
+ * @param {Function} [opts.onStorageLimit]
+ */
+async function runParallelScrapeOverlapTrain(opts) {
+  const {
+    urls,
+    userId,
+    agentId,
+    qdrantIndexName,
+    plan,
+    TrainingModel,
+    batchService,
+    processWebPage,
+    webScraper,
+    jobId,
+    emitScrapingProgress,
+    emitTrainingProgress,
+    markWebUrlScrapeFailed,
+    nonHtmlSkipError,
+    scrapeConcurrency = DEFAULT_SCRAPE_CONCURRENCY,
+    embedConcurrency = DEFAULT_EMBED_CONCURRENCY,
+    scrapingStartTime,
+    totalUrlsCount,
+    onStorageLimit,
+  } = opts;
+
+  const chromeCache = {};
+  const seenCanonicalKeys = new Set();
+  const withSharedLock = createAsyncLock();
+  const trainLimiter = new ConcurrencyLimiter(embedConcurrency);
+  const trainPromises = [];
+  const scrapedDocs = [];
+
+  let metadataExtracted = false;
+  let metadataFromHomepage = false;
+  let stoppedForStorageLimit = false;
+  let scrapeCompleted = 0;
+  let trainQueued = 0;
+  let trainCompleted = 0;
+  let anyTrainFailed = false;
+  let lastProgressEmitTime = 0;
+  const PROGRESS_EMIT_INTERVAL = 2000;
+
+  console.log(
+    `[parallelUrlTraining] scrape=${scrapeConcurrency} embed=${embedConcurrency} urls=${totalUrlsCount}`,
+  );
+
+  const summarizeDoc = (doc) =>
+    `${doc.originalUrl} chunks=${doc.dataSize != null ? `bytes=${doc.dataSize}` : "bytes=?"}`;
+
+  const computeOverlapFraction = () => {
+    const scrapeFrac =
+      totalUrlsCount > 0 ? scrapeCompleted / totalUrlsCount : 1;
+    const trainFrac = trainQueued > 0 ? trainCompleted / trainQueued : 0;
+    if (scrapeCompleted < totalUrlsCount) {
+      return Math.max(0, Math.min(1, scrapeFrac * 0.45 + trainFrac * 0.55));
+    }
+    return Math.max(0, Math.min(1, trainFrac));
+  };
+
+  const bumpScrapeProgress = async () => {
+    scrapeCompleted += 1;
+    const now = Date.now();
+    if (
+      now - lastProgressEmitTime >= PROGRESS_EMIT_INTERVAL ||
+      scrapeCompleted === 1 ||
+      scrapeCompleted >= totalUrlsCount
+    ) {
+      await emitScrapingProgress(
+        scrapeCompleted,
+        totalUrlsCount,
+        scrapeCompleted < totalUrlsCount || trainQueued > trainCompleted,
+      );
+      lastProgressEmitTime = now;
+    }
+  };
+
+  const finalizeTrainedDoc = async (doc, result) => {
+    const pageResult = result?.resultsByUrl?.[doc.originalUrl];
+    const skipped = pageResult?.skipped;
+    const failed =
+      !result?.success || result?.failedUrls?.includes(doc.originalUrl);
+
+    if (skipped === "unchanged") {
+      console.log(
+        `[parallelUrlTraining] train skipped unchanged url=${doc.originalUrl}`,
+      );
+      await markUrlUnchanged(doc.originalUrl, agentId, {
+        contentHash: pageResult.contentHash,
+        pageType: pageResult.page?.pageType || "generic",
+        canonicalUrl: doc.metadata?.canonicalUrl || null,
+        language: doc.metadata?.language || "en",
+        qualityScore: pageResult.qualityScore,
+      });
+      return;
+    }
+
+    if (skipped === "low_quality") {
+      console.log(
+        `[parallelUrlTraining] train skipped low_quality url=${doc.originalUrl} reason=${pageResult.skipReason || "below_threshold"}`,
+      );
+      await markUrlSkipped(
+        doc.originalUrl,
+        agentId,
+        `low_quality:${pageResult.skipReason || "below_threshold"}`,
+        {
+          canonicalUrl: doc.metadata?.canonicalUrl || null,
+          language: doc.metadata?.language || "en",
+          qualityScore: pageResult.qualityScore,
+          contentHash: pageResult.contentHash,
+          pageType: "generic",
+        },
+      );
+      if (doc.dataSize > 0) {
+        await Client.updateOne(
+          { userId },
+          { $inc: { currentDataSize: -doc.dataSize } },
+        );
+      }
+      return;
+    }
+
+    const status = failed ? 2 : 1;
+    if (status === 1) {
+      console.log(
+        `[parallelUrlTraining] train success url=${doc.originalUrl} chunks=${result.chunkCountPerUrl?.[doc.originalUrl] || 0}`,
+      );
+      await TrainingModel.create({
+        userId,
+        agentId,
+        type: 0,
+        content: doc.content,
+        dataSize: doc.dataSize,
+        trainingStatus: status,
+        "webPage.url": doc.originalUrl,
+        chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
+        lastEdit: Date.now(),
+      });
+      await markUrlProcessed(doc.originalUrl, agentId, {
+        contentHash:
+          pageResult?.contentHash || pageResult?.page?.content_hash,
+        pageType:
+          pageResult?.page?.pageType || doc.metadata?.pageType || "generic",
+        canonicalUrl: doc.metadata?.canonicalUrl || null,
+        language: doc.metadata?.language || "en",
+        qualityScore: pageResult?.qualityScore,
+      });
+    } else {
+      anyTrainFailed = true;
+      console.log(
+        `[parallelUrlTraining] train failed url=${doc.originalUrl} error=${result?.error || "unknown"}`,
+      );
+      await TrainingModel.create({
+        userId,
+        agentId,
+        type: 0,
+        content: doc.content,
+        dataSize: doc.dataSize,
+        trainingStatus: status,
+        error: result?.error || "Failed to process/minify web page content",
+        "webPage.url": doc.originalUrl,
+        chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
+        lastEdit: Date.now(),
+      });
+      await markUrlFailed(
+        doc.originalUrl,
+        agentId,
+        result?.error || "Failed to process/minify web page content",
+      );
+    }
+
+    await Agent.updateOne(
+      { _id: agentId },
+      {
+        $inc: {
+          ...(status === 1
+            ? { "pagesAdded.success": 1 }
+            : { "pagesAdded.failed": 1 }),
+        },
+      },
+    );
+  };
+
+  const enqueueTrain = (doc) => {
+    trainQueued += 1;
+    console.log(
+      `[parallelUrlTraining] queued train ${trainQueued}/${totalUrlsCount} url=${summarizeDoc(doc)}`,
+    );
+    const trainPromise = (async () => {
+      await trainLimiter.acquire();
+      try {
+        console.log(
+          `[parallelUrlTraining] train start active<=${embedConcurrency} completed=${trainCompleted}/${trainQueued} url=${doc.originalUrl}`,
+        );
+        await emitTrainingProgress({
+          trainingProcessed: trainCompleted,
+          trainingTotal: Math.max(trainQueued, 1),
+          trainingFraction: computeOverlapFraction(),
+          force: trainQueued === 1,
+        });
+
+        const result = await batchService.processDocumentAndTrain(
+          [doc],
+          userId,
+          agentId,
+          qdrantIndexName,
+          {
+            onProgress: async (progress) => {
+              const local =
+                progress.trainingTotal > 0
+                  ? (progress.trainingProcessed || 0) / progress.trainingTotal
+                  : 1;
+              const overall =
+                (trainCompleted + Math.max(0, Math.min(1, local))) /
+                Math.max(trainQueued, 1);
+              const scrapeFrac =
+                totalUrlsCount > 0 ? scrapeCompleted / totalUrlsCount : 1;
+              const blended =
+                scrapeCompleted < totalUrlsCount
+                  ? scrapeFrac * 0.45 + overall * 0.55
+                  : overall;
+              await emitTrainingProgress({
+                trainingProcessed: trainCompleted + local,
+                trainingTotal: Math.max(trainQueued, 1),
+                trainingFraction: blended,
+                embeddingProgress: progress.embeddingProgress ?? 0,
+                embeddingTotal: progress.embeddingTotal ?? 0,
+                upsertProgress: progress.upsertProgress ?? 0,
+                upsertTotal: progress.upsertTotal ?? 0,
+                trainingStep: progress.step ?? "chunking",
+                force: false,
+              });
+            },
+          },
+        );
+        await finalizeTrainedDoc(doc, result);
+      } catch (trainErr) {
+        anyTrainFailed = true;
+        console.error(
+          `[parallelUrlTraining] train failed for ${doc.originalUrl}:`,
+          trainErr,
+        );
+        try {
+          await finalizeTrainedDoc(doc, {
+            success: false,
+            failedUrls: [doc.originalUrl],
+            chunkCountPerUrl: {},
+            resultsByUrl: {
+              [doc.originalUrl]: {
+                success: false,
+                error: trainErr?.message,
+              },
+            },
+            error: trainErr?.message,
+          });
+        } catch (finalizeErr) {
+          console.error(
+            `[parallelUrlTraining] finalize failed for ${doc.originalUrl}:`,
+            finalizeErr,
+          );
+        }
+      } finally {
+        trainLimiter.release();
+        trainCompleted += 1;
+        console.log(
+          `[parallelUrlTraining] train finished completed=${trainCompleted}/${trainQueued} url=${doc.originalUrl}`,
+        );
+        await emitTrainingProgress({
+          trainingProcessed: trainCompleted,
+          trainingTotal: Math.max(trainQueued, 1),
+          trainingFraction: computeOverlapFraction(),
+          force:
+            trainCompleted >= trainQueued && scrapeCompleted >= totalUrlsCount,
+        });
+      }
+    })();
+    trainPromises.push(trainPromise);
+  };
+
+  const triggerStorageLimitStop = async () => {
+    if (stoppedForStorageLimit) return;
+    stoppedForStorageLimit = true;
+    console.log(
+      "[parallelUrlTraining] storage limit exceeded — stopping new scrapes",
+    );
+    await Client.updateOne(
+      { userId },
+      { $set: { "upgradePlanStatus.storageLimitExceeded": true } },
+    );
+
+    if (typeof onStorageLimit === "function") {
+      await onStorageLimit({
+        scrapeCompleted,
+        totalUrlsCount,
+        scrapingStartTime,
+      });
+    }
+  };
+
+  await mapWithConcurrency(urls, scrapeConcurrency, async (url) => {
+    try {
+      if (stoppedForStorageLimit) {
+        return;
+      }
+
+      if (!isScrapableWebUrl(url) || isNonContentPath(url)) {
+        const reason = isNonContentPath(url)
+          ? "Non-content URL skipped (cart/checkout/login/pagination)."
+          : nonHtmlSkipError;
+        console.log(`Skipping non-content URL: ${url}`);
+        if (isNonContentPath(url)) {
+          await markUrlSkipped(url, agentId, reason);
+        } else {
+          await markWebUrlScrapeFailed({
+            url,
+            userId,
+            agentId,
+            TrainingModel,
+            error: reason,
+          });
+        }
+        return;
+      }
+
+      console.log(`[parallelUrlTraining] scrape start url=${url}`);
+      const { rawHtml: sourceCode } = await webScraper.scrapeWebpage(url, {
+        maxRetries: 2,
+        userId,
+        jobId,
+      });
+      console.log(
+        `[parallelUrlTraining] scrape done url=${url} html_bytes=${Buffer.byteLength(sourceCode || "", "utf8")}`,
+      );
+
+      if (stoppedForStorageLimit) {
+        return;
+      }
+
+      await markUrlFetched(url, agentId);
+
+      const processResult = await processWebPage(url, sourceCode, chromeCache, {
+        userId,
+        agentId,
+        conversationId: null,
+      });
+      console.log(
+        `[parallelUrlTraining] process done url=${url} has_content=${!!processResult?.content}`,
+      );
+
+      if (!processResult?.content) {
+        await TrainingModel.create({
+          userId,
+          agentId,
+          type: 0,
+          content: "",
+          dataSize: 0,
+          trainingStatus: 2,
+          error: "No data found",
+          "webPage.url": url,
+          chunkCount: 0,
+          lastEdit: Date.now(),
+        });
+        await markUrlFailed(
+          url,
+          agentId,
+          "Failed to process/minify web page content",
+        );
+        return;
+      }
+
+      const {
+        content,
+        title,
+        metaDescription,
+        webPageURL,
+        websiteMetadata,
+        canonicalUrl,
+        language,
+        pageType,
+        entity_type,
+        entity_name,
+        attributes,
+        search_terms,
+        classification_confidence,
+        classification_reason,
+        extraction_source,
+        sections,
+        product_id,
+      } = processResult;
+
+      const docOrSkip = await withSharedLock(async () => {
+        if (stoppedForStorageLimit) return { skip: true };
+
+        const canonCheck = await checkCanonicalDuplicate({
+          agentId,
+          pageUrl: url,
+          canonicalUrl,
+          seenCanonicalKeys,
+        });
+        if (canonCheck.isDuplicate) {
+          console.log(
+            `[parallelUrlTraining] Skipping canonical duplicate ${url} → ${canonCheck.duplicateOf} (${canonCheck.reason})`,
+          );
+          await markUrlSkipped(
+            url,
+            agentId,
+            `canonical_duplicate:${canonCheck.reason}`,
+            {
+              canonicalUrl: canonicalUrl || null,
+              language: language || "en",
+              pageType: pageType || "generic",
+            },
+          );
+          return { skip: true };
+        }
+
+        if (websiteMetadata) {
+          const isHome = websiteMetadata._isHomepage === true;
+          const shouldStore =
+            isHome || (!metadataExtracted && !metadataFromHomepage);
+
+          if (shouldStore) {
+            try {
+              const websiteData = await WebsiteData.getOrCreate({
+                userId,
+                ...(agentId ? { agentId } : {}),
+              });
+              const { _isHomepage, ...cleanMetadata } = websiteMetadata;
+              await websiteData.updateData({
+                ...cleanMetadata,
+                website_url: cleanMetadata.website_url || url,
+                domain: cleanMetadata.domain || new URL(url).hostname,
+              });
+              metadataExtracted = true;
+              if (isHome) metadataFromHomepage = true;
+              console.log(
+                `[parallelUrlTraining] Stored website metadata for user ${userId} from ${url}`,
+              );
+            } catch (metadataError) {
+              console.error(
+                `[parallelUrlTraining] Error storing website metadata:`,
+                metadataError,
+              );
+            }
+          }
+        }
+
+        const contentSize = Buffer.byteLength(content, "utf8");
+        const clientDoc = await Client.findOne({ userId });
+        const currentDataSize = clientDoc?.currentDataSize || 0;
+        const maxStorage =
+          clientDoc?.customLimits?.isCustomLimits &&
+          clientDoc.customLimits?.maxStorage != null
+            ? clientDoc.customLimits.maxStorage
+            : plan.limits.maxStorage;
+
+        if (currentDataSize + contentSize > maxStorage) {
+          await triggerStorageLimitStop();
+          return { skip: true };
+        }
+
+        await Client.updateOne(
+          { userId },
+          { $inc: { currentDataSize: contentSize } },
+        );
+
+        return {
+          skip: false,
+          doc: {
+            type: 0,
+            content,
+            sourceCode,
+            dataSize: contentSize,
+            metadata: {
+              url: webPageURL,
+              title,
+              metaDescription,
+              canonicalUrl: canonicalUrl || null,
+              language: language || "en",
+              pageType: pageType || "generic",
+              entity_type: entity_type || "general",
+              entity_name: entity_name || null,
+              attributes: attributes || {},
+              search_terms: search_terms || [],
+              classification_confidence:
+                typeof classification_confidence === "number"
+                  ? classification_confidence
+                  : 0,
+              classification_reason: classification_reason || "rules",
+              extraction_source: extraction_source || "generic",
+              product_id: product_id || null,
+              sections: Array.isArray(sections) ? sections : undefined,
+              type: "webpage",
+            },
+            originalUrl: url,
+          },
+        };
+      });
+
+      if (!docOrSkip?.skip && docOrSkip?.doc) {
+        scrapedDocs.push(docOrSkip.doc);
+        enqueueTrain(docOrSkip.doc);
+      }
+    } catch (error) {
+      const existingFailRow = await TrainingModel.findOne({
+        userId,
+        agentId,
+        "webPage.url": url,
+      })
+        .select("trainingStatus")
+        .lean();
+      const prevTrainStatus = existingFailRow?.trainingStatus;
+
+      await TrainingModel.findOneAndUpdate(
+        { userId, agentId, "webPage.url": url },
+        {
+          $set: {
+            userId,
+            agentId,
+            type: 0,
+            trainingStatus: 2,
+            lastEdit: Date.now(),
+            error: error?.message,
+            "webPage.url": url,
+          },
+        },
+        { upsert: true, setDefaultsOnInsert: true },
+      );
+
+      if (prevTrainStatus !== 2) {
+        const inc =
+          prevTrainStatus === 1
+            ? { "pagesAdded.success": -1, "pagesAdded.failed": 1 }
+            : { "pagesAdded.failed": 1 };
+        await Agent.updateOne({ _id: agentId }, { $inc: inc });
+      }
+      await markUrlFailed(url, agentId, error?.message || "Failed to train");
+    } finally {
+      await bumpScrapeProgress();
+    }
+  });
+
+  await Promise.all(trainPromises);
+
+  if (!stoppedForStorageLimit) {
+    await emitScrapingProgress(totalUrlsCount, totalUrlsCount, true);
+    if (trainQueued > 0) {
+      await emitTrainingProgress({
+        trainingProcessed: trainCompleted,
+        trainingTotal: trainQueued,
+        trainingFraction: 1,
+        force: true,
+      });
+    }
+  }
+
+  console.log(
+    `[parallelUrlTraining] summary scraped=${scrapedDocs.length}/${totalUrlsCount} queued=${trainQueued} completed=${trainCompleted} failed=${anyTrainFailed} stopped=${stoppedForStorageLimit}`,
+  );
+
+  return {
+    scrapedDocs,
+    trainQueued,
+    trainCompleted,
+    anyTrainFailed,
+    stoppedForStorageLimit,
+  };
+}
+
+/**
+ * Retrain path: parallel scrape + overlap train, updating existing TrainingModel rows.
+ */
+async function runParallelRetrainOverlap(opts) {
+  const {
+    validEntries,
+    userId,
+    agentId,
+    qdrantIndexName,
+    TrainingModel,
+    batchService,
+    processWebPage,
+    webScraper,
+    jobId,
+    emitScrapingProgress,
+    emitTrainingProgress,
+    qdrantManager,
+    nonHtmlSkipError,
+    scrapeConcurrency = DEFAULT_SCRAPE_CONCURRENCY,
+    embedConcurrency = DEFAULT_EMBED_CONCURRENCY,
+    totalEntries,
+  } = opts;
+
+  const chromeCache = {};
+  const retrainCanonicalKeys = new Set();
+  const withSharedLock = createAsyncLock();
+  const trainLimiter = new ConcurrencyLimiter(embedConcurrency);
+  const trainPromises = [];
+
+  let scrapeCompleted = 0;
+  let trainQueued = 0;
+  let trainCompleted = 0;
+  let successCount = 0;
+  let failCount = 0;
+  let lastProgressEmitTime = 0;
+  const PROGRESS_EMIT_INTERVAL = 2000;
+
+  console.log(
+    `[parallelRetrain] scrape=${scrapeConcurrency} embed=${embedConcurrency} entries=${totalEntries}`,
+  );
+
+  async function applyWebPagePagesAddedDelta(prevStatus, newStatus) {
+    if (prevStatus === newStatus) return;
+    const inc = {};
+    if (prevStatus === 1) inc["pagesAdded.success"] = -1;
+    else if (prevStatus === 2) inc["pagesAdded.failed"] = -1;
+    if (newStatus === 1) inc["pagesAdded.success"] = (inc["pagesAdded.success"] || 0) + 1;
+    else if (newStatus === 2) inc["pagesAdded.failed"] = (inc["pagesAdded.failed"] || 0) + 1;
+    const filtered = Object.fromEntries(
+      Object.entries(inc).filter(([, v]) => v !== 0),
+    );
+    if (Object.keys(filtered).length === 0) return;
+    await Agent.updateOne({ _id: agentId }, { $inc: filtered });
+  }
+
+  const markEntryFailed = async ({ entry, prevStatus, error }) => {
+    await TrainingModel.updateOne(
+      { _id: entry._id },
+      {
+        $set: {
+          trainingStatus: 2,
+          error,
+          lastEdit: new Date(),
+        },
+      },
+    );
+    await applyWebPagePagesAddedDelta(prevStatus, 2);
+    failCount += 1;
+  };
+
+  const computeOverlapFraction = () => {
+    const scrapeFrac = totalEntries > 0 ? scrapeCompleted / totalEntries : 1;
+    const trainFrac = trainQueued > 0 ? trainCompleted / trainQueued : 0;
+    if (scrapeCompleted < totalEntries) {
+      return Math.max(0, Math.min(1, scrapeFrac * 0.45 + trainFrac * 0.55));
+    }
+    return Math.max(0, Math.min(1, trainFrac));
+  };
+
+  const bumpScrapeProgress = async () => {
+    scrapeCompleted += 1;
+    const now = Date.now();
+    if (
+      now - lastProgressEmitTime >= PROGRESS_EMIT_INTERVAL ||
+      scrapeCompleted === 1 ||
+      scrapeCompleted >= totalEntries
+    ) {
+      await emitScrapingProgress(
+        scrapeCompleted,
+        totalEntries,
+        scrapeCompleted < totalEntries || trainQueued > trainCompleted,
+      );
+      lastProgressEmitTime = now;
+    }
+  };
+
+  const finalizeRetrainItem = async (item, result) => {
+    const pageResult = result?.resultsByUrl?.[item.url];
+    const skipped = pageResult?.skipped;
+    const failed =
+      !result?.success || result?.failedUrls?.includes(item.url);
+
+    if (skipped === "unchanged") {
+      console.log(`[parallelRetrain] train skipped unchanged url=${item.url}`);
+      await markUrlUnchanged(item.url, agentId, {
+        contentHash: pageResult.contentHash,
+        pageType: pageResult.page?.pageType || "generic",
+        canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
+        language: item.scrapedDoc?.metadata?.language || "en",
+        qualityScore: pageResult.qualityScore,
+      });
+      successCount += 1;
+      return;
+    }
+
+    if (skipped === "low_quality") {
+      console.log(
+        `[parallelRetrain] train skipped low_quality url=${item.url} reason=${pageResult.skipReason || "below_threshold"}`,
+      );
+      await markUrlSkipped(
+        item.url,
+        agentId,
+        `low_quality:${pageResult.skipReason || "below_threshold"}`,
+        {
+          canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
+          language: item.scrapedDoc?.metadata?.language || "en",
+          qualityScore: pageResult.qualityScore,
+          contentHash: pageResult.contentHash,
+        },
+      );
+      try {
+        await qdrantManager.deleteByFields({
+          user_id: userId?.toString(),
+          agent_id: agentId?.toString(),
+          url: item.url,
+        });
+      } catch (delErr) {
+        console.warn(
+          `[parallelRetrain] low_quality delete warning for ${item.url}:`,
+          delErr.message,
+        );
+      }
+      return;
+    }
+
+    if (failed) {
+      console.log(
+        `[parallelRetrain] train failed url=${item.url} error=${result?.error || "Failed to upsert vectors"}`,
+      );
+      await markEntryFailed({
+        entry: item.entry,
+        prevStatus: item.prevStatus,
+        error: result?.error || "Failed to upsert vectors",
+      });
+      return;
+    }
+
+    console.log(
+      `[parallelRetrain] train success url=${item.url} chunks=${result.chunkCountPerUrl?.[item.url] || 0}`,
+    );
+    await TrainingModel.updateOne(
+      { _id: item.entry._id },
+      {
+        $set: {
+          content: item.content,
+          dataSize: item.contentSize,
+          trainingStatus: 1,
+          lastEdit: new Date(),
+          chunkCount: result.chunkCountPerUrl?.[item.url] || 0,
+          "webPage.url": item.url,
+        },
+      },
+    );
+
+    await markUrlProcessed(item.url, agentId, {
+      contentHash:
+        pageResult?.contentHash || pageResult?.page?.content_hash,
+      pageType: pageResult?.page?.pageType || "generic",
+      canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
+      language: item.scrapedDoc?.metadata?.language || "en",
+      qualityScore: pageResult?.qualityScore,
+    });
+
+    await applyWebPagePagesAddedDelta(item.prevStatus, 1);
+
+    if (item.dataSizeDelta !== 0) {
+      await Client.updateOne(
+        { userId },
+        { $inc: { currentDataSize: item.dataSizeDelta } },
+      );
+    }
+
+    successCount += 1;
+  };
+
+  const enqueueTrain = (item) => {
+    trainQueued += 1;
+    console.log(
+      `[parallelRetrain] queued train ${trainQueued}/${totalEntries} url=${item.url}`,
+    );
+    const trainPromise = (async () => {
+      await trainLimiter.acquire();
+      try {
+        console.log(
+          `[parallelRetrain] train start active<=${embedConcurrency} completed=${trainCompleted}/${trainQueued} url=${item.url}`,
+        );
+        await emitTrainingProgress({
+          trainingProcessed: trainCompleted,
+          trainingTotal: Math.max(trainQueued, 1),
+          trainingFraction: computeOverlapFraction(),
+          force: trainQueued === 1,
+        });
+
+        const result = await batchService.processDocumentAndTrain(
+          [item.scrapedDoc],
+          userId,
+          agentId,
+          qdrantIndexName,
+          {
+            onProgress: async (progress) => {
+              const local =
+                progress.trainingTotal > 0
+                  ? (progress.trainingProcessed || 0) / progress.trainingTotal
+                  : 1;
+              const overall =
+                (trainCompleted + Math.max(0, Math.min(1, local))) /
+                Math.max(trainQueued, 1);
+              const scrapeFrac =
+                totalEntries > 0 ? scrapeCompleted / totalEntries : 1;
+              const blended =
+                scrapeCompleted < totalEntries
+                  ? scrapeFrac * 0.45 + overall * 0.55
+                  : overall;
+              await emitTrainingProgress({
+                trainingProcessed: trainCompleted + local,
+                trainingTotal: Math.max(trainQueued, 1),
+                trainingFraction: blended,
+                embeddingProgress: progress.embeddingProgress ?? 0,
+                embeddingTotal: progress.embeddingTotal ?? 0,
+                upsertProgress: progress.upsertProgress ?? 0,
+                upsertTotal: progress.upsertTotal ?? 0,
+                trainingStep: progress.step ?? "chunking",
+                force: false,
+              });
+            },
+          },
+        );
+        await finalizeRetrainItem(item, result);
+      } catch (trainErr) {
+        console.error(
+          `[parallelRetrain] train failed for ${item.url}:`,
+          trainErr,
+        );
+        await markEntryFailed({
+          entry: item.entry,
+          prevStatus: item.prevStatus,
+          error: trainErr?.message || "Failed to upsert vectors",
+        });
+      } finally {
+        trainLimiter.release();
+        trainCompleted += 1;
+        console.log(
+          `[parallelRetrain] train finished completed=${trainCompleted}/${trainQueued} url=${item.url}`,
+        );
+        await emitTrainingProgress({
+          trainingProcessed: trainCompleted,
+          trainingTotal: Math.max(trainQueued, 1),
+          trainingFraction: computeOverlapFraction(),
+          force:
+            trainCompleted >= trainQueued && scrapeCompleted >= totalEntries,
+        });
+      }
+    })();
+    trainPromises.push(trainPromise);
+  };
+
+  await mapWithConcurrency(validEntries, scrapeConcurrency, async (entry) => {
+    const url = entry.webPage.url;
+    const prevStatus = entry.trainingStatus;
+
+    try {
+      if (!isScrapableWebUrl(url) || isNonContentPath(url)) {
+        console.log(`[parallelRetrain] Skipping non-content URL: ${url}`);
+        await markEntryFailed({
+          entry,
+          prevStatus,
+          error: isNonContentPath(url)
+            ? "Non-content URL skipped (cart/checkout/login/pagination)."
+            : nonHtmlSkipError,
+        });
+        return;
+      }
+
+      console.log(`[parallelRetrain] scrape start url=${url}`);
+      const { rawHtml } = await webScraper.scrapeWebpage(url, {
+        maxRetries: 2,
+        userId,
+        jobId,
+      });
+      console.log(
+        `[parallelRetrain] scrape done url=${url} html_bytes=${Buffer.byteLength(rawHtml || "", "utf8")}`,
+      );
+
+      const processResult = await processWebPage(url, rawHtml, chromeCache, {
+        userId,
+        agentId,
+        conversationId: null,
+      });
+      console.log(
+        `[parallelRetrain] process done url=${url} has_content=${!!processResult?.content}`,
+      );
+
+      if (!processResult?.content) {
+        await markEntryFailed({
+          entry,
+          prevStatus,
+          error: "Failed to process/minify web page content",
+        });
+        return;
+      }
+
+      const {
+        content,
+        title,
+        metaDescription,
+        webPageURL,
+        canonicalUrl,
+        language,
+        pageType,
+        entity_type,
+        entity_name,
+        attributes,
+        search_terms,
+        classification_confidence,
+        classification_reason,
+        extraction_source,
+        sections,
+        product_id,
+      } = processResult;
+
+      const itemOrSkip = await withSharedLock(async () => {
+        const canonCheck = await checkCanonicalDuplicate({
+          agentId,
+          pageUrl: url,
+          canonicalUrl,
+          seenCanonicalKeys: retrainCanonicalKeys,
+        });
+        if (canonCheck.isDuplicate) {
+          await markUrlSkipped(
+            url,
+            agentId,
+            `canonical_duplicate:${canonCheck.reason}`,
+            {
+              canonicalUrl: canonicalUrl || null,
+              language: language || "en",
+              pageType: pageType || "generic",
+            },
+          );
+          return { skip: true };
+        }
+
+        const contentSize = Buffer.byteLength(content, "utf8");
+        const oldDataSize = entry.dataSize || 0;
+        const dataSizeDelta = contentSize - oldDataSize;
+
+        return {
+          skip: false,
+          item: {
+            entry,
+            prevStatus,
+            url,
+            content,
+            contentSize,
+            dataSizeDelta,
+            scrapedDoc: {
+              type: 0,
+              content,
+              sourceCode: rawHtml,
+              dataSize: contentSize,
+              metadata: {
+                url: webPageURL,
+                title,
+                metaDescription,
+                canonicalUrl: canonicalUrl || null,
+                language: language || "en",
+                pageType: pageType || "generic",
+                entity_type: entity_type || "general",
+                entity_name: entity_name || null,
+                attributes: attributes || {},
+                search_terms: search_terms || [],
+                classification_confidence:
+                  typeof classification_confidence === "number"
+                    ? classification_confidence
+                    : 0,
+                classification_reason: classification_reason || "rules",
+                extraction_source: extraction_source || "generic",
+                product_id: product_id || null,
+                sections: Array.isArray(sections) ? sections : undefined,
+                type: "webpage",
+              },
+              originalUrl: url,
+            },
+          },
+        };
+      });
+
+      if (!itemOrSkip?.skip && itemOrSkip?.item) {
+        enqueueTrain(itemOrSkip.item);
+      }
+    } catch (err) {
+      console.error(`[parallelRetrain] Error retraining ${url}:`, err);
+      await markEntryFailed({
+        entry,
+        prevStatus,
+        error: err?.message || "Scraping failed",
+      });
+    } finally {
+      await bumpScrapeProgress();
+    }
+  });
+
+  await Promise.all(trainPromises);
+
+  await emitScrapingProgress(totalEntries, totalEntries, false);
+  if (trainQueued > 0) {
+    await emitTrainingProgress({
+      trainingProcessed: trainCompleted,
+      trainingTotal: trainQueued,
+      trainingFraction: 1,
+      force: true,
+    });
+  }
+
+  console.log(
+    `[parallelRetrain] summary entries=${totalEntries} success=${successCount} failed=${failCount} queued=${trainQueued} completed=${trainCompleted}`,
+  );
+
+  return { successCount, failCount, trainQueued, trainCompleted };
+}
+
+module.exports = {
+  runParallelScrapeOverlapTrain,
+  runParallelRetrainOverlap,
+  DEFAULT_SCRAPE_CONCURRENCY,
+  DEFAULT_EMBED_CONCURRENCY,
+};

@@ -3,7 +3,6 @@ const { Queue, Worker } = require("bullmq");
 const Client = require("../models/Client.js");
 const Agent = require("../models/Agent");
 const Url = require("../models/Url.js");
-const WebsiteData = require("../models/WebsiteData.js");
 const batchTrainingService = require("./BatchTrainingService.js");
 const appEvents = require("../events.js");
 const cheerio = require("cheerio");
@@ -12,9 +11,11 @@ const QdrantVectorStoreManager = require("./QdrantService");
 const { buildTrainingProgressPayload } = require("../utils/trainingProgress.js");
 const {
   isHomepageUrl,
-  isScrapableWebUrl,
-  isNonContentPath,
 } = require("../utils/webUrlUtils.js");
+const {
+  runParallelScrapeOverlapTrain,
+  runParallelRetrainOverlap,
+} = require("./parallelUrlTraining.js");
 const { detectWebsiteLanguage } = require("../utils/websiteLanguage");
 const {
   classifyWebsiteType,
@@ -22,13 +23,8 @@ const {
 const { websiteTypeDefinitions, industryKeywords } = require("../utils/jobService/data.js");
 const {
   extractByPageType,
-  markUrlFetched,
-  markUrlProcessed,
   markUrlFailed,
-  markUrlSkipped,
-  markUrlUnchanged,
   markUrlsQueued,
-  checkCanonicalDuplicate,
 } = require("./contentPipeline");
 
 const NON_HTML_SKIP_ERROR =
@@ -466,22 +462,15 @@ new Worker(
         TrainingModel = TrainingList;
       }
 
-      let scrapedDocs = [];
-      let currentDataSize = 0;
-      const chromeCache = {};
-      let metadataExtracted = false; // Track if metadata has been extracted
-      let metadataFromHomepage = false;
       let stoppedForStorageLimit = false;
       let storageLimitEmitMessage = null;
       let storageLimitEmitProgress = null;
-      /** Phase 2: in-batch canonical keys to avoid embedding URL variants of the same page */
-      const seenCanonicalKeys = new Set();
+      let scrapedDocs = [];
 
       // Use startTime from job data or current time as fallback
       const scrapingStartTime = startTime ? new Date(startTime) : new Date();
       const totalUrlsCount = totalUrls || urls.length;
-      let lastProgressEmitTime = Date.now();
-      const PROGRESS_EMIT_INTERVAL = 2000; // Emit progress every 2 seconds
+      const PROGRESS_EMIT_INTERVAL = 2000;
 
       const emitScrapingProgress = async (
         currentIndex,
@@ -539,11 +528,16 @@ new Worker(
           lastTrainingFraction = aggregateFraction;
         }
 
+        const scrapeProcessed = Math.min(
+          Math.max(0, Number(trainingProcessed) || 0),
+          totalUrlsCount,
+        );
+
         const scrapingProgress = buildTrainingProgressPayload({
           startTime: scrapingStartTime,
           trainingStartTime,
           phase: "training",
-          processed: totalUrlsCount,
+          processed: scrapeProcessed,
           total: totalUrlsCount,
           trainingFraction: aggregateFraction,
           trainingStep,
@@ -578,447 +572,86 @@ new Worker(
         });
       };
 
-      // Emit initial progress
       await emitScrapingProgress(0, totalUrlsCount, true);
       await markUrlsQueued(urls, agentId);
 
-      for (let i = 0; i < urls.length; i++) {
-        const url = urls[i];
-        try {
-          if (!isScrapableWebUrl(url) || isNonContentPath(url)) {
-            const reason = isNonContentPath(url)
-              ? "Non-content URL skipped (cart/checkout/login/pagination)."
-              : NON_HTML_SKIP_ERROR;
-            console.log(`Skipping non-content URL: ${url}`);
-            if (isNonContentPath(url)) {
-              await markUrlSkipped(url, agentId, reason);
-            } else {
-              await markWebUrlScrapeFailed({
-                url,
-                userId,
-                agentId,
-                TrainingModel,
-                error: reason,
-              });
-            }
-            continue;
-          }
-
-          // Emit progress updates periodically (every 2 seconds or every URL)
-          const now = Date.now();
-          if (
-            now - lastProgressEmitTime >= PROGRESS_EMIT_INTERVAL ||
-            i === 0 ||
-            i === urls.length - 1
-          ) {
-            await emitScrapingProgress(i + 1, totalUrlsCount, true);
-            lastProgressEmitTime = now;
-          }
-
-          const { rawHtml: sourceCode } = await webScraper.scrapeWebpage(url, {
-            maxRetries: 2,
-            userId,
-            jobId: job.id,
-          });
-          await markUrlFetched(url, agentId);
-
-          const processResult = await processWebPage(
-            url,
-            sourceCode,
-            chromeCache,
-            { userId, agentId, conversationId: null },
-          );
-          if (!processResult?.content) {
-            await TrainingModel.create({
-              userId,
-              agentId,
-              type: 0,
-              content: "",
-              dataSize: 0,
-              trainingStatus: 2,
-              error: "No data found",
-              "webPage.url": url,
-              chunkCount: 0,
-              lastEdit: Date.now(),
-            });
-            await markUrlFailed(
-              url,
-              agentId,
-              "Failed to process/minify web page content",
-            );
-            continue;
-          }
-
-          const {
-            content,
-            title,
-            metaDescription,
-            webPageURL,
-            websiteMetadata,
-            canonicalUrl,
-            language,
-            pageType,
-            entity_type,
-            entity_name,
-            attributes,
-            search_terms,
-            classification_confidence,
-            classification_reason,
-            extraction_source,
-            sections,
-            product_id,
-          } = processResult;
-
-          // Phase 2: skip if this page's canonical is already covered by another URL
-          const canonCheck = await checkCanonicalDuplicate({
-            agentId,
-            pageUrl: url,
-            canonicalUrl,
-            seenCanonicalKeys,
-          });
-          if (canonCheck.isDuplicate) {
-            console.log(
-              `[jobService] Skipping canonical duplicate ${url} → ${canonCheck.duplicateOf} (${canonCheck.reason})`,
-            );
-            await markUrlSkipped(
-              url,
-              agentId,
-              `canonical_duplicate:${canonCheck.reason}`,
-              {
-                canonicalUrl: canonicalUrl || null,
-                language: language || "en",
-                pageType: pageType || "generic",
-              },
-            );
-            continue;
-          }
-
-          // Store website metadata if extracted
-          // Priority: homepage always wins; otherwise use first URL (domain-based name)
-          if (websiteMetadata) {
-            const isHome = websiteMetadata._isHomepage === true;
-            const shouldStore =
-              isHome || (!metadataExtracted && !metadataFromHomepage);
-
-            if (shouldStore) {
-              try {
-                let websiteData = await WebsiteData.getOrCreate({
-                  userId,
-                  ...(agentId ? { agentId } : {}),
-                });
-                // Remove internal flag before storing
-                const { _isHomepage, ...cleanMetadata } = websiteMetadata;
-                await websiteData.updateData({
-                  ...cleanMetadata,
-                  website_url: cleanMetadata.website_url || url,
-                  domain: cleanMetadata.domain || new URL(url).hostname,
-                });
-                metadataExtracted = true;
-                if (isHome) metadataFromHomepage = true;
-                console.log(
-                  `[jobService] Stored website metadata for user ${userId} from ${url}`,
-                );
-              } catch (metadataError) {
-                console.error(
-                  `[jobService] Error storing website metadata:`,
-                  metadataError,
-                );
-                // Don't fail the job if metadata storage fails
-              }
-            }
-          }
-
-          const contentSize = Buffer.byteLength(content, "utf8");
-
-          let clientDoc = await Client.findOne({ userId });
-          currentDataSize = clientDoc?.currentDataSize || 0;
-          const maxStorage =
-            clientDoc.customLimits?.isCustomLimits &&
-            clientDoc.customLimits?.maxStorage != null
-              ? clientDoc.customLimits.maxStorage
-              : plan.limits.maxStorage;
-
-          console.log("clientDoc", clientDoc);
-
-          console.log("max storage is", maxStorage);
-          console.log(
-            "current data size + content size ",
-            currentDataSize + contentSize,
-          );
-          // if (currentDataSize + contentSize > plan.limits.maxStorage) {
-          if (currentDataSize + contentSize > maxStorage) {
-
-
-            console.log("storage limit exceeded");
-            await Client.updateOne(
-              { userId },
-              { $set: { "upgradePlanStatus.storageLimitExceeded": true } },
-            );
-
-            // Emit progress before stopping due to storage limit
-            const storageLimitElapsedTime = Math.floor(
-              (Date.now() - scrapingStartTime.getTime()) / 1000,
-            );
-            const formatTimeForLimit = (seconds) => {
-              const hrs = Math.floor(seconds / 3600);
-              const mins = Math.floor((seconds % 3600) / 60);
-              const secs = seconds % 60;
-              return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-            };
-
-            storageLimitEmitMessage =
-              "Storage limit exceeded. Scraping stopped. Upgrade your plan to continue.";
-            storageLimitEmitProgress = {
-              percentage:
-                totalUrlsCount > 0
-                  ? Math.round(((i + 1) / totalUrlsCount) * 100)
-                  : 0,
-              processed: i + 1,
-              total: totalUrlsCount,
-              elapsedTime: formatTimeForLimit(storageLimitElapsedTime),
-              elapsedSeconds: storageLimitElapsedTime,
-              estimatedTimeRemaining: null,
-              estimatedSecondsRemaining: null,
-              isProcessing: false,
-              stoppedReason: "storage_limit_exceeded",
-            };
-            stoppedForStorageLimit = true;
-
-            appEvents.emit("userEvent", agentId, "training-event", {
-              agent: await Agent.findOne({ _id: agentId }),
-              client: await Client.findOne({ userId }),
-              message: storageLimitEmitMessage,
-              scrapingProgress: storageLimitEmitProgress,
-            });
-            break;
-          } else {
-            await Client.updateOne(
-              { userId },
-              { $inc: { currentDataSize: contentSize } },
-            );
-
-            scrapedDocs.push({
-              type: 0,
-              content,
-              // Raw HTML so test-backend normalizePage matches (chunk/embed path).
-              // Training list / WebsiteData still use extracted `content` above.
-              sourceCode,
-              dataSize: contentSize,
-              metadata: {
-                url: webPageURL,
-                title,
-                metaDescription,
-                canonicalUrl: canonicalUrl || null,
-                language: language || "en",
-                pageType: pageType || "generic",
-                entity_type: entity_type || "general",
-                entity_name: entity_name || null,
-                attributes: attributes || {},
-                search_terms: search_terms || [],
-                classification_confidence:
-                  typeof classification_confidence === "number"
-                    ? classification_confidence
-                    : 0,
-                classification_reason: classification_reason || "rules",
-                extraction_source: extraction_source || "generic",
-                product_id: product_id || null,
-                sections: Array.isArray(sections) ? sections : undefined,
-                type: "webpage",
-              },
-              originalUrl: url,
-            });
-          }
-        } catch (error) {
-          // Upsert so every scrape failure appears in the training list (find-only updates missed new URLs).
-          const existingFailRow = await TrainingModel.findOne({
-            userId,
-            agentId,
-            "webPage.url": url,
-          })
-            .select("trainingStatus")
-            .lean();
-          const prevTrainStatus = existingFailRow?.trainingStatus;
-
-          await TrainingModel.findOneAndUpdate(
-            { userId, agentId, "webPage.url": url },
-            {
-              $set: {
-                userId,
-                agentId,
-                type: 0,
-                trainingStatus: 2,
-                lastEdit: Date.now(),
-                error: error?.message,
-                "webPage.url": url,
-              },
-            },
-            { upsert: true, setDefaultsOnInsert: true }
-          );
-
-          if (prevTrainStatus !== 2) {
-            const inc =
-              prevTrainStatus === 1
-                ? { "pagesAdded.success": -1, "pagesAdded.failed": 1 }
-                : { "pagesAdded.failed": 1 };
-            await Agent.updateOne({ _id: agentId }, { $inc: inc });
-          }
-          await markUrlFailed(url, agentId, error?.message || "Failed to train");
-        }
-      }
-
-      if (!stoppedForStorageLimit) {
-        await emitScrapingProgress(urls.length, totalUrlsCount, true);
-
-        if (scrapedDocs.length > 0) {
-          await emitTrainingProgress({
-            trainingProcessed: 0,
-            trainingTotal: scrapedDocs.length,
-            force: true,
-          });
-        }
-      }
-
-      //make this a queue
-      let result = await batchService.processDocumentAndTrain(
-        scrapedDocs,
+      const pipelineResult = await runParallelScrapeOverlapTrain({
+        urls,
         userId,
         agentId,
         qdrantIndexName,
-        {
-          onProgress: async (progress) => {
-            if (stoppedForStorageLimit) return;
-            await emitTrainingProgress({
-              trainingProcessed: progress.trainingProcessed,
-              trainingTotal: progress.trainingTotal,
-              trainingFraction: progress.trainingFraction,
-              embeddingProgress: progress.embeddingProgress ?? 0,
-              embeddingTotal: progress.embeddingTotal ?? 0,
-              upsertProgress: progress.upsertProgress ?? 0,
-              upsertTotal: progress.upsertTotal ?? 0,
-              trainingStep: progress.step ?? "chunking",
-              // Per-URL embedding/upsert callbacks are aggregated and throttled
-              // so the frontend receives a smooth batch-level progression.
-              force: false,
-            });
-          },
-        },
-      );
+        plan,
+        TrainingModel,
+        batchService,
+        processWebPage,
+        webScraper,
+        jobId: job.id,
+        emitScrapingProgress,
+        emitTrainingProgress,
+        markWebUrlScrapeFailed,
+        nonHtmlSkipError: NON_HTML_SKIP_ERROR,
+        scrapingStartTime,
+        totalUrlsCount,
+        onStorageLimit: async ({ scrapeCompleted }) => {
+          const storageLimitElapsedTime = Math.floor(
+            (Date.now() - scrapingStartTime.getTime()) / 1000,
+          );
+          const formatTimeForLimit = (seconds) => {
+            const hrs = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            return (
+              String(hrs).padStart(2, "0") +
+              ":" +
+              String(mins).padStart(2, "0") +
+              ":" +
+              String(secs).padStart(2, "0")
+            );
+          };
 
-      // Handle training failure
-      if (!result.success) {
-        // Mark all documents as failed if training failed
+          storageLimitEmitMessage =
+            "Storage limit exceeded. Scraping stopped. Upgrade your plan to continue.";
+          storageLimitEmitProgress = {
+            percentage:
+              totalUrlsCount > 0
+                ? Math.round((scrapeCompleted / totalUrlsCount) * 100)
+                : 0,
+            processed: scrapeCompleted,
+            total: totalUrlsCount,
+            elapsedTime: formatTimeForLimit(storageLimitElapsedTime),
+            elapsedSeconds: storageLimitElapsedTime,
+            estimatedTimeRemaining: null,
+            estimatedSecondsRemaining: null,
+            isProcessing: false,
+            stoppedReason: "storage_limit_exceeded",
+          };
+          stoppedForStorageLimit = true;
+
+          appEvents.emit("userEvent", agentId, "training-event", {
+            agent: await Agent.findOne({ _id: agentId }),
+            client: await Client.findOne({ userId }),
+            message: storageLimitEmitMessage,
+            scrapingProgress: storageLimitEmitProgress,
+          });
+        },
+      });
+
+      scrapedDocs = pipelineResult.scrapedDocs || [];
+      stoppedForStorageLimit =
+        stoppedForStorageLimit || !!pipelineResult.stoppedForStorageLimit;
+
+      if (pipelineResult.anyTrainFailed) {
         await Agent.updateOne(
           { _id: agentId },
           { $set: { dataTrainingStatus: 0 } },
         );
-        appEvents.emit("userEvent", agentId, "training-event", {
-          agent: await Agent.findOne({ _id: agentId }),
-          message: error?.message,
-        });
-      } else {
-        // 3️⃣ Update training status in DB
-        for (const doc of scrapedDocs) {
-          const pageResult = result?.resultsByUrl?.[doc.originalUrl];
-          const skipped = pageResult?.skipped;
-          const failed = result?.failedUrls?.includes(doc.originalUrl);
+      }
 
-          if (skipped === "unchanged") {
-            await markUrlUnchanged(doc.originalUrl, agentId, {
-              contentHash: pageResult.contentHash,
-              pageType: pageResult.page?.pageType || "generic",
-              canonicalUrl: doc.metadata?.canonicalUrl || null,
-              language: doc.metadata?.language || "en",
-              qualityScore: pageResult.qualityScore,
-            });
-            // Already trained content — count as success for agent stats only if never counted
-            continue;
-          }
-
-          if (skipped === "low_quality") {
-            await markUrlSkipped(
-              doc.originalUrl,
-              agentId,
-              `low_quality:${pageResult.skipReason || "below_threshold"}`,
-              {
-                canonicalUrl: doc.metadata?.canonicalUrl || null,
-                language: doc.metadata?.language || "en",
-                qualityScore: pageResult.qualityScore,
-                contentHash: pageResult.contentHash,
-                pageType: "generic",
-              },
-            );
-            // Content was counted toward storage but never embedded — refund
-            if (doc.dataSize > 0) {
-              await Client.updateOne(
-                { userId },
-                { $inc: { currentDataSize: -doc.dataSize } },
-              );
-            }
-            continue;
-          }
-
-          const status = failed ? 2 : 1;
-          if (status == 1) {
-            await TrainingModel.create({
-              userId,
-              agentId,
-              type: 0,
-              content: doc.content,
-              dataSize: doc.dataSize,
-              trainingStatus: status,
-              "webPage.url": doc.originalUrl,
-              chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
-              lastEdit: Date.now(),
-            });
-            await markUrlProcessed(doc.originalUrl, agentId, {
-              contentHash:
-                pageResult?.contentHash || pageResult?.page?.content_hash,
-              pageType:
-                pageResult?.page?.pageType ||
-                doc.metadata?.pageType ||
-                "generic",
-              canonicalUrl: doc.metadata?.canonicalUrl || null,
-              language: doc.metadata?.language || "en",
-              qualityScore: pageResult?.qualityScore,
-            });
-          } else if (status == 2) {
-            await TrainingModel.create({
-              userId,
-              agentId,
-              type: 0,
-              content: doc.content,
-              dataSize: doc.dataSize,
-              trainingStatus: status,
-              error: "Failed to process/minify web page content",
-              "webPage.url": doc.originalUrl,
-              chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
-              lastEdit: Date.now(),
-            });
-            await markUrlFailed(
-              doc.originalUrl,
-              agentId,
-              "Failed to process/minify web page content",
-            );
-          }
-
-          await Agent.updateOne(
-            { _id: agentId },
-            {
-              $inc: {
-                ...(status === 1
-                  ? { "pagesAdded.success": 1 }
-                  : { "pagesAdded.failed": 1 }),
-              },
-            },
-          );
-        }
-
-        if (sitemapUrl) {
-          await Agent.updateOne(
-            { _id: agentId },
-            { $set: { isSitemapAdded: 1 } },
-          );
-        }
+      if (sitemapUrl && scrapedDocs.length > 0) {
+        await Agent.updateOne(
+          { _id: agentId },
+          { $set: { isSitemapAdded: 1 } },
+        );
       }
 
       await Agent.updateOne(
@@ -1251,12 +884,10 @@ new Worker(
     const retrainStartTime = startTime ? new Date(startTime) : new Date();
     const validEntries = (entries || []).filter((e) => e.webPage?.url);
     const totalEntries = jobTotalEntries || validEntries.length;
-    let lastProgressEmitTime = Date.now();
     const PROGRESS_EMIT_INTERVAL = 2000;
     let lastTrainingEmitTime = 0;
     let trainingStartTime = null;
     let lastTrainingFraction = 0;
-    let processedCount = 0;
 
     const emitScrapingProgress = async (
       currentIndex,
@@ -1364,337 +995,29 @@ new Worker(
         agent: await Agent.findOne({ _id: agentId }),
       });
 
-      const chromeCache = {};
-      const pendingRetrainItems = [];
-      const retrainCanonicalKeys = new Set();
       const qdrantManager = new QdrantVectorStoreManager(qdrantIndexName);
-      let successCount = 0;
-      let failCount = 0;
-
-      async function applyWebPagePagesAddedDelta(prevStatus, newStatus) {
-        if (prevStatus === newStatus) return;
-        const inc = {};
-        if (prevStatus === 1) inc["pagesAdded.success"] = -1;
-        else if (prevStatus === 2) inc["pagesAdded.failed"] = -1;
-        if (newStatus === 1) inc["pagesAdded.success"] = (inc["pagesAdded.success"] || 0) + 1;
-        else if (newStatus === 2) inc["pagesAdded.failed"] = (inc["pagesAdded.failed"] || 0) + 1;
-        const filtered = Object.fromEntries(Object.entries(inc).filter(([, v]) => v !== 0));
-        if (Object.keys(filtered).length === 0) return;
-        await Agent.updateOne({ _id: agentId }, { $inc: filtered });
-      }
-
-      const markEntryFailed = async ({ entry, prevStatus, error }) => {
-        await TrainingModel.updateOne(
-          { _id: entry._id },
-          {
-            $set: {
-              trainingStatus: 2,
-              error,
-              lastEdit: new Date(),
-            },
-          },
-        );
-        await applyWebPagePagesAddedDelta(prevStatus, 2);
-        failCount++;
-      };
-
-      const markEntryFailedAndContinue = async (args) => {
-        await markEntryFailed(args);
-        processedCount++;
-        await emitScrapingProgress(
-          processedCount,
-          totalEntries,
-          processedCount < totalEntries,
-        );
-      };
 
       await emitScrapingProgress(0, totalEntries, true);
 
-      for (let i = 0; i < validEntries.length; i++) {
-        const entry = validEntries[i];
-        const url = entry.webPage.url;
-        const prevStatus = entry.trainingStatus;
+      const retrainResult = await runParallelRetrainOverlap({
+        validEntries,
+        userId,
+        agentId,
+        qdrantIndexName,
+        TrainingModel,
+        batchService,
+        processWebPage,
+        webScraper,
+        jobId: job.id,
+        emitScrapingProgress,
+        emitTrainingProgress,
+        qdrantManager,
+        nonHtmlSkipError: NON_HTML_SKIP_ERROR,
+        totalEntries,
+      });
 
-        const now = Date.now();
-        if (
-          now - lastProgressEmitTime >= PROGRESS_EMIT_INTERVAL ||
-          i === 0 ||
-          i === validEntries.length - 1
-        ) {
-          await emitScrapingProgress(processedCount, totalEntries, true);
-          lastProgressEmitTime = now;
-        }
-
-        try {
-          if (!isScrapableWebUrl(url) || isNonContentPath(url)) {
-            console.log(`[retrainTrainingData] Skipping non-content URL: ${url}`);
-            await markEntryFailedAndContinue({
-              entry,
-              prevStatus,
-              error: isNonContentPath(url)
-                ? "Non-content URL skipped (cart/checkout/login/pagination)."
-                : NON_HTML_SKIP_ERROR,
-            });
-            continue;
-          }
-
-          const { rawHtml } = await webScraper.scrapeWebpage(url, {
-            maxRetries: 2,
-            userId,
-            jobId: job.id,
-          });
-
-          const processResult = await processWebPage(
-            url,
-            rawHtml,
-            chromeCache,
-            { userId, agentId, conversationId: null },
-          );
-
-          if (!processResult?.content) {
-            await markEntryFailedAndContinue({
-              entry,
-              prevStatus,
-              error: "Failed to process/minify web page content",
-            });
-            continue;
-          }
-
-          const {
-            content,
-            title,
-            metaDescription,
-            webPageURL,
-            canonicalUrl,
-            language,
-            pageType,
-            entity_type,
-            entity_name,
-            attributes,
-            search_terms,
-            classification_confidence,
-            classification_reason,
-            extraction_source,
-            sections,
-            product_id,
-          } = processResult;
-
-          // Phase 2: canonical duplicate — leave existing vectors of the canonical page
-          const canonCheck = await checkCanonicalDuplicate({
-            agentId,
-            pageUrl: url,
-            canonicalUrl,
-            seenCanonicalKeys: retrainCanonicalKeys,
-          });
-          if (canonCheck.isDuplicate) {
-            await markUrlSkipped(
-              url,
-              agentId,
-              `canonical_duplicate:${canonCheck.reason}`,
-              {
-                canonicalUrl: canonicalUrl || null,
-                language: language || "en",
-                pageType: pageType || "generic",
-              },
-            );
-            processedCount++;
-            await emitScrapingProgress(
-              processedCount,
-              totalEntries,
-              processedCount < totalEntries,
-            );
-            continue;
-          }
-
-          const contentSize = Buffer.byteLength(content, "utf8");
-          const oldDataSize = entry.dataSize || 0;
-          const dataSizeDelta = contentSize - oldDataSize;
-
-          pendingRetrainItems.push({
-            entry,
-            prevStatus,
-            url,
-            content,
-            contentSize,
-            dataSizeDelta,
-            scrapedDoc: {
-              type: 0,
-              content,
-              // Raw HTML for test-backend-identical normalize → tiktoken chunk path
-              sourceCode: rawHtml,
-              dataSize: contentSize,
-              metadata: {
-                url: webPageURL,
-                title,
-                metaDescription,
-                canonicalUrl: canonicalUrl || null,
-                language: language || "en",
-                pageType: pageType || "generic",
-                entity_type: entity_type || "general",
-                entity_name: entity_name || null,
-                attributes: attributes || {},
-                search_terms: search_terms || [],
-                classification_confidence:
-                  typeof classification_confidence === "number"
-                    ? classification_confidence
-                    : 0,
-                classification_reason: classification_reason || "rules",
-                extraction_source: extraction_source || "generic",
-                product_id: product_id || null,
-                sections: Array.isArray(sections) ? sections : undefined,
-                type: "webpage",
-              },
-              originalUrl: url,
-            },
-          });
-
-          processedCount++;
-          await emitScrapingProgress(
-            processedCount,
-            totalEntries,
-            processedCount < totalEntries,
-          );
-        } catch (err) {
-          console.error(`[retrainTrainingData] Error retraining ${url}:`, err);
-          await markEntryFailedAndContinue({
-            entry,
-            prevStatus,
-            error: err?.message || "Scraping failed",
-          });
-        }
-      }
-
-      if (pendingRetrainItems.length > 0) {
-        await emitTrainingProgress({
-          trainingProcessed: 0,
-          trainingTotal: pendingRetrainItems.length,
-          force: true,
-        });
-
-        const result = await batchService.processDocumentAndTrain(
-          pendingRetrainItems.map((item) => item.scrapedDoc),
-          userId,
-          agentId,
-          qdrantIndexName,
-          {
-            onProgress: async (progress) => {
-              await emitTrainingProgress({
-                trainingProcessed: progress.trainingProcessed ?? 0,
-                trainingTotal:
-                  progress.trainingTotal ?? pendingRetrainItems.length,
-                trainingFraction: progress.trainingFraction,
-                embeddingProgress: progress.embeddingProgress ?? 0,
-                embeddingTotal: progress.embeddingTotal ?? 0,
-                upsertProgress: progress.upsertProgress ?? 0,
-                upsertTotal: progress.upsertTotal ?? 0,
-                trainingStep: progress.step ?? "chunking",
-                force: false,
-              });
-            },
-          },
-        );
-
-        if (!result.success) {
-          for (const item of pendingRetrainItems) {
-            await markEntryFailed({
-              entry: item.entry,
-              prevStatus: item.prevStatus,
-              error: result.error || "Failed to upsert vectors",
-            });
-          }
-        } else {
-          for (const item of pendingRetrainItems) {
-            const pageResult = result?.resultsByUrl?.[item.url];
-            const skipped = pageResult?.skipped;
-            const failed = result.failedUrls?.includes(item.url);
-
-            if (skipped === "unchanged") {
-              await markUrlUnchanged(item.url, agentId, {
-                contentHash: pageResult.contentHash,
-                pageType: pageResult.page?.pageType || "generic",
-                canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
-                language: item.scrapedDoc?.metadata?.language || "en",
-                qualityScore: pageResult.qualityScore,
-              });
-              successCount++;
-              continue;
-            }
-
-            if (skipped === "low_quality") {
-              await markUrlSkipped(
-                item.url,
-                agentId,
-                `low_quality:${pageResult.skipReason || "below_threshold"}`,
-                {
-                  canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
-                  language: item.scrapedDoc?.metadata?.language || "en",
-                  qualityScore: pageResult.qualityScore,
-                  contentHash: pageResult.contentHash,
-                },
-              );
-              // Remove stale vectors if quality now fails after prior success
-              try {
-                await qdrantManager.deleteByFields({
-                  user_id: userId?.toString(),
-                  agent_id: agentId?.toString(),
-                  url: item.url,
-                });
-              } catch (delErr) {
-                console.warn(
-                  `[retrain] low_quality delete warning for ${item.url}:`,
-                  delErr.message,
-                );
-              }
-              continue;
-            }
-
-            if (failed) {
-              await markEntryFailed({
-                entry: item.entry,
-                prevStatus: item.prevStatus,
-                error: "Failed to upsert vectors",
-              });
-              continue;
-            }
-
-            await TrainingModel.updateOne(
-              { _id: item.entry._id },
-              {
-                $set: {
-                  content: item.content,
-                  dataSize: item.contentSize,
-                  trainingStatus: 1,
-                  lastEdit: new Date(),
-                  chunkCount: result.chunkCountPerUrl?.[item.url] || 0,
-                  "webPage.url": item.url,
-                },
-              },
-            );
-
-            await markUrlProcessed(item.url, agentId, {
-              contentHash:
-                pageResult?.contentHash || pageResult?.page?.content_hash,
-              pageType: pageResult?.page?.pageType || "generic",
-              canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
-              language: item.scrapedDoc?.metadata?.language || "en",
-              qualityScore: pageResult?.qualityScore,
-            });
-
-            await applyWebPagePagesAddedDelta(item.prevStatus, 1);
-
-            if (item.dataSizeDelta !== 0) {
-              await Client.updateOne(
-                { userId },
-                { $inc: { currentDataSize: item.dataSizeDelta } },
-              );
-            }
-
-            successCount++;
-          }
-        }
-      }
-
-      await emitScrapingProgress(totalEntries, totalEntries, false);
+      const successCount = retrainResult.successCount || 0;
+      const failCount = retrainResult.failCount || 0;
 
       await Agent.updateOne(
         { _id: agentId },
