@@ -34,13 +34,13 @@ const { contactUsEmailQueue } = require("../services/jobService");
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
-    host: process.env.SMTP_HOST, // SMTP server hostname
-    port: process.env.SMTP_PORT, // Port for the SMTP server (587 for TLS, 465 for SSL)
-    secure: false, // Set to true if using SSL
-    auth: {
-      user: process.env.EMAIL_USERNAME,
-      pass: process.env.EMAIL_PASSWORD,
-    },
+  host: process.env.SMTP_HOST, // SMTP server hostname
+  port: Number(process.env.SMTP_PORT), // Port for the SMTP server (587 for TLS, 465 for SSL)
+  secure: process.env.SMTP_SECURE === "true", // Set to true if using SSL
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
   }),
 );
 
@@ -1742,7 +1742,7 @@ UserController.contactUs = async (req, res) => {
       typeof req.body.message === "string" ? req.body.message.trim() : "";
     const phone =
       typeof req.body.phone === "string" ? req.body.phone.trim() : "";
-    const service = req.body.services || "";
+    const service = req.body.services || req.body.service || "";
     let website = req.body.website || "";
     console.log("req.body is :", req.body);
 

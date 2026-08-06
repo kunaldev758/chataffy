@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const path = require('path');
-
+const rateLimit = require('express-rate-limit');
 
 const contactUsLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes

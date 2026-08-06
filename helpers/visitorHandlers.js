@@ -34,13 +34,14 @@ const stripHtml = (html) =>
     .replace(/&#039;/g, "'")
     .trim();
 
+
 const transcriptMailTransporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST, // SMTP server hostname
   port: Number(process.env.SMTP_PORT), // Port for the SMTP server (587 for TLS, 465 for SSL)
-  secure: false, // Set to true if using SSL
+  secure: process.env.SMTP_SECURE === "true", // Set to true if using SSL
   auth: {
-    user: process.env.EMAIL_USERNAME,
-    pass: process.env.EMAIL_PASSWORD,
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
   },
 });
 

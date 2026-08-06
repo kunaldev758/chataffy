@@ -192,6 +192,33 @@ const sendWelcomeEmail = async (
   }
 };
 
+const sendContactUsEmail = async ({
+  name,
+  email,
+  phone,
+  message,
+  supportEmail,
+  service,
+  website,
+}) => {
+  const appName = process.env.APP_NAME || "Chataffy";
+  const mailOptions = {
+    from: `${appName} <${process.env.SMTP_FROM}>`,
+    replyTo: email,
+    to: supportEmail || process.env.SUPPORT_EMAIL || process.env.SMTP_FROM,
+    subject: "Contact Us",
+    text: `Name: ${name}\nEmail: ${email}\nPhone: ${phone || "N/A"}\nMessage: ${message}\nService: ${service}\nWebsite: ${website}`,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    return true;
+  } catch (error) {
+    console.error("Error sending contact us email:", error);
+    return false;
+  }
+};
+
 module.exports = {
   sendAgentApprovalEmail,
   sendPlanUpgradeEmail,
@@ -199,4 +226,5 @@ module.exports = {
   sendEmailForOfflineChat,
   sendEmailForLimitExpiry,
   sendWelcomeEmail,
+  sendContactUsEmail,
 };
