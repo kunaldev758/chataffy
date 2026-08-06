@@ -95,6 +95,111 @@ function companyNameFromDomain(hostname) {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+const NAVIGATION_LINK_SELECTORS =
+  "nav a, header a, .navbar a, .main-menu a, .navigation a, [role='navigation'] a";
+const NON_CATEGORY_LABEL =
+  /^(home|about(?:\s+us)?|contact(?:\s+us)?|blog|login|log\s+in|sign\s+up|sign\s+in|register|cart|bag|basket|checkout|search|account|profile|wishlist|track\s+(?:my\s+)?order)$/i;
+const NON_CATEGORY_PATH =
+  /\/(?:cart|checkout|account|login|register|search|wishlist)(?:\/|$)/i;
+
+function toAbsoluteNavigationUrl(href, pageUrl) {
+  if (!href || /^(?:#|javascript:|mailto:|tel:)/i.test(href.trim())) {
+    return null;
+  }
+
+  try {
+    const absolute = new URL(href, pageUrl);
+    const page = new URL(pageUrl);
+    if (!/^https?:$/.test(absolute.protocol) || absolute.hostname !== page.hostname) {
+      return null;
+    }
+    absolute.hash = "";
+    return absolute.toString();
+  } catch {
+    return null;
+  }
+}
+
+function extractNavigationCategories($, pageUrl) {
+  const categories = [];
+  const seen = new Set();
+
+  $(NAVIGATION_LINK_SELECTORS).each((_, el) => {
+    const name = $(el).text().replace(/\s+/g, " ").trim();
+    const url = toAbsoluteNavigationUrl($(el).attr("href"), pageUrl);
+
+    if (
+      !name ||
+      !url ||
+      name.length > 60 ||
+      NON_CATEGORY_LABEL.test(name) ||
+      NON_CATEGORY_PATH.test(new URL(url).pathname)
+    ) {
+      return;
+    }
+
+    const key = `${name.toLowerCase()}|${url.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    categories.push({ name, url });
+  });
+
+  return categories.slice(0, 30);
+}
+
+function buildNavigationDocument(baseUrl, categories) {
+  if (!Array.isArray(categories) || categories.length === 0) return null;
+
+  const navigationUrl = new URL("#navigation-menu", baseUrl).toString();
+  const categoryLines = categories.map(
+    ({ name, url }) => `- ${name} (${url})`,
+  );
+  const content = [
+    "# Website Navigation Menu and Catalog Collections",
+    "",
+    "This reference lists the official navigation categories and collection pages available on the website. Use these links when visitors ask for the catalog, catalogue, menu, navbar, collections, departments, or category list. These entries are navigation destinations, not individual product recommendations.",
+    "",
+    ...categoryLines,
+  ].join("\n");
+
+  return {
+    type: 0,
+    content,
+    dataSize: Buffer.byteLength(content, "utf8"),
+    metadata: {
+      url: navigationUrl,
+      title: "Website Navigation Menu and Catalog Collections",
+      metaDescription:
+        "Official website navigation categories and collection links.",
+      canonicalUrl: navigationUrl,
+      language: "en",
+      pageType: "generic",
+      entity_type: "category_list",
+      entity_name: "Navigation Menu and Categories",
+      attributes: {
+        categories: categories.map(({ name }) => name),
+      },
+      search_terms: [
+        "navigation",
+        "navbar",
+        "menu",
+        "catalog",
+        "catalogue",
+        "category",
+        "categories",
+        "collection",
+        "collections",
+      ],
+      classification_confidence: 1,
+      classification_reason: "synthetic_navigation_metadata",
+      extraction_source: "navigation_links",
+      type: "webpage",
+      synthetic_navigation: true,
+    },
+    originalUrl: navigationUrl,
+  };
+}
+
 // Helper function to extract website metadata from HTML
 const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
   const metadata = {
@@ -103,6 +208,7 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
     industry: "",
     founded_year: "",
     services_list: [],
+    categories_list: [],
     value_proposition: "",
     does_not_list: [],
     website_url: url,
@@ -207,6 +313,8 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
     if (yearMatch) {
       metadata.founded_year = yearMatch[1];
     }
+
+    metadata.categories_list = extractNavigationCategories($, url);
 
     // Extract services from navigation, services section, or meta tags
     const services = new Set();
@@ -471,6 +579,7 @@ new Worker(
       const chromeCache = {};
       let metadataExtracted = false; // Track if metadata has been extracted
       let metadataFromHomepage = false;
+      let navigationDocument = null;
       let stoppedForStorageLimit = false;
       let storageLimitEmitMessage = null;
       let storageLimitEmitProgress = null;
@@ -697,6 +806,19 @@ new Worker(
           // Priority: homepage always wins; otherwise use first URL (domain-based name)
           if (websiteMetadata) {
             const isHome = websiteMetadata._isHomepage === true;
+            const navigationCandidate = buildNavigationDocument(
+              websiteMetadata.website_url || url,
+              websiteMetadata.categories_list,
+            );
+            if (
+              navigationCandidate &&
+              (isHome ||
+                !navigationDocument ||
+                websiteMetadata.categories_list.length >
+                  navigationDocument.metadata.attributes.categories.length)
+            ) {
+              navigationDocument = navigationCandidate;
+            }
             const shouldStore =
               isHome || (!metadataExtracted && !metadataFromHomepage);
 
@@ -708,6 +830,12 @@ new Worker(
                 });
                 // Remove internal flag before storing
                 const { _isHomepage, ...cleanMetadata } = websiteMetadata;
+                if (
+                  cleanMetadata.categories_list?.length === 0 &&
+                  websiteData.categories_list?.length > 0
+                ) {
+                  delete cleanMetadata.categories_list;
+                }
                 await websiteData.updateData({
                   ...cleanMetadata,
                   website_url: cleanMetadata.website_url || url,
@@ -866,6 +994,10 @@ new Worker(
         }
       }
 
+      if (!stoppedForStorageLimit && navigationDocument) {
+        scrapedDocs.push(navigationDocument);
+      }
+
       if (!stoppedForStorageLimit) {
         await emitScrapingProgress(urls.length, totalUrlsCount, true);
 
@@ -921,6 +1053,12 @@ new Worker(
           const pageResult = result?.resultsByUrl?.[doc.originalUrl];
           const skipped = pageResult?.skipped;
           const failed = result?.failedUrls?.includes(doc.originalUrl);
+
+          // Synthetic navigation vectors support retrieval but are not user-facing
+          // training rows and do not correspond to a crawled Url record.
+          if (doc.metadata?.synthetic_navigation) {
+            continue;
+          }
 
           if (skipped === "unchanged") {
             await markUrlUnchanged(doc.originalUrl, agentId, {

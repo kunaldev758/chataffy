@@ -145,6 +145,21 @@ function urlBonus(url, subIntent) {
   return Math.min(bonus, 0.5);
 }
 
+function navigationSourceBonus(match, subIntent) {
+  if (subIntent !== "PAGE_LINKS") return 0;
+
+  const payload = match.payload || match;
+  const entityType = String(payload.entity_type || "").toLowerCase();
+  const title = String(payload.title || "").toLowerCase();
+
+  if (entityType === "category_list") return 0.5;
+  if (entityType === "listing") return 0.3;
+  if (/\b(category|categories|collection|catalog|catalogue|navigation|menu)\b/.test(title)) {
+    return 0.2;
+  }
+  return 0;
+}
+
 function typePenalty(text, url, subIntent) {
   const combined = `${text} ${url}`.toLowerCase();
 
@@ -235,6 +250,7 @@ function attributeScore(match, attributes, subIntent, softBoosts = []) {
   raw += Math.min(textHits * 0.06, 0.24);
   raw += Math.min(facetScore * 0.4, 0.4);
   raw += urlBonus(url, subIntent);
+  raw += navigationSourceBonus(match, subIntent);
   raw -= typePenalty(text, url, subIntent);
 
   return Math.max(0, Math.min(1, raw));
@@ -358,4 +374,5 @@ module.exports = {
   lexicalOverlapScore,
   facetMatchesPayload,
   genericFacetScore,
+  navigationSourceBonus,
 };

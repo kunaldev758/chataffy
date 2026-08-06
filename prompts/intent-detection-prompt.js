@@ -647,6 +647,11 @@ Use only for explicit listing, navigation, or contact requests.
 Recommendation requests using "suggest", "recommend", "best", or "which should
 I buy" use SEMANTIC_RAG even when prices are requested. Use IN_PAGE_LIST only
 for explicit catalogue requests such as "list all", "show all", or "catalogue".
+Exception: when the object being requested is the website's collections,
+categories, catalog/catalogue structure, navbar, navigation menu, or departments,
+route the request to HYBRID / PAGE_LINKS when the user asks to list, show, share,
+or identify what is available. The verb "suggest" does not make these requests
+product recommendations.
 
 subIntent:
 - CONTACT_INFO: phone, email, address, hours, contact page, or social profiles.
@@ -656,6 +661,8 @@ subIntent:
 Examples:
 "Show all lashes with prices" → HYBRID / IN_PAGE_LIST
 "List all collection URLs" → HYBRID / PAGE_LINKS
+"Suggests me your men's collections list" → HYBRID / PAGE_LINKS
+"What collections do you have?" → HYBRID / PAGE_LINKS
 "Give me your email and Instagram" → HYBRID / CONTACT_INFO
 "Show me your return policy" → SEMANTIC_RAG
 "Suggest some lip oils and lip scrubs with prices" → SEMANTIC_RAG,

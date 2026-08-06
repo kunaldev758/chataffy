@@ -153,6 +153,7 @@ const TRUSTED_RULE_SOURCES = new Set([
   "rules_live_agent",
   "rules_accidental",
   "rules_follow_up_acceptance",
+  "rules_category_navigation",
 ]);
 
 /**
@@ -186,6 +187,38 @@ function isSimpleGreeting(question) {
 function isLiveAgentRequest(question) {
   const normalized = (question || "").toLowerCase().trim();
   return LIVE_AGENT_PHRASES.some((phrase) => normalized.includes(phrase));
+}
+
+/**
+ * A narrow, deterministic catalog-structure request.
+ * The navigation noun and list/discovery language are both required so product
+ * recommendations such as "suggest lip oils and lip scrubs" remain semantic RAG.
+ */
+function isCategoryNavigationRequest(question) {
+  const q = String(question || "").toLowerCase();
+  const hasNavigationNoun =
+    /\b(collections?|categor(?:y|ies)|catalog(?:ue)?|navbar|navigation|menu|departments?)\b/.test(
+      q,
+    );
+  if (!hasNavigationNoun) return false;
+
+  const explicitlyWantsProducts =
+    /\b(products?|items?)\b/.test(q) &&
+    !/\bproduct\s+categor(?:y|ies)\b/.test(q);
+  if (explicitlyWantsProducts) return false;
+
+  return (
+    /\b(list|show|display|give|share|send|all|every|available)\b/.test(q) ||
+    /\bwhat\b[\s\S]{0,45}\b(?:collections?|categor(?:y|ies)|catalog(?:ue)?|menu|departments?)\b/.test(
+      q,
+    ) ||
+    /\bwhich\b[\s\S]{0,45}\b(?:collections?|categor(?:y|ies)|departments?)\b/.test(
+      q,
+    ) ||
+    /\b(?:collections?|categor(?:y|ies)|catalog(?:ue)?|menu|departments?)\b[\s\S]{0,30}\b(?:do\s+you\s+have|are\s+there|are\s+available)\b/.test(
+      q,
+    )
+  );
 }
 
 function classifyStructuralSubIntent(query) {
@@ -237,7 +270,8 @@ function classifyStructuralSubIntent(query) {
 
   const wantsPageLinks =
     !wantsContactInfo &&
-    ((/\b(links?|urls?)\b/.test(q) &&
+    (isCategoryNavigationRequest(q) ||
+      (/\b(links?|urls?)\b/.test(q) &&
       !/\b(social\s*media|social)\b/.test(q) &&
       /\b(list|show|give|share|send|all|every|how\s+many|more)\b/.test(q)) ||
       (/\b(url|link)\b/.test(q) &&
@@ -662,6 +696,19 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
     };
   }
 
+  if (isCategoryNavigationRequest(normalizedQuestion)) {
+    return {
+      confident: true,
+      result: buildRouteResult({
+        route: ROUTES.HYBRID,
+        subIntent: SUB_INTENTS.PAGE_LINKS,
+        userLanguage,
+        confidence: 0.96,
+        source: "rules_category_navigation",
+      }),
+    };
+  }
+
   const subIntentOnQuestion = classifyStructuralSubIntent(normalizedQuestion);
   if (subIntentOnQuestion) {
     return {
@@ -1064,6 +1111,7 @@ module.exports = {
   routeQuery,
   isRagRoute,
   classifyStructuralSubIntent,
+  isCategoryNavigationRequest,
   isSimpleGreeting,
   isPureGreeting,
   isLiveAgentRequest,

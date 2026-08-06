@@ -240,6 +240,16 @@ function detectMultiEntityFromRules(query) {
  * @returns {object} routing with multiEntityMode + rawEntities
  */
 function enrichRoutingMultiEntity(routing = {}, query = "") {
+  // Navigation/category lists may contain conjunctions ("men and women"), but
+  // they are still one structural PAGE_LINKS request, not multiple product asks.
+  if (routing.subIntent === "PAGE_LINKS") {
+    return {
+      ...routing,
+      multiEntityMode: null,
+      rawEntities: [],
+    };
+  }
+
   const ruleHit = detectMultiEntityFromRules(query);
   const mode =
     normalizeMultiEntityMode(routing.multiEntityMode) ||

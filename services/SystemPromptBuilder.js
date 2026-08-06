@@ -43,6 +43,7 @@ function extractContext(websiteData, organisation) {
     industry: websiteData?.industry || "",
     foundedYear: websiteData?.founded_year || "",
     servicesList: websiteData?.services_list || [],
+    categoriesList: websiteData?.categories_list || [],
     valueProposition: websiteData?.value_proposition || "",
     doesNotList: websiteData?.does_not_list || [],
     cacheVersion:
@@ -71,6 +72,7 @@ function buildCompactPrompt(ctx) {
     industry,
     foundedYear,
     servicesList,
+    categoriesList,
     valueProposition,
     doesNotList,
   } = ctx;
@@ -90,6 +92,13 @@ function buildCompactPrompt(ctx) {
     foundedYear ? `Founded ${foundedYear}.` : null,
     `Answer ONLY using the provided knowledge-base context about ${companyName}: ${servicesHint}.`,
     valueProposition ? `Value proposition: ${valueProposition}` : null,
+    categoriesList.length > 0
+      ? `Navigation categories: ${categoriesList
+          .slice(0, 12)
+          .map((category) => category?.name || category)
+          .filter(Boolean)
+          .join(", ")}.`
+      : null,
     scopeHint || null,
     applyCompanyName(CORE_RULES, companyName),
   ];
@@ -104,6 +113,7 @@ function buildMediumPrompt(ctx) {
     industry,
     foundedYear,
     servicesList,
+    categoriesList,
     valueProposition,
     doesNotList,
   } = ctx;
@@ -117,12 +127,26 @@ function buildMediumPrompt(ctx) {
     doesNotList.length > 0
       ? doesNotList.slice(0, 5).map((item) => `- ${item}`).join("\n")
       : null;
+  const categoriesText =
+    categoriesList.length > 0
+      ? categoriesList
+          .slice(0, 20)
+          .map((category) => {
+            const name = category?.name || category;
+            const url = category?.url;
+            return `- ${name}${url ? ` (${url})` : ""}`;
+          })
+          .join("\n")
+      : null;
 
   const parts = [
     `## ${companyName}`,
     `${companyName} is a ${companyType}${industry ? ` in the ${industry} industry` : ""}.`,
     foundedYear ? `Founded ${foundedYear}.` : null,
     servicesText ? `Services/products:\n${servicesText}` : null,
+    categoriesText
+      ? `Navigation categories/collections:\n${categoriesText}`
+      : null,
     valueProposition ? `Value proposition: ${valueProposition}` : null,
     doesNotText ? `${companyName} does NOT:\n${doesNotText}` : null,
     `## Role\nCustomer support for ${companyName}. Answer only from the knowledge base; never reference it explicitly.`,
@@ -159,6 +183,7 @@ function buildFallbackPrompt(organisation, tier = "compact") {
     industry: "",
     foundedYear: "",
     servicesList: [],
+    categoriesList: [],
     valueProposition: "",
     doesNotList: [],
     cacheVersion: `fallback:${name}`,
@@ -200,6 +225,10 @@ function buildAnswerInstructions(effectiveMode, organisation, options = {}) {
     return `Instructions:
 - Start with one concise <h1> and a descriptive <h2>
 - Use an HTML <ul>/<li> list of every matching page link from the knowledge base
+- When the user asks for collections, categories, a catalog/catalogue, navbar, navigation menu, or departments, list the matching navigation destinations and use each destination's own URL
+- Do not replace a requested category or collection list with individual products
+- If the user names a section such as men's or women's, include only matching navigation entries when matches are available
+- Do not invent category names or URLs
 - Brief intro (1-2 sentences max)`;
   }
 
