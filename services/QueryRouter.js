@@ -35,6 +35,9 @@ const {
   isGibberishOrAccidentalMessage,
   detectScriptLanguage,
 } = require("./LightweightResponseService");
+const {
+  isCompanyIdentityQuestion,
+} = require("../utils/queryOnTopicDetection");
 
 const { userIntentPrompt } = require("../prompts/intent-detection-prompt.js");
 
@@ -149,6 +152,7 @@ const SOFT_OFFER_PATTERN =
 // Only these sources are unambiguous enough to skip the LLM classifier.
 // Follow-up acceptance is included when awaitingFollowUp / soft-offer is explicit.
 const TRUSTED_RULE_SOURCES = new Set([
+  "rules_identity",
   "rules_greeting",
   "rules_live_agent",
   "rules_accidental",
@@ -564,6 +568,9 @@ function buildRouteResult({
   followUp = false,
   needsRewrite = false,
   rewriteReason = null,
+  isIdentityQuestion = false,
+  isBusinessQuestion = false,
+  isTrulyOffTopic = false,
   source = "rules",
 }) {
   const normalizedRaw = Array.isArray(rawEntities)
@@ -586,6 +593,9 @@ function buildRouteResult({
     followUp,
     needsRewrite,
     rewriteReason,
+    isIdentityQuestion,
+    isBusinessQuestion,
+    isTrulyOffTopic,
     source,
   };
 }
@@ -594,6 +604,33 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
   const normalizedQuestion = normalizeQueryText(question);
   const userLanguage = detectUserLanguageFromQuestion(normalizedQuestion);
   const stateTopics = topicsFromRagState(conversationState);
+
+  // Identity requests are meaningful business questions. Handle the common
+  // English forms deterministically so a small router model cannot mistake
+  // them for a greeting or acknowledgement.
+  if (isCompanyIdentityQuestion(normalizedQuestion)) {
+    return {
+      confident: true,
+      result: buildRouteResult({
+        route: ROUTES.SEMANTIC_RAG,
+        userLanguage,
+        confidence: 0.99,
+        rewrittenQuery:
+          "Company overview, products, services, and customer support assistant role",
+        lexicalTerms: [
+          "company overview",
+          "products",
+          "services",
+          "customer support",
+        ],
+        needsRewrite: true,
+        rewriteReason: "NORMALIZE",
+        isIdentityQuestion: true,
+        isBusinessQuestion: true,
+        source: "rules_identity",
+      }),
+    };
+  }
 
   if (isPureGreeting(normalizedQuestion)) {
     return {
@@ -808,6 +845,21 @@ function parseRouterJson(content, question = "") {
       finalRoute = ROUTES.SEMANTIC_RAG;
     }
 
+    // Preserve the semantic flags requested from the router. Identity is a
+    // hard routing invariant, not merely a prompt suggestion.
+    const isIdentityQuestion =
+      Boolean(parsed.isIdentityQuestion) ||
+      isCompanyIdentityQuestion(question);
+    const isBusinessQuestion =
+      Boolean(parsed.isBusinessQuestion) || isIdentityQuestion;
+    const isTrulyOffTopic =
+      !isIdentityQuestion && Boolean(parsed.isTrulyOffTopic);
+
+    if (isIdentityQuestion) {
+      finalRoute = ROUTES.SEMANTIC_RAG;
+      subIntent = null;
+    }
+
     const lexicalTerms = Array.isArray(parsed.lexicalTerms)
       ? parsed.lexicalTerms
           .filter((t) => typeof t === "string" && t.trim())
@@ -846,6 +898,9 @@ function parseRouterJson(content, question = "") {
       followUp,
       needsRewrite,
       rewriteReason,
+      isIdentityQuestion,
+      isBusinessQuestion,
+      isTrulyOffTopic,
       source: "llm_router",
     });
   } catch {
