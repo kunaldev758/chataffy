@@ -2737,7 +2737,40 @@ ${answerInstructions}`;
             type: type || "intent",
           }),
       });
-      const routing = enrichRoutingMultiEntity(baseRouting, normalizedQuestion);
+      let routing = enrichRoutingMultiEntity(baseRouting, normalizedQuestion);
+
+      // Defense in depth: identity requests must reach the company-profile/RAG
+      // answer path even if an upstream model returns a social route.
+      const isIdentityRequest =
+        Boolean(routing.isIdentityQuestion) ||
+        this.isCompanyIdentityQuestion(normalizedQuestion, companyName);
+      if (
+        isIdentityRequest &&
+        (routing.route !== ROUTES.SEMANTIC_RAG || !routing.rewrittenQuery)
+      ) {
+        if (routing.route !== ROUTES.SEMANTIC_RAG) {
+          console.warn(
+            `[QueryController] Correcting identity route ${routing.route} → ${ROUTES.SEMANTIC_RAG}`,
+          );
+        }
+        routing = {
+          ...routing,
+          route: ROUTES.SEMANTIC_RAG,
+          subIntent: null,
+          rewrittenQuery:
+            routing.rewrittenQuery ||
+            `${companyName || "Company"} overview, products, services, and customer support assistant role`,
+          needsRewrite: true,
+          rewriteReason: routing.rewriteReason || "NORMALIZE",
+          isIdentityQuestion: true,
+          isBusinessQuestion: true,
+          isTrulyOffTopic: false,
+          source:
+            routing.route === ROUTES.SEMANTIC_RAG
+              ? routing.source
+              : "identity_safety_override",
+        };
+      }
 
       console.log(
         `[QueryController] Route: ${routing.route} | subIntent: ${routing.subIntent} | multiEntity: ${routing.multiEntityMode || "none"} | rawEntities: [${(routing.rawEntities || []).join(", ")}] | userLang: ${routing.userLanguage} | confidence: ${routing.confidence} | followUp: ${routing.followUp} | needsRewrite: ${routing.needsRewrite} | rewriteReason: ${routing.rewriteReason || "none"} | lexicalTerms: [${(routing.lexicalTerms || []).join(", ")}] | constraints: [${(routing.constraints || []).map((c) => `${c.field}${c.operator === "eq" ? "=" : ":" + c.operator + ":"}${c.value}@${c.confidence}`).join(", ")}] | source: ${routing.source}`,
