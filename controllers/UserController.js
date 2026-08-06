@@ -29,6 +29,9 @@ const {
 } = require("../constants/authCookies");
 const UserSession = require("../models/userSession.js");
 
+const ContactUs = require("../models/ContactUs.js");
+const { contactUsEmailQueue } = require("../services/jobService");
+
 const transporter = nodemailer.createTransport(
   smtpTransport({
     host: process.env.SMTP_HOST, // SMTP server hostname
@@ -1726,5 +1729,134 @@ UserController.generateShortLivedToken = async (req, res) => {
     });
   }
 };
+
+
+UserController.contactUs = async (req, res) => {
+  try {
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+    const email =
+      typeof req.body.email === "string"
+        ? req.body.email.trim().toLowerCase()
+        : "";
+    const message =
+      typeof req.body.message === "string" ? req.body.message.trim() : "";
+    const phone =
+      typeof req.body.phone === "string" ? req.body.phone.trim() : "";
+    const service = req.body.services || "";
+    let website = req.body.website || "";
+    console.log("req.body is :", req.body);
+
+    if (!name || !email || !message || !service || !website) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Name, email, message, service, and website are required",
+      });
+    }
+
+    if (website) {
+      const domainRegex = /^(https?:\/\/)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(\/.*)?$/;
+    
+      if (!domainRegex.test(website)) {
+        return res.status(400).json({
+          status_code: 400,
+          status: false,
+          message: "Invalid website URL",
+        });
+      }
+    
+      if (!/^https?:\/\//i.test(website)) {
+        website = `https://${website}`;
+      }
+    }
+    
+
+    if (name.length > 100) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Name must be at most 100 characters",
+      });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Please provide a valid email address",
+      });
+    }
+
+    if (message.length < 10) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Message must be at least 10 characters",
+      });
+    }
+
+    if (message.length > 1000) {
+      return res.status(400).json({
+        status_code: 400,
+        status: false,
+        message: "Message must be at most 1000 characters",
+      });
+    }
+
+    if (phone) {
+      const phoneRegex = /^[\+]?[1-9][\d]{0,15}$/;
+      if (!phoneRegex.test(phone.replace(/[\s\-\(\)]/g, ""))) {
+        return res.status(400).json({
+          status_code: 400,
+          status: false,
+          message: "Please provide a valid phone number",
+        });
+      }
+    }
+
+    await ContactUs.create({
+      name,
+      email,
+      phone: phone || "",
+      message,
+      service,
+      website,
+    });
+
+    const supportEmail = process.env.SUPPORT_EMAIL || "info@chataffy.com";
+    if (supportEmail) {
+      try {
+        await contactUsEmailQueue.add("sendContactUsEmail", {
+          name,
+          email,
+          phone: phone || "",
+          message,
+          supportEmail,
+          service,
+          website,
+        });
+        console.log("Contact us email queued successfully");
+      } catch (mailError) {
+        console.log("Error queueing contact us email:", mailError);
+        commonHelper.logErrorToFile(mailError);
+      }
+    }
+    return res.status(200).json({
+      status_code: 200,
+      status: true,
+      message: "Your message has been submitted successfully",
+    });
+  } catch (error) {
+    console.log("Error in contact us:", error);
+    commonHelper.logErrorToFile(error);
+    return res.status(500).json({
+      status_code: 500,
+      status: false,
+      message: "Failed to contact us",
+    });
+  }
+};
+
 
 module.exports = UserController;
