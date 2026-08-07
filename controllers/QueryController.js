@@ -2739,6 +2739,17 @@ ${answerInstructions}`;
       });
       let routing = enrichRoutingMultiEntity(baseRouting, normalizedQuestion);
 
+      // Temporary override: contact-detail requests should use the standard
+      // semantic RAG path instead of contact-mode retrieval/formatting.
+      if (routing.subIntent === "CONTACT_INFO") {
+        routing = {
+          ...routing,
+          route: ROUTES.SEMANTIC_RAG,
+          subIntent: null,
+          source: "contact_to_semantic_override",
+        };
+      }
+
       // Defense in depth: identity requests must reach the company-profile/RAG
       // answer path even if an upstream model returns a social route.
       const isIdentityRequest =
