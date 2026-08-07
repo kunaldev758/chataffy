@@ -13,6 +13,9 @@ const { extractFaqContent } = require("./extractors/faq");
 const { processResidualSections } = require("./residualSections");
 const { GRID_SELECTORS, CARD_SELECTORS } = require("./extractors/listing");
 const { resolveProductId } = require("./productId");
+const {
+  decodeCloudflareEmailsInHtml,
+} = require("../../utils/cloudflareEmail");
 
 /**
  * Build a section descriptor for multi-entity indexing of one URL.
@@ -166,7 +169,10 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     conversationId = null,
   } = usageContext;
 
-  const $meta = cheerio.load(sourceCode);
+  // HTTP scraping does not execute Cloudflare's client-side email decoder.
+  // Normalize protected addresses once before any typed or generic extractor runs.
+  const decodedSourceCode = decodeCloudflareEmailsInHtml(sourceCode);
+  const $meta = cheerio.load(decodedSourceCode);
   const pageMetadata = extractPageMetadata($meta, url);
   const textSample = $meta("body").text().replace(/\s+/g, " ").trim().slice(0, 4000);
 
@@ -230,7 +236,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
   if (isListing) {
     typed = extractListingContent({
       url,
-      html: sourceCode,
+      html: decodedSourceCode,
       jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
       title: pageMetadata.title,
       metaDescription: pageMetadata.metaDescription,
@@ -238,15 +244,15 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
   } else if (isPdp) {
     typed = extractProductContent({
       url,
-      html: sourceCode,
+      html: decodedSourceCode,
       jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
     });
   } else if (["faq", "blog", "docs"].includes(detection.pageType)) {
-    typed = extractWithReadability(url, sourceCode);
+    typed = extractWithReadability(url, decodedSourceCode);
   }
 
   // Always have a generic fallback for chrome/homepage + thin typed extracts
-  const generic = extractGenericMarkdown(url, sourceCode, chromeCache);
+  const generic = extractGenericMarkdown(url, decodedSourceCode, chromeCache);
 
   let content = typed?.content || "";
   let extraction_source = typed?.extraction_source || "generic";
@@ -322,7 +328,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
         entity_name: validated.entity_name,
         entity_type: "product",
         jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
-        html: sourceCode,
+        html: decodedSourceCode,
       })
     : null;
 
@@ -353,7 +359,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
   // Secondary FAQ only on real PDPs — not PLP/collection pages
   if (isPdp && !isListingUrl(url)) {
     const faq = extractFaqContent({
-      html: sourceCode,
+      html: decodedSourceCode,
       jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
       title: validated.title || pageMetadata.title,
     });
@@ -400,7 +406,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
       : [];
 
     const residual = await processResidualSections({
-      html: sourceCode,
+      html: decodedSourceCode,
       pageType: validated.pageType,
       existingSections: sections,
       markFaqCovered: faqExtracted || validated.pageType === "faq",

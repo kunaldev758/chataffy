@@ -1,6 +1,9 @@
 const cheerio = require("cheerio");
 const { URL } = require("url");
 const crypto = require("crypto");
+const {
+  decodeCloudflareEmails,
+} = require("../../utils/cloudflareEmail");
 /**
  * Checks if input text is HTML content using precise HTML tag patterns.
  * Prevents false positives on Markdown files containing URLs (<http...>) or emails (<user@domain>).
@@ -423,6 +426,7 @@ function extractJsonLd($) {
 function convertHtmlToCleanMarkdown(html, baseUrl = "") {
   if (!html || typeof html !== "string") return "";
   const $ = cheerio.load(html);
+  decodeCloudflareEmails($);
   // 1. Remove non-content / noise elements (script, style, noscript, iframe, svg, template, header, footer, nav, cookie popups)
   $(
     'script, style, noscript, iframe, svg, template, header, footer, nav, [class*="cookie"], [class*="popup"], [role="alert"]',
@@ -640,6 +644,7 @@ function normalizePage(input, pageUrl = "") {
   let codeBlockCount = 0;
   if (isHtml) {
     const $ = cheerio.load(safeInput);
+    decodeCloudflareEmails($);
     // Extract JSON-LD structured data first
     const jsonLdResult = extractJsonLd($);
     // Title extraction

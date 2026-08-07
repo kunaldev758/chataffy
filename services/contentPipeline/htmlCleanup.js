@@ -1,5 +1,8 @@
 const cheerio = require("cheerio");
 const urlModule = require("url");
+const {
+  decodeCloudflareEmails,
+} = require("../../utils/cloudflareEmail");
 
 const FOOTER_SELECTORS =
   "footer, [role='contentinfo'], #footer, #colophon, .site-footer, .page-footer";
@@ -188,6 +191,7 @@ function extractChromeHtml($, selectors) {
 function enrichFooterHtml(footerHTML) {
   if (!footerHTML) return footerHTML;
   const $ = cheerio.load(footerHTML, { decodeEntities: true });
+  decodeCloudflareEmails($);
 
   $("a").each((_, el) => {
     const href = $(el).attr("href") || "";
@@ -220,6 +224,10 @@ function enrichFooterHtml(footerHTML) {
  * @returns {{ headerHTML: string, footerHTML: string }}
  */
 function cleanupHtmlDom($, webPageURL, { isHomepage, chromeState } = {}) {
+  // Decode protected addresses before scripts are removed and before the
+  // header/footer HTML is captured for markdown conversion.
+  decodeCloudflareEmails($);
+
   $(
     "script, style, noscript, iframe, svg, canvas, form, input, button, select, textarea",
   ).remove();
