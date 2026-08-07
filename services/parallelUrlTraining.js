@@ -131,8 +131,19 @@ async function runParallelScrapeOverlapTrain(opts) {
   const finalizeTrainedDoc = async (doc, result) => {
     const pageResult = result?.resultsByUrl?.[doc.originalUrl];
     const skipped = pageResult?.skipped;
+    const trainError =
+      pageResult?.error ||
+      result?.error ||
+      "Failed to process/minify web page content";
+    // Prefer per-URL outcome; batch success is secondary so one bad page
+    // in a multi-doc batch does not mislabel a successful page.
     const failed =
-      !result?.success || result?.failedUrls?.includes(doc.originalUrl);
+      pageResult?.success === false ||
+      (Array.isArray(result?.failedUrls) &&
+        result.failedUrls.includes(doc.originalUrl)) ||
+      (pageResult?.success !== true &&
+        !skipped &&
+        result?.success === false);
 
     if (skipped === "unchanged") {
       console.log(
@@ -174,21 +185,47 @@ async function runParallelScrapeOverlapTrain(opts) {
     }
 
     const status = failed ? 2 : 1;
+    const trainingFilter = {
+      userId,
+      agentId,
+      type: 0,
+      "webPage.url": doc.originalUrl,
+    };
+    const existingRows = await TrainingModel.find(trainingFilter)
+      .sort({ createdAt: 1 })
+      .select("_id")
+      .lean();
+    const trainingUpdate = {
+      userId,
+      agentId,
+      type: 0,
+      content: doc.content,
+      dataSize: doc.dataSize,
+      trainingStatus: status,
+      error: status === 2 ? trainError : null,
+      "webPage.url": doc.originalUrl,
+      chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
+      lastEdit: Date.now(),
+    };
+
+    if (existingRows.length > 0) {
+      await TrainingModel.updateOne(
+        { _id: existingRows[0]._id },
+        { $set: trainingUpdate },
+      );
+      if (existingRows.length > 1) {
+        await TrainingModel.deleteMany({
+          _id: { $in: existingRows.slice(1).map((row) => row._id) },
+        });
+      }
+    } else {
+      await TrainingModel.create(trainingUpdate);
+    }
+
     if (status === 1) {
       console.log(
         `[parallelUrlTraining] train success url=${doc.originalUrl} chunks=${result.chunkCountPerUrl?.[doc.originalUrl] || 0}`,
       );
-      await TrainingModel.create({
-        userId,
-        agentId,
-        type: 0,
-        content: doc.content,
-        dataSize: doc.dataSize,
-        trainingStatus: status,
-        "webPage.url": doc.originalUrl,
-        chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
-        lastEdit: Date.now(),
-      });
       await markUrlProcessed(doc.originalUrl, agentId, {
         contentHash:
           pageResult?.contentHash || pageResult?.page?.content_hash,
@@ -201,37 +238,15 @@ async function runParallelScrapeOverlapTrain(opts) {
     } else {
       anyTrainFailed = true;
       console.log(
-        `[parallelUrlTraining] train failed url=${doc.originalUrl} error=${result?.error || "unknown"}`,
+        `[parallelUrlTraining] train failed url=${doc.originalUrl} error=${trainError}`,
       );
-      await TrainingModel.create({
-        userId,
-        agentId,
-        type: 0,
-        content: doc.content,
-        dataSize: doc.dataSize,
-        trainingStatus: status,
-        error: result?.error || "Failed to process/minify web page content",
-        "webPage.url": doc.originalUrl,
-        chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
-        lastEdit: Date.now(),
-      });
-      await markUrlFailed(
-        doc.originalUrl,
-        agentId,
-        result?.error || "Failed to process/minify web page content",
-      );
+      await markUrlFailed(doc.originalUrl, agentId, trainError);
     }
 
-    await Agent.updateOne(
-      { _id: agentId },
-      {
-        $inc: {
-          ...(status === 1
-            ? { "pagesAdded.success": 1 }
-            : { "pagesAdded.failed": 1 }),
-        },
-      },
-    );
+    // Keep counters aligned with the actual rows instead of accumulating
+    // duplicates across repeated delete/re-add cycles.
+    const { recomputeWebPageCounters } = require("../utils/agentPageCounters");
+    await recomputeWebPageCounters(TrainingModel, userId, agentId);
   };
 
   const enqueueTrain = (doc) => {
@@ -258,6 +273,7 @@ async function runParallelScrapeOverlapTrain(opts) {
           agentId,
           qdrantIndexName,
           {
+            TrainingModel,
             onProgress: async (progress) => {
               const local =
                 progress.trainingTotal > 0
@@ -401,23 +417,38 @@ async function runParallelScrapeOverlapTrain(opts) {
       );
 
       if (!processResult?.content) {
-        await TrainingModel.create({
+        const failedRow = await TrainingModel.findOneAndUpdate(
+          { userId, agentId, type: 0, "webPage.url": url },
+          {
+            $set: {
+              userId,
+              agentId,
+              type: 0,
+              content: "",
+              dataSize: 0,
+              trainingStatus: 2,
+              error: "No data found",
+              "webPage.url": url,
+              chunkCount: 0,
+              lastEdit: Date.now(),
+            },
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true },
+        );
+        await TrainingModel.deleteMany({
           userId,
           agentId,
           type: 0,
-          content: "",
-          dataSize: 0,
-          trainingStatus: 2,
-          error: "No data found",
           "webPage.url": url,
-          chunkCount: 0,
-          lastEdit: Date.now(),
+          _id: { $ne: failedRow._id },
         });
         await markUrlFailed(
           url,
           agentId,
           "Failed to process/minify web page content",
         );
+        const { recomputeWebPageCounters } = require("../utils/agentPageCounters");
+        await recomputeWebPageCounters(TrainingModel, userId, agentId);
         return;
       }
 
@@ -555,16 +586,7 @@ async function runParallelScrapeOverlapTrain(opts) {
         enqueueTrain(docOrSkip.doc);
       }
     } catch (error) {
-      const existingFailRow = await TrainingModel.findOne({
-        userId,
-        agentId,
-        "webPage.url": url,
-      })
-        .select("trainingStatus")
-        .lean();
-      const prevTrainStatus = existingFailRow?.trainingStatus;
-
-      await TrainingModel.findOneAndUpdate(
+      const failedRow = await TrainingModel.findOneAndUpdate(
         { userId, agentId, "webPage.url": url },
         {
           $set: {
@@ -577,16 +599,18 @@ async function runParallelScrapeOverlapTrain(opts) {
             "webPage.url": url,
           },
         },
-        { upsert: true, setDefaultsOnInsert: true },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
       );
+      await TrainingModel.deleteMany({
+        userId,
+        agentId,
+        type: 0,
+        "webPage.url": url,
+        _id: { $ne: failedRow._id },
+      });
 
-      if (prevTrainStatus !== 2) {
-        const inc =
-          prevTrainStatus === 1
-            ? { "pagesAdded.success": -1, "pagesAdded.failed": 1 }
-            : { "pagesAdded.failed": 1 };
-        await Agent.updateOne({ _id: agentId }, { $inc: inc });
-      }
+      const { recomputeWebPageCounters } = require("../utils/agentPageCounters");
+      await recomputeWebPageCounters(TrainingModel, userId, agentId);
       await markUrlFailed(url, agentId, error?.message || "Failed to train");
     } finally {
       await bumpScrapeProgress();
@@ -839,6 +863,7 @@ async function runParallelRetrainOverlap(opts) {
           agentId,
           qdrantIndexName,
           {
+            TrainingModel,
             onProgress: async (progress) => {
               const local =
                 progress.trainingTotal > 0

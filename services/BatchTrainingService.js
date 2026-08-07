@@ -37,7 +37,12 @@ class BatchTrainingService {
     qdrantIndexName,
     options = {},
   ) {
-    const { onProgress } = options;
+    // Some callers still pass a boolean as the 5th arg; coerce to options object.
+    const opts =
+      options && typeof options === "object" && !Array.isArray(options)
+        ? options
+        : {};
+    const { onProgress, TrainingModel = null } = opts;
     try {
       if (!documents || documents.length === 0) {
         return {
@@ -56,6 +61,7 @@ class BatchTrainingService {
         qdrantIndexName,
         {
           onProgress,
+          TrainingModel,
           chunkSize: this.CHUNK_SIZE,
           chunkOverlap: this.CHUNK_OVERLAP,
         },
@@ -67,6 +73,12 @@ class BatchTrainingService {
         failedUrls: result.failedUrls,
       });
 
+      const firstFailedUrl = (result.failedUrls || [])[0];
+      const firstFailedError =
+        firstFailedUrl && result.resultsByUrl?.[firstFailedUrl]?.error
+          ? result.resultsByUrl[firstFailedUrl].error
+          : undefined;
+
       return {
         success: result.success,
         totalChunks: result.totalChunks,
@@ -76,6 +88,7 @@ class BatchTrainingService {
         storageMB: result.storageMB,
         estimatedCost: result.estimatedCost,
         resultsByUrl: result.resultsByUrl || {},
+        error: firstFailedError,
       };
     } catch (error) {
       return {

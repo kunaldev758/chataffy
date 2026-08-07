@@ -8,7 +8,7 @@
           "hybrid support", "24/7 support", "outsource", "outsourcing",
           "subscription", "pricing plan", "per month", "free trial",
           "b2b", "platform", "api", "integration", "automation",
-          "dashboard", "analytics", "real-time", "enterprise solution",
+          "dashboard", "analytics", "real-time", "enterprize solution",
           "workflow", "productivity", "collaboration", "project management"
         ]
       },
@@ -264,7 +264,7 @@
         keywords: [
           "our services", "about us", "company", "solutions",
           "consulting", "agency", "our team", "contact us",
-          "enterprise", "corporation", "business", "partnership",
+          "enterprize", "corporation", "business", "partnership",
           "clients", "expertise", "years of experience", "service"
         ]
       }

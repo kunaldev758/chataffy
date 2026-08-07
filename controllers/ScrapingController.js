@@ -945,11 +945,11 @@ async bulkInsertUrls(userId,agentId, urls) {
       appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
       });
-      
-      await Agent.updateOne(
-        { _id: agentId },
-        { $inc: { "pagesAdded.total": urls.length || 0 } }
-      );
+
+      // Do not $inc pagesAdded.total here — it inflated inventory when combined
+      // with per-page recompute. Total is kept equal to training-list row count
+      // (add creates rows / recompute; delete removes them / recompute).
+      // Live progress uses job totalUrls, not pagesAdded.total.
 
       await urlProcessingQueue.add("processSingleUrl", {
         urls,
@@ -1207,7 +1207,6 @@ async bulkInsertUrls(userId,agentId, urls) {
     const agent = await Agent.findOne({ _id: agentId }).lean();
     if (!agent || agent.dataTrainingStatus !== 1) return null;
 
-    let total = agent.pagesAdded?.total || 0;
     const startTime = agent.scrapingStartTime || new Date();
 
     let phase = "scraping";
@@ -1219,27 +1218,50 @@ async bulkInsertUrls(userId,agentId, urls) {
     let embeddingTotal = 0;
     let upsertProgress = 0;
     let upsertTotal = 0;
+    let job = null;
 
     try {
-      const activeJobs = await urlProcessingQueue.getJobs(["active", "waiting"]);
-      let job = activeJobs.find(
-        (j) => j.data?.agentId?.toString() === agentId.toString(),
+      const [urlJobs, retrainJobs] = await Promise.all([
+        urlProcessingQueue.getJobs(["active", "waiting"]),
+        retrainTrainingDataQueue.getJobs(["active", "waiting"]),
+      ]);
+      const matchingJobs = [...urlJobs, ...retrainJobs].filter(
+        (candidate) =>
+          candidate.data?.agentId?.toString() === agentId.toString(),
       );
+      // Prefer the job that is actually running. If jobs are waiting, use the
+      // newest one rather than an old full-site job left in queue history.
+      const activeJobs = matchingJobs.filter((candidate) => candidate.processedOn);
+      const candidates = activeJobs.length > 0 ? activeJobs : matchingJobs;
+      job =
+        candidates.sort(
+          (a, b) => (b.timestamp || 0) - (a.timestamp || 0),
+        )[0] || null;
 
       if (!job) {
-        const retrainJobs = await retrainTrainingDataQueue.getJobs([
-          "active",
-          "waiting",
-        ]);
-        job = retrainJobs.find(
-          (j) => j.data?.agentId?.toString() === agentId.toString(),
-        );
+        // Never fall back to pagesAdded.total: that is a lifetime/content
+        // counter, not the size of the current job, and caused "0/329" for a
+        // one-page retrain. Repair genuinely stale agent state after a grace
+        // period for the small gap between setting status and queueing a job.
+        const startedAt = new Date(startTime).getTime();
+        if (Date.now() - startedAt > 30_000) {
+          await Agent.updateOne(
+            { _id: agentId, dataTrainingStatus: 1 },
+            { $set: { dataTrainingStatus: 0, scrapingStartTime: null } },
+          );
+        }
+        return null;
       }
 
+      let total = 0;
       if (job?.data?.totalUrls) {
         total = job.data.totalUrls;
       } else if (job?.data?.totalEntries) {
         total = job.data.totalEntries;
+      } else if (Array.isArray(job?.data?.urls)) {
+        total = job.data.urls.length;
+      } else if (Array.isArray(job?.data?.entries)) {
+        total = job.data.entries.length;
       }
 
       if (job?.progress && typeof job.progress === "object") {
@@ -1260,7 +1282,15 @@ async bulkInsertUrls(userId,agentId, urls) {
       }
     } catch (e) {
       console.error("getActiveTrainingProgress job lookup:", e);
+      return null;
     }
+
+    const total =
+      job?.data?.totalUrls ||
+      job?.data?.totalEntries ||
+      job?.data?.urls?.length ||
+      job?.data?.entries?.length ||
+      0;
 
     // If scrape finished but job is still active, assume training phase.
     if (
@@ -1953,6 +1983,12 @@ async bulkInsertUrls(userId,agentId, urls) {
           error: "Agent not found",
         });
       }
+      if (agent.dataTrainingStatus === 1) {
+        return res.status(409).json({
+          success: false,
+          error: "Wait for the active training job to finish before deleting content.",
+        });
+      }
 
       const client = await Client.findOne({ userId });
       if (!client) {
@@ -1984,7 +2020,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       const objectIds = ids
         .filter((id) => id)
         .map((id) => (typeof id === "string" ? new mongoose.Types.ObjectId(id) : id));
-      const entries = await TrainingModel.find({
+      let entries = await TrainingModel.find({
         _id: { $in: objectIds },
         userId: userId?.toString(),
         agentId,
@@ -1997,6 +2033,33 @@ async bulkInsertUrls(userId,agentId, urls) {
           success: false,
           error: "No matching training entries found",
         });
+      }
+
+      // Historical train runs could create multiple rows for one URL. Treat a
+      // delete click as deleting that URL, not just one duplicate document.
+      const selectedPageUrls = [
+        ...new Set(
+          entries
+            .filter((entry) => entry.type === 0)
+            .map((entry) => entry.webPage?.url)
+            .filter(Boolean),
+        ),
+      ];
+      if (selectedPageUrls.length > 0) {
+        const duplicateRows = await TrainingModel.find({
+          userId: userId?.toString(),
+          agentId,
+          type: 0,
+          "webPage.url": { $in: selectedPageUrls },
+        }).lean();
+        entries = [
+          ...new Map(
+            [...entries, ...duplicateRows].map((entry) => [
+              entry._id.toString(),
+              entry,
+            ]),
+          ).values(),
+        ];
       }
 
       // Add job to background queue
@@ -2012,6 +2075,7 @@ async bulkInsertUrls(userId,agentId, urls) {
         success: true,
         message: "Delete job queued. Training data will be removed in the background.",
         count: entries.length,
+        ids: entries.map((entry) => entry._id.toString()),
       });
     } catch (error) {
       console.error("deleteTrainingData error:", error);
@@ -2049,6 +2113,12 @@ async bulkInsertUrls(userId,agentId, urls) {
         return res.status(404).json({
           success: false,
           error: "Agent not found",
+        });
+      }
+      if (agent.dataTrainingStatus === 1) {
+        return res.status(409).json({
+          success: false,
+          error: "Training is already in progress for this agent.",
         });
       }
 
@@ -2104,17 +2174,24 @@ async bulkInsertUrls(userId,agentId, urls) {
       }
 
       const scrapingStartTime = new Date();
-      await Agent.updateOne(
-        { _id: agentId },
+      const claimedAgent = await Agent.findOneAndUpdate(
+        { _id: agentId, userId, dataTrainingStatus: { $ne: 1 } },
         {
           $set: {
             dataTrainingStatus: 1,
             scrapingStartTime,
           },
         },
+        { new: true },
       );
+      if (!claimedAgent) {
+        return res.status(409).json({
+          success: false,
+          error: "Training is already in progress for this agent.",
+        });
+      }
       appEvents.emit("userEvent", agentId, "training-event", {
-        agent: await Agent.findOne({ _id: agentId }),
+        agent: claimedAgent,
         scrapingProgress: buildTrainingProgressPayload({
           startTime: scrapingStartTime,
           phase: "scraping",
@@ -2124,15 +2201,23 @@ async bulkInsertUrls(userId,agentId, urls) {
         }),
       });
 
-      await retrainTrainingDataQueue.add("retrainTrainingData", {
-        entries: webpageEntries,
-        userId: userId?.toString(),
-        agentId: agentId?.toString(),
-        qdrantIndexName,
-        TrainingModelName,
-        startTime: scrapingStartTime.getTime(),
-        totalEntries: webpageEntries.length,
-      });
+      try {
+        await retrainTrainingDataQueue.add("retrainTrainingData", {
+          entries: webpageEntries,
+          userId: userId?.toString(),
+          agentId: agentId?.toString(),
+          qdrantIndexName,
+          TrainingModelName,
+          startTime: scrapingStartTime.getTime(),
+          totalEntries: webpageEntries.length,
+        });
+      } catch (queueError) {
+        await Agent.updateOne(
+          { _id: agentId },
+          { $set: { dataTrainingStatus: 0, scrapingStartTime: null } },
+        );
+        throw queueError;
+      }
 
       res.status(200).json({
         success: true,

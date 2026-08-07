@@ -37,15 +37,6 @@ async function markWebUrlScrapeFailed({
   TrainingModel,
   error,
 }) {
-  const existingFailRow = await TrainingModel.findOne({
-    userId,
-    agentId,
-    "webPage.url": url,
-  })
-    .select("trainingStatus")
-    .lean();
-  const prevTrainStatus = existingFailRow?.trainingStatus;
-
   await TrainingModel.findOneAndUpdate(
     { userId, agentId, "webPage.url": url },
     {
@@ -62,13 +53,8 @@ async function markWebUrlScrapeFailed({
     { upsert: true, setDefaultsOnInsert: true },
   );
 
-  if (prevTrainStatus !== 2) {
-    const inc =
-      prevTrainStatus === 1
-        ? { "pagesAdded.success": -1, "pagesAdded.failed": 1 }
-        : { "pagesAdded.failed": 1 };
-    await Agent.updateOne({ _id: agentId }, { $inc: inc });
-  }
+  const { recomputeWebPageCounters } = require("../utils/agentPageCounters");
+  await recomputeWebPageCounters(TrainingModel, userId, agentId);
 
   await markUrlFailed(url, agentId, error);
 }
@@ -654,6 +640,10 @@ new Worker(
         );
       }
 
+      // Final inventory alignment after all URLs finish (skips, scrapes, trains).
+      const { recomputeWebPageCounters } = require("../utils/agentPageCounters");
+      await recomputeWebPageCounters(TrainingModel, userId, agentId);
+
       await Agent.updateOne(
         { _id: agentId },
         {
@@ -761,8 +751,6 @@ new Worker(
     const { entries, userId, agentId, qdrantIndexName, TrainingModelName } =
       job.data;
     const QdrantVectorStoreManager = require("./QdrantService");
-    const PlanService = require("./PlanService");
-    const Client = require("../models/Client");
     const Agent = require("../models/Agent");
     const appEvents = require("../events");
 
@@ -771,12 +759,6 @@ new Worker(
         TrainingModelName === "TrainingListFreeUsers"
           ? require("../models/TrainingListFreeUsers")
           : require("../models/OpenaiTrainingList");
-
-      let totalDataSizeRemoved = 0;
-      let pagesSuccessDeleted = 0;
-      let pagesFailedDeleted = 0;
-      let filesDeleted = 0;
-      let faqsDeleted = 0;
 
       // Delete vectors from Qdrant
       const qdrantResult =
@@ -798,46 +780,68 @@ new Worker(
         );
       }
 
-      // Delete from MongoDB and aggregate stats
-      for (const entry of entries) {
-        await TrainingModel.deleteOne({ _id: entry._id });
-        totalDataSizeRemoved += entry.dataSize || 0;
-        if (entry.type === 0) {
-          if (entry.trainingStatus === 1) pagesSuccessDeleted++;
-          else pagesFailedDeleted++;
-        } else if (entry.type === 1) filesDeleted++;
-        else if (entry.type === 3) faqsDeleted++;
-      }
+      const Url = require("../models/Url");
+      const entryIds = entries.map((entry) => entry._id).filter(Boolean);
+      const deletedPageUrls = [
+        ...new Set(
+          entries
+            .filter((entry) => entry.type === 0)
+            .map((entry) => entry.webPage?.url)
+            .filter(Boolean),
+        ),
+      ];
 
-      // Update Client currentDataSize
-      // await Client.updateOne(
-      //   { userId },
-      //   { $inc: { currentDataSize: -Math.max(0, totalDataSizeRemoved) } }
-      // );
+      // deleteMany removes every selected/duplicate row in one pass. Re-running
+      // this worker is safe because counters are recomputed below.
+      const deleteResult = await TrainingModel.deleteMany({
+        _id: { $in: entryIds },
+        userId,
+        agentId,
+      });
 
-      // Update Agent counters
-      const updateFields = {};
-      if (pagesSuccessDeleted > 0)
-        updateFields["pagesAdded.success"] = -pagesSuccessDeleted;
-      if (pagesFailedDeleted > 0)
-        updateFields["pagesAdded.failed"] = -pagesFailedDeleted;
-      if (pagesSuccessDeleted > 0 || pagesFailedDeleted > 0) {
-        updateFields["pagesAdded.total"] = -(
-          pagesSuccessDeleted + pagesFailedDeleted
+      // Clear Url pipeline rows so re-add → re-train is not skipped as
+      // "content unchanged" (stale contentHash) with no TrainingModel row.
+      if (deletedPageUrls.length > 0) {
+        const urlDeleteResult = await Url.deleteMany({
+          agentId,
+          url: { $in: deletedPageUrls },
+        });
+        console.log(
+          `[deleteTrainingData] Cleared ${urlDeleteResult.deletedCount || 0} Url pipeline row(s) for agent ${agentId}`,
         );
       }
-      if (filesDeleted > 0) updateFields.filesAdded = -filesDeleted;
-      if (faqsDeleted > 0) updateFields.faqsAdded = -faqsDeleted;
-      if (Object.keys(updateFields).length > 0) {
-        await Agent.updateOne({ _id: agentId }, { $inc: updateFields });
-      }
+
+      // Recompute counters from source-of-truth rows. This is idempotent on
+      // BullMQ retries and repairs drift from older duplicate rows.
+      const { recomputeWebPageCounters } = require("../utils/agentPageCounters");
+      await recomputeWebPageCounters(TrainingModel, userId, agentId);
+
+      const filesTotal = await TrainingModel.countDocuments({
+        userId,
+        agentId,
+        type: 1,
+      });
+      const faqsTotal = await TrainingModel.countDocuments({
+        userId,
+        agentId,
+        type: 3,
+      });
+      await Agent.updateOne(
+        { _id: agentId },
+        {
+          $set: {
+            filesAdded: filesTotal,
+            faqsAdded: faqsTotal,
+          },
+        },
+      );
 
       appEvents.emit("userEvent", agentId, "training-event", {
         agent: await Agent.findOne({ _id: agentId }),
       });
 
       console.log(
-        `[deleteTrainingData] Deleted ${entries.length} training entries for user ${userId}`,
+        `[deleteTrainingData] Deleted ${deleteResult.deletedCount || 0} training entries for user ${userId}`,
       );
     } catch (error) {
       console.error("[deleteTrainingData] Job failed:", error);

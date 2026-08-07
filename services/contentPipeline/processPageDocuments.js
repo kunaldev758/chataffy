@@ -14,6 +14,30 @@ const DEFAULT_CHUNK_OVERLAP = 50;
 const CHARS_PER_TOKEN = 4;
 
 /**
+ * Whether a webpage training-list row still exists for this agent+url.
+ * Checks both free and paid collections (plan-specific) without importing
+ * PlanService — PlanService → jobService creates a circular require chain
+ * (jobService → BatchTraining → processPageDocuments → PlanService) that
+ * can leave PlanService as an empty export and break all trains.
+ */
+async function webpageHasTrainingRow(agentId, url, TrainingModel = null) {
+  if (!agentId || !url) return false;
+  const filter = { agentId, type: 0, "webPage.url": url };
+
+  if (TrainingModel) {
+    return !!(await TrainingModel.exists(filter));
+  }
+
+  const Free = require("../../models/TrainingListFreeUsers");
+  const Paid = require("../../models/OpenaiTrainingList");
+  const [freeHit, paidHit] = await Promise.all([
+    Free.exists(filter),
+    Paid.exists(filter),
+  ]);
+  return !!(freeHit || paidHit);
+}
+
+/**
  * Resolve raw input for test-backend-style ingestion.
  * Prefer original HTML when available so normalizePage matches test-backend.
  */
@@ -78,7 +102,9 @@ async function processPageDocuments(
   qdrantIndexName,
   options = {},
 ) {
-  const { onProgress } = options;
+  // Optional: caller-supplied model (avoids dual-collection lookup).
+  // Do not resolve plan via PlanService here — see webpageHasTrainingRow().
+  const { onProgress, TrainingModel = null } = options;
 
   const chunkCountPerUrl = {};
   const resultsByUrl = {};
@@ -230,7 +256,9 @@ async function processPageDocuments(
         continue;
       }
 
-      // Content-hash skip (unchanged product behavior)
+      // Content-hash skip only when page is truly still trained (row still in
+      // training list). After delete, Url.contentHash can remain while vectors
+      // and the list row are gone — re-embed and recreate the row.
       const existing = await Url.findOne({ url, agentId })
         .select("contentHash trainStatus")
         .lean();
@@ -240,22 +268,34 @@ async function processPageDocuments(
         content_hash &&
         existing.contentHash === content_hash
       ) {
-        chunkCountPerUrl[url] = 0;
-        skippedUrls.push(url);
-        resultsByUrl[url] = {
-          success: true,
-          skipped: "unchanged",
-          skipReason: "content_hash_match",
-          qualityScore: page.quality_score,
-          contentHash: content_hash,
-          page,
-        };
-        await emitAggregateProgress({
-          docIndex,
-          localFraction: 1,
-          step: "chunking",
-        });
-        continue;
+        const hasTrainingEntry = await webpageHasTrainingRow(
+          agentId,
+          url,
+          TrainingModel,
+        );
+
+        if (hasTrainingEntry) {
+          chunkCountPerUrl[url] = 0;
+          skippedUrls.push(url);
+          resultsByUrl[url] = {
+            success: true,
+            skipped: "unchanged",
+            skipReason: "content_hash_match",
+            qualityScore: page.quality_score,
+            contentHash: content_hash,
+            page,
+          };
+          await emitAggregateProgress({
+            docIndex,
+            localFraction: 1,
+            step: "chunking",
+          });
+          continue;
+        }
+
+        console.log(
+          `[contentPipeline] content hash match for ${url} but no training row — forcing retrain`,
+        );
       }
 
       const allChunks = ingested.chunks || [];
@@ -357,6 +397,7 @@ async function processPageDocuments(
 
 module.exports = {
   processPageDocuments,
+  webpageHasTrainingRow,
   resolveRawInput,
   resolveDocUrl,
   DEFAULT_CHUNK_SIZE,
