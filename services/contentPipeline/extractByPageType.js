@@ -11,7 +11,7 @@ const { extractListingContent } = require("./extractors/listing");
 const { extractWithReadability } = require("./extractors/contentReadability");
 const { extractFaqContent } = require("./extractors/faq");
 const { processResidualSections } = require("./residualSections");
-const { GRID_SELECTORS } = require("./extractors/listing");
+const { GRID_SELECTORS, CARD_SELECTORS } = require("./extractors/listing");
 const { resolveProductId } = require("./productId");
 
 /**
@@ -66,16 +66,25 @@ function mergeAttrMaps(target = {}, extra = {}) {
   return out;
 }
 
-function isListingUrl(url = "") {
-  return /\/(collections?|category|categories|catalog)(\/|$)/i.test(url || "");
+function isListingUrl(url = "", $ = null) {
+  const urlPattern = /\/(collections?|category|categories|catalog|shop|store|all-products|products\/?(\?.*)?$|search|browse|items?|brands?|goods)(\/|$|\?)/i.test(
+    url || "",
+  );
+  if (urlPattern) return true;
+
+  if ($) {
+    const cardCount = $(CARD_SELECTORS).length;
+    if (cardCount >= 2) return true;
+  }
+  return false;
 }
 
 /**
  * After pageType=product, resolve PDP vs PLP.
- * Collection/catalog URLs always force listing.
+ * Collection/catalog URLs or multi-card DOMs always force listing.
  */
-function resolveProductEntityType(detection, url) {
-  if (isListingUrl(url)) {
+function resolveProductEntityType(detection, url, $ = null) {
+  if (isListingUrl(url, $)) {
     return {
       ...detection,
       pageType: "product",
@@ -156,7 +165,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
 
   // 2b) product pageType → PDP vs PLP entity split
   if (detection.pageType === "product") {
-    detection = resolveProductEntityType(detection, url);
+    detection = resolveProductEntityType(detection, url, $meta);
   }
 
   const isListing =

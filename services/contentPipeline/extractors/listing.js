@@ -8,6 +8,7 @@ const {
 const MAX_PRODUCTS = 60;
 
 const GRID_SELECTORS = [
+  // Shopify
   "#ProductGridContainer",
   "#product-grid",
   ".product-grid",
@@ -19,9 +20,37 @@ const GRID_SELECTORS = [
   ".product-items",
   "ul.products",
   ".collection-grid",
+  ".products",
+  ".shop-grid",
+  ".grid--view-items",
+  // BigCommerce
+  ".productGrid",
+  ".productBlockContainer",
+  "#product-listing-container",
+  "ul.productGrid",
+  "#product-listing-container .productGrid",
+  // WooCommerce
+  ".woocommerce-page ul.products",
+  ".wc-block-grid__products",
+  "ul.products",
+  // Magento
+  ".products-grid",
+  "ol.products",
+  ".product-items",
+  // Salesforce Commerce Cloud & Generic
+  ".search-results",
+  ".product-grid-container",
+  "[class*='product-grid' i]",
+  "[class*='productGrid' i]",
+  "[class*='productList' i]",
+  "[class*='products-grid' i]",
+  "[class*='grid-products' i]",
+  "[class*='productListing' i]",
+  "[class*='category-products' i]",
 ].join(", ");
 
 const CARD_SELECTORS = [
+  // Shopify
   ".product-card",
   ".product-item",
   ".grid__item .card",
@@ -31,6 +60,35 @@ const CARD_SELECTORS = [
   "li.product",
   ".card-wrapper",
   ".product-block",
+  // BigCommerce
+  "article.card",
+  ".card-body",
+  ".productCard",
+  "[data-test-info-type='brandName']",
+  // WooCommerce
+  "li.product",
+  ".type-product",
+  ".wc-block-grid__product-template",
+  // Magento & SFCC
+  "li.product-item",
+  ".product-item-info",
+  ".product-tile",
+  ".product-tile-body",
+  // Generic / Custom
+  ".product-box",
+  ".shop-item",
+  ".product-col",
+  ".product-card-wrapper",
+  "[class*='product-card' i]",
+  "[class*='product-item' i]",
+  "[class*='productCard' i]",
+  "[class*='productItem' i]",
+  "[class*='productTile' i]",
+  "[class*='product_card' i]",
+  "[class*='productBlock' i]",
+  "article.product",
+  "li.product-item",
+  ".type-product",
 ].join(", ");
 
 function absolutize(href, pageUrl) {
@@ -57,6 +115,21 @@ function parsePrice(text) {
     .replace(/,/g, "")
     .match(/(\d+(?:\.\d+)?)/);
   return m ? Number(m[1]) : null;
+}
+
+function extractCurrencySymbol(text = "") {
+  const str = String(text || "").trim();
+  if (/₹|rs\.?|inr/i.test(str)) return "₹";
+  if (/€|eur/i.test(str)) return "€";
+  if (/£|gbp/i.test(str)) return "£";
+  if (/\$|usd|cad|aud/i.test(str)) return "$";
+  if (/¥|jpy|cny/i.test(str)) return "¥";
+  if (/₩|krw/i.test(str)) return "₩";
+  if (/₪|ils/i.test(str)) return "₪";
+  if (/฿|thb/i.test(str)) return "฿";
+  if (/₫|vnd/i.test(str)) return "₫";
+  if (/₱|php/i.test(str)) return "₱";
+  return "";
 }
 
 /**
@@ -92,7 +165,11 @@ function extractListingFromJsonLd(jsonLdBlocks = [], pageUrl = "") {
     if (seen.has(key)) return;
     seen.add(key);
     const row = { name: name || null, url: url || null };
-    if (price != null && !Number.isNaN(price)) row.price = price;
+    if (price != null && !Number.isNaN(price)) {
+      row.price = price;
+      const symbol = extractCurrencySymbol(offer?.priceCurrency || "");
+      if (symbol) row.currency = symbol;
+    }
     products.push(row);
   };
 
@@ -136,6 +213,37 @@ function extractListingFromJsonLd(jsonLdBlocks = [], pageUrl = "") {
   return products.slice(0, MAX_PRODUCTS);
 }
 
+function extractPriceFromCard($, $el) {
+  // 1. Try leaf price elements containing numbers
+  const priceElements = $el
+    .find(
+      "[data-product-price-without-tax], [data-product-price], [itemprop='price'], .price--withoutTax, .price--withTax, .price-item--sale, .price-item--regular, .price, .money, .amount, [class*='price' i]",
+    )
+    .toArray();
+
+  for (const pEl of priceElements) {
+    const text = cleanText($(pEl).text());
+    const num = parsePrice(text);
+    if (num != null && !Number.isNaN(num) && num > 0) {
+      const currency = extractCurrencySymbol(text) || "$";
+      return { price: num, currency };
+    }
+  }
+
+  // 2. Fallback: match currency regex ($16,920.00 / ₹900 / €49.99) in card text
+  const fullText = cleanText($el.text());
+  const match = fullText.match(/(?:(₹|\$|€|£|¥|Rs\.?)\s*)?([\d,]+(?:\.\d+)?)/i);
+  if (match) {
+    const parsed = parsePrice(match[2]);
+    if (parsed != null && !Number.isNaN(parsed) && parsed > 0) {
+      const currency = extractCurrencySymbol(match[1] || fullText) || "$";
+      return { price: parsed, currency };
+    }
+  }
+
+  return { price: null, currency: "" };
+}
+
 function extractCard($, el, pageUrl) {
   const $el = $(el);
   // Prefer product PDP links over collection/filter links
@@ -143,31 +251,43 @@ function extractCard($, el, pageUrl) {
   $el.find("a[href]").each((_, a) => {
     if (href) return;
     const h = ($(a).attr("href") || "").trim();
-    if (/\/products?\//i.test(h) || /\/p\//i.test(h)) href = h;
+    if (/\/products?\/|\/p\/|\/item\/|\/shop\/|\/pd\/|\/goods\/|\/[a-z0-9-]+-[0-9]+\//i.test(h)) href = h;
   });
   if (!href) {
-    href = $el.find("a[href]").first().attr("href") || null;
+    $el.find("a[href]").each((_, a) => {
+      if (href) return;
+      const h = ($(a).attr("href") || "").trim();
+      if (h && !h.startsWith("#") && !h.toLowerCase().startsWith("javascript:")) {
+        const isNav = /\/(account|login|register|cart|checkout|policies|blogs|search|wishlist)(\/|$|\?)/i.test(h);
+        if (!isNav) href = h;
+      }
+    });
   }
   const url = absolutize(href, pageUrl);
 
   const name = cleanText(
-    $el.find(".card__heading, .product-card__title, .product-title, .product-item__title, h2, h3, .card__title, [itemprop='name']").first().text() ||
-      $el.find("a[href*='/products/']").first().text() ||
+    $el.find("h4.card-title, .card-title, .product-item-name, .woocommerce-loop-product__title, .wc-block-grid__product-title, .pdp-link a, .card__heading, .product-card__title, .product-title, .product-item__title, .product-name, .item-name, .name, .title, [class*='title' i], [class*='name' i], h2, h3, h4, h5, [itemprop='name']").first().text() ||
+      $el.find("a[href]").first().text() ||
       $el.find("img[alt]").first().attr("alt") ||
       "",
   );
 
-  const priceText =
-    $el.find("[itemprop='price'], .price, .price-item, .product-price, .money").first().text() ||
-    "";
-  const price = parsePrice(priceText);
+  const { price, currency } = extractPriceFromCard($, $el);
 
   if (!name && !url) return null;
-  // Skip pure nav / filter cards
-  if (name && /^(clear|apply|filter|sort|collections?)$/i.test(name)) return null;
+  // Exclude account/login/cart/nav links
+  if (url && /\/(account|login|register|cart|checkout|policies|blogs|search|wishlist)(\/|$|\?)/i.test(url)) {
+    return null;
+  }
+  if (name && /^(log in|sign in|account|cart|checkout|search|view all|privacy|terms|menu|close|filter|sort|collections?)$/i.test(name.trim())) {
+    return null;
+  }
 
   const row = { name: name || null, url: url || null };
-  if (price != null && !Number.isNaN(price)) row.price = price;
+  if (price != null && !Number.isNaN(price)) {
+    row.price = price;
+    if (currency) row.currency = currency;
+  }
   return row;
 }
 
@@ -182,13 +302,19 @@ function extractListingFromDom(html, pageUrl = "") {
   if (FACET_SIDEBAR_SELECTORS) {
     $(FACET_SIDEBAR_SELECTORS).remove();
   }
-  $("header, footer, nav, script, style, noscript").remove();
+  $("header, footer, nav, script, style, noscript, localization-form, .localization-form").remove();
 
   const products = [];
   const seen = new Set();
 
   const push = (row) => {
-    if (!row) return;
+    if (!row || (!row.name && !row.url)) return;
+    if (row.url && /\/(account|login|register|cart|checkout|policies|blogs|search|wishlist)(\/|$|\?)/i.test(row.url)) {
+      return;
+    }
+    if (row.name && /^(log in|sign in|account|cart|checkout|search|view all|privacy|terms|menu|close|filter|sort|collections?)$/i.test(row.name.trim())) {
+      return;
+    }
     const key = (row.url || row.name || "").toLowerCase();
     if (!key || seen.has(key)) return;
     seen.add(key);
@@ -199,31 +325,32 @@ function extractListingFromDom(html, pageUrl = "") {
   const scope = $grid.length ? $grid : $.root();
 
   let cards = scope.find(CARD_SELECTORS).toArray();
-  // Prefer outermost cards — drop nested card matches
-  cards = cards.filter((el) => $(el).parents(CARD_SELECTORS).length === 0);
 
-  if (cards.length === 0) {
-    // Fallback: any /products/ link blocks in main
-    const $main = $("main, [role='main'], #MainContent, .main-content").first();
+  if (cards.length > 0) {
+    for (const el of cards) {
+      push(extractCard($, el, pageUrl));
+      if (products.length >= MAX_PRODUCTS) break;
+    }
+  }
+
+  if (products.length === 0) {
+    // Fallback: any product link blocks in main/body
+    const $main = $("main, [role='main'], #MainContent, .main-content, body").first();
     const root = $main.length ? $main : $.root();
-    root.find("a[href*='/products/'], a[href*='/product/']").each((_, a) => {
+    root.find("a[href*='/product/'], a[href*='/products/'], a[href*='/p/'], a[href*='/item/'], a[href*='/shop/'], a[href*='/pd/']").each((_, a) => {
       const url = absolutize($(a).attr("href"), pageUrl);
       const name = cleanText($(a).text() || $(a).find("img").attr("alt") || "");
       if (!url) return;
       // Use closest list item / article as card context for price
       const $card = $(a).closest("li, article, .grid__item, .card, div");
-      const price = parsePrice(
-        $card.find(".price, .money, [itemprop='price']").first().text() || "",
-      );
+      const { price, currency } = extractPriceFromCard($, $card);
       const row = { name: name || null, url };
-      if (price != null) row.price = price;
+      if (price != null) {
+        row.price = price;
+        if (currency) row.currency = currency;
+      }
       push(row);
     });
-  } else {
-    for (const el of cards) {
-      push(extractCard($, el, pageUrl));
-      if (products.length >= MAX_PRODUCTS) break;
-    }
   }
 
   return products.slice(0, MAX_PRODUCTS);
@@ -231,23 +358,58 @@ function extractListingFromDom(html, pageUrl = "") {
 
 function listingToMarkdown({ title, pageUrl, products, description }) {
   const lines = [];
-  if (title) lines.push(`# ${title}`);
-  if (pageUrl) lines.push(`\nURL: ${pageUrl}`);
-  if (description) {
-    lines.push("\n## About");
-    lines.push(description.trim());
+  const cleanTitle = title || "Product Collection";
+  lines.push(`# ${cleanTitle}`);
+
+  if (pageUrl) {
+    lines.push(`\nCollection URL:\n${pageUrl}`);
   }
 
-  lines.push("\n## Products");
-  if (!products.length) {
-    lines.push("_No products extracted._");
+  if (description && description.trim()) {
+    lines.push(`\nDescription:\n${description.trim()}`);
+  }
+
+  if (!products || !products.length) {
+    lines.push("\n## Product\n\n_No products extracted._");
   } else {
     for (const p of products) {
-      const bits = [];
-      if (p.name) bits.push(p.name);
-      if (p.price != null) bits.push(`Price: ${p.price}`);
-      if (p.url) bits.push(p.url);
-      lines.push(`- ${bits.join(" — ")}`);
+      lines.push("\n## Product");
+
+      if (p.name) {
+        lines.push(`\nName:\n${p.name}`);
+      }
+
+      if (p.price != null) {
+        const cur = p.currency ? p.currency : "$";
+        const formatted = /^[$\u20AC\u00A3\u20B9\u00A5\u20A9\u20AA\u0E3F\u20AB\u20B1]/i.test(cur)
+          ? `${cur}${p.price}`
+          : `${p.price} ${cur}`;
+        lines.push(`\nPrice:\n${formatted}`);
+      }
+
+      if (p.brand) {
+        lines.push(`\nBrand:\n${p.brand}`);
+      }
+
+      if (p.category || cleanTitle) {
+        const cat =
+          p.category ||
+          cleanTitle.replace(/\s*(collection|catalog|listing|products?)\s*/gi, "").trim();
+        if (cat) lines.push(`\nCategory:\n${cat}`);
+      }
+
+      const avail = p.availability
+        ? p.availability
+        : p.in_stock === true
+          ? "In Stock"
+          : p.in_stock === false
+            ? "Out of Stock"
+            : "In Stock";
+      lines.push(`\nAvailability:\n${avail}`);
+
+      if (p.url) {
+        lines.push(`\nProduct URL:\n${p.url}`);
+      }
     }
   }
 
@@ -257,14 +419,17 @@ function listingToMarkdown({ title, pageUrl, products, description }) {
 }
 
 function resolveListingTitle(title, html, pageUrl) {
-  const t = cleanText(title || "");
+  let t = cleanText(title || "");
+  t = t.replace(/(American Express|Diners Club|Discover|JCB|Maestro|Mastercard|PayPal|Union Pay|Visa)+/gi, "").trim();
   if (t && t !== pageUrl && !/^https?:\/\//i.test(t)) return t;
 
   if (html) {
     const $ = cheerio.load(html);
-    const h1 = cleanText($("h1").first().text());
+    let h1 = cleanText($("h1").first().text());
+    h1 = h1.replace(/(American Express|Diners Club|Discover|JCB|Maestro|Mastercard|PayPal|Union Pay|Visa)+/gi, "").trim();
     if (h1 && h1.length < 120) return h1;
-    const og = cleanText($('meta[property="og:title"]').attr("content"));
+    let og = cleanText($('meta[property="og:title"]').attr("content"));
+    og = og.replace(/(American Express|Diners Club|Discover|JCB|Maestro|Mastercard|PayPal|Union Pay|Visa)+/gi, "").trim();
     if (og && !/^https?:\/\//i.test(og)) return og;
   }
   return "Product listing";

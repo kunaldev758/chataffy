@@ -56,6 +56,17 @@ const FACET_SIDEBAR_SELECTORS = [
   ".facets-container",
   ".product-filters",
   "[data-facets]",
+  "localization-form",
+  ".localization-form",
+  "#localization_form",
+  "[data-localization-form]",
+  ".currency-selector",
+  ".country-selector",
+  ".disclosure__list",
+  "[id*='LocalizationForm']",
+  "[id*='localization']",
+  ".payment-icons",
+  ".footer__payment",
 ].join(", ");
 
 /**

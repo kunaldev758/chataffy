@@ -17,7 +17,26 @@ const CHARS_PER_TOKEN = 4;
  * Resolve raw input for test-backend-style ingestion.
  * Prefer original HTML when available so normalizePage matches test-backend.
  */
+// function resolveRawInput(doc) {
+//   const meta = doc.metadata || {};
+//   const html =
+//     doc.sourceCode ||
+//     doc.rawHtml ||
+//     meta.sourceCode ||
+//     meta.rawHtml ||
+//     null;
+//   if (html && String(html).trim()) return String(html);
+//   if (doc.content && String(doc.content).trim()) return String(doc.content);
+//   return "";
+// }
+
+
 function resolveRawInput(doc) {
+  // 1. Prefer typed extracted content (clean Markdown, FAQs, specs, sections)
+  if (doc.content && String(doc.content).trim()) {
+    return String(doc.content);
+  }
+  // 2. Fall back to raw HTML only if extracted content is absent
   const meta = doc.metadata || {};
   const html =
     doc.sourceCode ||
@@ -26,9 +45,9 @@ function resolveRawInput(doc) {
     meta.rawHtml ||
     null;
   if (html && String(html).trim()) return String(html);
-  if (doc.content && String(doc.content).trim()) return String(doc.content);
   return "";
 }
+
 
 /**
  * Resolve a stable synthetic URL for snippets/files/faqs (no webpage URL).
@@ -258,31 +277,31 @@ async function processPageDocuments(
         vectorStore,
         onProgress: onProgress
           ? async (event) => {
-              if (event.step === "embedding") {
-                const ratio =
-                  event.total > 0 ? event.embedded / event.total : 1;
-                await emitAggregateProgress({
-                  docIndex,
-                  localFraction: CHUNKING_SHARE + ratio * EMBEDDING_SHARE,
-                  embeddingProgress: event.embedded,
-                  embeddingTotal: event.total,
-                  step: "embedding",
-                });
-              } else if (event.step === "upserting") {
-                const ratio =
-                  event.total > 0 ? event.upserted / event.total : 1;
-                await emitAggregateProgress({
-                  docIndex,
-                  localFraction:
-                    CHUNKING_SHARE + EMBEDDING_SHARE + ratio * UPSERT_SHARE,
-                  embeddingProgress: event.total,
-                  embeddingTotal: event.total,
-                  upsertProgress: event.upserted,
-                  upsertTotal: event.total,
-                  step: "upserting",
-                });
-              }
+            if (event.step === "embedding") {
+              const ratio =
+                event.total > 0 ? event.embedded / event.total : 1;
+              await emitAggregateProgress({
+                docIndex,
+                localFraction: CHUNKING_SHARE + ratio * EMBEDDING_SHARE,
+                embeddingProgress: event.embedded,
+                embeddingTotal: event.total,
+                step: "embedding",
+              });
+            } else if (event.step === "upserting") {
+              const ratio =
+                event.total > 0 ? event.upserted / event.total : 1;
+              await emitAggregateProgress({
+                docIndex,
+                localFraction:
+                  CHUNKING_SHARE + EMBEDDING_SHARE + ratio * UPSERT_SHARE,
+                embeddingProgress: event.total,
+                embeddingTotal: event.total,
+                upsertProgress: event.upserted,
+                upsertTotal: event.total,
+                step: "upserting",
+              });
             }
+          }
           : undefined,
       });
 
