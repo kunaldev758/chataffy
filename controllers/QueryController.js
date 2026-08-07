@@ -2750,6 +2750,17 @@ ${answerInstructions}`;
         };
       }
 
+      // Temporary override: acknowledgements should continue through semantic
+      // retrieval instead of returning the acknowledgement-only response.
+      if (routing.route === ROUTES.ACKNOWLEDGEMENT) {
+        routing = {
+          ...routing,
+          route: ROUTES.SEMANTIC_RAG,
+          subIntent: null,
+          source: "ack_to_semantic_override",
+        };
+      }
+
       // Defense in depth: identity requests must reach the company-profile/RAG
       // answer path even if an upstream model returns a social route.
       const isIdentityRequest =
