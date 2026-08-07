@@ -30,6 +30,15 @@ const SCHEMA_TO_PAGE = {
 
 const URL_RULES = [
   {
+    // Pricing pages often contain an FAQ section, but the page's primary
+    // content is the plan, price, limits, and included features.
+    re: /\/(pricing|plans?|subscriptions?|rates?)(\/|$)/i,
+    pageType: "generic",
+    entity_type: "general",
+    score: 0.97,
+    deterministic: true,
+  },
+  {
     re: /\/(products?|p|item|sku|dp)\//i,
     pageType: "product",
     entity_type: "product",

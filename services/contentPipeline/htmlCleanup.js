@@ -187,6 +187,32 @@ function extractChromeHtml($, selectors) {
     .trim();
 }
 
+/** Preserve accordion/FAQ labels before generic interactive controls are removed. */
+function preserveContentButtonText($) {
+  $("button").each((_, el) => {
+    const $el = $(el);
+    const ownSignals = `${$el.attr("class") || ""} ${$el.attr("id") || ""}`;
+    const ancestorSignals = $el
+      .parents()
+      .slice(0, 5)
+      .map((__, parent) =>
+        `${$(parent).attr("class") || ""} ${$(parent).attr("id") || ""}`,
+      )
+      .get()
+      .join(" ");
+
+    if (!/(accordion|faq|collapse|disclosure)/i.test(
+      `${ownSignals} ${ancestorSignals}`.replace(/[-_]/g, " "),
+    )) {
+      return;
+    }
+
+    const text = $el.text().replace(/\s+/g, " ").trim();
+    if (!text) return;
+    $el.replaceWith($("<h3></h3>").text(text));
+  });
+}
+
 /** Label icon-only footer links so RAG can match platform names. */
 function enrichFooterHtml(footerHTML) {
   if (!footerHTML) return footerHTML;
@@ -227,6 +253,7 @@ function cleanupHtmlDom($, webPageURL, { isHomepage, chromeState } = {}) {
   // Decode protected addresses before scripts are removed and before the
   // header/footer HTML is captured for markdown conversion.
   decodeCloudflareEmails($);
+  preserveContentButtonText($);
 
   $(
     "script, style, noscript, iframe, svg, canvas, form, input, button, select, textarea",
