@@ -66,12 +66,55 @@ function mergeAttrMaps(target = {}, extra = {}) {
   return out;
 }
 
-function isListingUrl(url = "", $ = null) {
-  const urlPattern = /\/(collections?|category|categories|catalog|shop|store|all-products|products\/?(\?.*)?$|search|browse|items?|brands?|goods)(\/|$|\?)/i.test(
-    url || "",
-  );
-  if (urlPattern) return true;
+/**
+ * True for a single product detail URL (PDP), e.g.
+ * /products/after-hours-lip-liner, /product/foo, /p/sku, /dp/asin.
+ * Bare /products or /products/ (no handle) is NOT a PDP.
+ */
+function isProductDetailUrl(url = "") {
+  if (!url) return false;
+  let path = "";
+  try {
+    path = new URL(url, "http://localhost").pathname || "";
+  } catch {
+    path = String(url);
+  }
+  return /\/(products?|item|sku|dp|pd)\/[^/?#]+/i.test(path);
+}
 
+/**
+ * True for collection / category / catalog / shop index URLs (PLP).
+ * Never true for a clear PDP URL — related-product cards on a PDP must not
+ * flip the page to listing (that caused Mink Envy PDP → listing extractor).
+ */
+function isListingUrl(url = "", $ = null) {
+  // Explicit product-detail URLs always win over DOM / listing heuristics
+  if (isProductDetailUrl(url)) return false;
+
+  const path = (() => {
+    try {
+      return new URL(url || "", "http://localhost").pathname || "";
+    } catch {
+      return String(url || "");
+    }
+  })();
+
+  // Collection / category / catalog / shop index (with or without handle)
+  if (
+    /\/(collections?|category|categories|catalog|all-products|search|browse|brands?|goods)(\/|$)/i.test(
+      path,
+    )
+  ) {
+    return true;
+  }
+
+  // /shop or /store index only (not /shop/something-product-like handled elsewhere)
+  if (/\/(shop|store)\/?$/i.test(path)) return true;
+
+  // Bare /products or /products/ with no product handle → product index listing
+  if (/\/products?\/?$/i.test(path)) return true;
+
+  // DOM multi-card heuristic only when URL is not a PDP
   if ($) {
     const cardCount = $(CARD_SELECTORS).length;
     if (cardCount >= 2) return true;
@@ -81,9 +124,18 @@ function isListingUrl(url = "", $ = null) {
 
 /**
  * After pageType=product, resolve PDP vs PLP.
- * Collection/catalog URLs or multi-card DOMs always force listing.
+ * Clear /products/{handle} URLs always force product (PDP extractor).
+ * Collection/catalog URLs or multi-card DOMs force listing (PLP).
  */
 function resolveProductEntityType(detection, url, $ = null) {
+  if (isProductDetailUrl(url)) {
+    return {
+      ...detection,
+      pageType: "product",
+      entity_type: "product",
+      reason: `${detection.reason || "rules"}+force_product_url`,
+    };
+  }
   if (isListingUrl(url, $)) {
     return {
       ...detection,
@@ -252,8 +304,12 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
 
   // 4) Validation — deterministic wins over LLM
   const validated = applyValidation(base, llmResult);
-  // Re-assert listing after validation (LLM must not flip PLP → product)
-  if (isListingUrl(url) || isListing) {
+  // Re-assert PDP / PLP after validation (URL rules beat LLM / weak DOM)
+  if (isProductDetailUrl(url)) {
+    validated.entity_type = "product";
+    validated.pageType = "product";
+  } else if (isListingUrl(url) || isListing) {
+    // LLM must not flip a real PLP → product
     validated.entity_type = "listing";
     validated.pageType = "product";
   }
@@ -430,4 +486,5 @@ module.exports = {
   buildSection,
   resolveProductEntityType,
   isListingUrl,
+  isProductDetailUrl,
 };

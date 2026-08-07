@@ -12,6 +12,8 @@ const RESPONSE_FORMAT = `Response format:
 const PRODUCT_FORMAT = `Product format:
 - Whenever product information is shared, show every product in a separate <li>.
 - For each product, show these labeled fields in this exact order: <strong>Name:</strong>, <strong>Price:</strong>, <strong>Link:</strong>.
+- Price must be the current selling / sale / "Now" amount from the knowledge base — never the crossed-out original, Was, MSRP, or compare-at price when a lower current price is also present.
+- If both an original and a sale price appear, use only the sale/current price in the Price field (you may mention savings briefly in prose).
 - Use the price and URL only when supported by the knowledge base.
 - If a price is missing, write <strong>Price:</strong> Not listed.
 - If a URL is missing, write <strong>Link:</strong> Not available; never invent a URL.

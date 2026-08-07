@@ -31,6 +31,17 @@ function buildContextPrefix(page = {}, chunkMeta = {}) {
     const cur = attrs.currency ? ` ${attrs.currency}` : "";
     parts.push(`price:${attrs.price}${cur}`);
   }
+  if (attrs.original_price != null) {
+    const cur = attrs.currency ? ` ${attrs.currency}` : "";
+    parts.push(`was:${attrs.original_price}${cur}`);
+  }
+  if (
+    attrs.price_min != null &&
+    attrs.price_max != null &&
+    attrs.price_min !== attrs.price_max
+  ) {
+    parts.push(`price_range:${attrs.price_min}-${attrs.price_max}`);
+  }
 
   if (page.language && page.language !== "en") {
     parts.push(`lang:${page.language}`);

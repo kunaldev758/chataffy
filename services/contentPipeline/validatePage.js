@@ -5,6 +5,9 @@
 const DETERMINISTIC_ATTR_KEYS = new Set([
   "sku",
   "price",
+  "original_price",
+  "price_min",
+  "price_max",
   "currency",
   "in_stock",
   "brand",
@@ -111,6 +114,14 @@ function applyValidation(base, llm = null) {
       if (DETERMINISTIC_ATTR_KEYS.has(key) && isEmpty(out.attributes[key])) {
         // Allow fill only if value looks grounded (numbers for price, short strings for sku)
         if (key === "price" && typeof value !== "number") continue;
+        if (
+          (key === "original_price" ||
+            key === "price_min" ||
+            key === "price_max") &&
+          typeof value !== "number"
+        ) {
+          continue;
+        }
         if (key === "in_stock" && typeof value !== "boolean") continue;
         out.attributes[key] = value;
         continue;
