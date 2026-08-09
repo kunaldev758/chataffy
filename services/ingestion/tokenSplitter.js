@@ -1,4 +1,9 @@
 const { get_encoding } = require("tiktoken");
+const {
+  buildHeadingSpans,
+  resolveHeadingPathForChunk,
+  formatHeadingPath,
+} = require("./headingPath");
 
 let tokenizer = null;
 function getTokenizer() {
@@ -112,25 +117,18 @@ function splitByTokens(text, maxTokens, overlapTokens = 0) {
 /**
  * Stage G & H: Hierarchical Parent-Child Chunking Strategy.
  *
- * Parent Chunks: 800–1000 tokens (large context window for generation)
- * Child Chunks: 150–200 tokens (small context window for high vector similarity)
+ * Parent: 850 tokens | Child: 350 tokens | overlap: 50
+ * Heading paths are resolved separately (does not change split sizes).
+ * contextualText is finalized later in ingestionService (summary + attrs).
  *
- * Incorporates Document Structure (Tables, Code Blocks, QA Pairs) and Contextual Summary.
- *
- * @param {string} rawText           - Full page text
- * @param {string} contextualSummary - 50-100 token page summary
- * @param {object} metadata          - Additional page metadata
- * @param {Array}  structures        - Optional array of structural blocks from structureParser
- * @returns {{ parentChunks: object[], childChunks: object[] }}
+ * @returns {{ parentChunks: object[], childChunks: object[], headingSpans: object[] }}
  */
 function createParentChildChunks(
   rawText,
   contextualSummary = "",
   metadata = {},
-  structures = []
+  structures = [],
 ) {
-  const enc = getTokenizer();
-
   const PARENT_TARGET_TOKENS = 850;
   const CHILD_TARGET_TOKENS = 350;
   const CHILD_OVERLAP_TOKENS = 50;
@@ -148,51 +146,55 @@ function createParentChildChunks(
       .join("\n\n");
   }
 
-  // 1. Create Parent Chunks (800-1000 tokens)
-  const parentRawTexts = splitByTokens(sourceText, PARENT_TARGET_TOKENS, 50);
+  // Heading spans over the same source used for token splits
+  const headingSpans = buildHeadingSpans(sourceText);
 
+  const parentRawTexts = splitByTokens(sourceText, PARENT_TARGET_TOKENS, 50);
   const parentChunks = [];
   const childChunks = [];
 
   parentRawTexts.forEach((pText, pIndex) => {
     const parentId = `parent_${pIndex}_${countTokens(pText)}`;
-    const titlePrefix = metadata.pageTitle ? `[Page: ${metadata.pageTitle}]\n` : '';
-    const pSummaryText = contextualSummary
-      ? `${titlePrefix}[Document Context: ${contextualSummary}]\n\n${pText}`
-      : `${titlePrefix}${pText}`;
+    const parentHeading = formatHeadingPath(
+      resolveHeadingPathForChunk(pText, headingSpans),
+    );
 
-    const parentObj = {
+    parentChunks.push({
       parentId,
       parentIndex: pIndex,
       text: pText,
-      contextualText: pSummaryText,
-      tokenCount: countTokens(pSummaryText),
+      heading_path: parentHeading,
+      // Provisional; ingestionService rebuilds child contextualText
+      contextualText: pText,
+      tokenCount: countTokens(pText),
       ...metadata,
-    };
-    parentChunks.push(parentObj);
+    });
 
-    // 2. Create Child Chunks (150-200 tokens) from this Parent Chunk
-    const childRawTexts = splitByTokens(pText, CHILD_TARGET_TOKENS, CHILD_OVERLAP_TOKENS);
+    const childRawTexts = splitByTokens(
+      pText,
+      CHILD_TARGET_TOKENS,
+      CHILD_OVERLAP_TOKENS,
+    );
 
     childRawTexts.forEach((cText, cIndex) => {
-      const childSummaryText = contextualSummary
-        ? `${titlePrefix}[Document Context: ${contextualSummary}]\n\n${cText}`
-        : `${titlePrefix}${cText}`;
+      const childHeading = formatHeadingPath(
+        resolveHeadingPathForChunk(cText, headingSpans) || parentHeading,
+      );
 
-      const childObj = {
+      childChunks.push({
         childIndex: `${pIndex}_${cIndex}`,
         parentId,
         parentText: pText,
         text: cText,
-        contextualText: childSummaryText,
-        tokenCount: countTokens(childSummaryText),
+        heading_path: childHeading,
+        contextualText: cText,
+        tokenCount: countTokens(cText),
         ...metadata,
-      };
-      childChunks.push(childObj);
+      });
     });
   });
 
-  return { parentChunks, childChunks };
+  return { parentChunks, childChunks, headingSpans };
 }
 
 module.exports = {

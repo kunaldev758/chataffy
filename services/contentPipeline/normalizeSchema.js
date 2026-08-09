@@ -93,6 +93,9 @@ function normalizeChunkList(chunks) {
           chunk_role: c.chunk_role,
           // test-backend style contextual prefix for dense/sparse embed
           contextualText: c.contextualText || null,
+          rule_summary: c.rule_summary,
+          summary: c.summary,
+          summary_source: c.summary_source,
           priceNumeric: c.priceNumeric,
           currency: c.currency,
           inStock: c.inStock,
@@ -210,6 +213,13 @@ function pageToUpsertDocuments(page, chunks) {
           : {}),
         ...(typeof chunk.tokenCount === "number"
           ? { tokenCount: chunk.tokenCount }
+          : {}),
+        ...(chunk.rule_summary
+          ? { rule_summary: chunk.rule_summary }
+          : {}),
+        ...(chunk.summary ? { summary: chunk.summary } : {}),
+        ...(chunk.summary_source
+          ? { summary_source: chunk.summary_source }
           : {}),
       },
     };

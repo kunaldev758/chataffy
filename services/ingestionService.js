@@ -5,6 +5,10 @@ const {
 } = require("./ingestion/contextualSummarizer");
 const { parseDocumentStructure } = require("./ingestion/structureParser");
 const { createParentChildChunks } = require("./ingestion/tokenSplitter");
+const { enrichChunksWithSummaries } = require("./ingestion/chunkSummary");
+const {
+  buildChildContextualText,
+} = require("./ingestion/buildChildContextualText");
 const {
   formatAttrContextLine,
   unionAttrs,
@@ -103,17 +107,12 @@ function resolveProductFacetLists(extraAttributes = {}, ecommerceMeta = {}) {
   };
 }
 
-function appendAttrLineToContextual(contextualText, attrLine) {
-  if (!attrLine) return contextualText || "";
-  const base = String(contextualText || "").trim();
-  if (!base) return `[Product Attrs: ${attrLine}]`;
-  if (base.includes(attrLine)) return base;
-  return `${base}\n[Product Attrs: ${attrLine}]`;
-}
-
 /**
  * Full RAG Ingestion Pipeline — Stages B through H (chunking).
  * Embedding + Qdrant upsert stay in Chataffy QdrantService (named dense+sparse).
+ *
+ * Child enrich: heading_path → rule/LLM summary → contextualText
+ * (product attrs unchanged; parent/child sizes stay 850/350).
  *
  * @param {string} rawInput - HTML or markdown/plain text
  * @param {string} url
@@ -156,19 +155,19 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
     `  ├─ Stage C (Quality Gate PASS): Text quality verified (${qualityMode})`,
   );
 
-  // Stages E & F: Contextual Summary & Document Structure
+  // Stages E & F: Page-level contextual header & Document Structure
   const [contextualSummary, structures] = await Promise.all([
     generateContextualSummary(normalized, options),
     Promise.resolve(parseDocumentStructure(normalized.rawText)),
   ]);
   console.log(
-    `  ├─ Stage E (Contextual Summary): "${contextualSummary.slice(0, 80)}..."`,
+    `  ├─ Stage E (Page Context): "${contextualSummary.slice(0, 80)}..."`,
   );
   console.log(
     `  ├─ Stage F (Structure): ${structures.length} structural blocks`,
   );
 
-  // Stages G & H: Token-Aware Parent-Child Chunking (850 / 350)
+  // Stages G & H: Token-Aware Parent-Child Chunking (850 / 350) + heading_path
   const pageMeta = {
     pageTitle: normalized.pageTitle,
     pageType: normalized.pageType,
@@ -185,7 +184,7 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
     structures,
   );
   console.log(
-    `  └─ Stage G-H (Parent-Child Chunks): ${parentChunks.length} Parents (850 tokens), ${childChunks.length} Children (350 tokens)`,
+    `  ├─ Stage G-H (Parent-Child Chunks): ${parentChunks.length} Parents (850 tokens), ${childChunks.length} Children (350 tokens)`,
   );
 
   const mapped = mapPageTypes(normalized.pageType);
@@ -217,45 +216,70 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
   );
   const attrContextLine = formatAttrContextLine(metaAttributes);
 
+  // Per-child rule summary (default) / optional LLM via ENABLE_LLM_CHUNK_SUMMARY
+  const summarizedChildren = await enrichChunksWithSummaries(childChunks);
+  const llmSummaryCount = summarizedChildren.filter(
+    (c) => c.summary_source === "llm",
+  ).length;
+  console.log(
+    `  └─ Stage H+ (Chunk summaries): ${summarizedChildren.length} children` +
+      (llmSummaryCount ? ` (${llmSummaryCount} LLM)` : " (rule-only)"),
+  );
+
   // Chataffy upsert shape: embed children, generate on parent_text
-  const chunks = childChunks.map((chunk, index) => ({
-    text: chunk.text,
-    parent_text: chunk.parentText,
-    parent_id: chunk.parentId,
-    parent_index: parentIndexFromId(chunk.parentId),
-    child_index: childIndexFromId(chunk.childIndex),
-    chunk_role: "child",
-    heading_path: "",
-    contextualText: appendAttrLineToContextual(
-      chunk.contextualText,
-      attrContextLine,
-    ),
-    pageType,
-    entity_type,
-    entity_name: entityName,
-    product_id: productId,
-    attributes: { ...metaAttributes },
-    search_terms: searchTerms,
-    classification_confidence:
-      typeof options.classificationConfidence === "number"
-        ? options.classificationConfidence
-        : 1,
-    classification_reason:
-      options.classificationReason || "test_backend_ingestion",
-    quality_score: null,
-    priceNumeric:
-      metaAttributes.price ?? normalized.ecommerceMeta?.priceNumeric ?? null,
-    currency:
-      metaAttributes.currency || normalized.ecommerceMeta?.currency || null,
-    inStock:
-      metaAttributes.in_stock ?? normalized.ecommerceMeta?.inStock ?? null,
-    colors: facetLists.colors,
-    sizes: facetLists.sizes,
-    contactEmails: normalized.contactInfo?.emails || [],
-    contactPhones: normalized.contactInfo?.phones || [],
-    tokenCount: chunk.tokenCount || 0,
-    _index: index,
-  }));
+  const chunks = summarizedChildren.map((chunk, index) => {
+    const heading_path = chunk.heading_path || "";
+    const rule_summary = chunk.rule_summary || "";
+    const summary = chunk.summary || rule_summary;
+    const summary_source = chunk.summary_source || "rule";
+
+    const contextualText = buildChildContextualText({
+      pageTitle: normalized.pageTitle || entityName || "",
+      heading_path,
+      summary,
+      attrLine: attrContextLine,
+      body: chunk.text,
+    });
+
+    return {
+      text: chunk.text,
+      parent_text: chunk.parentText,
+      parent_id: chunk.parentId,
+      parent_index: parentIndexFromId(chunk.parentId),
+      child_index: childIndexFromId(chunk.childIndex),
+      chunk_role: "child",
+      heading_path,
+      rule_summary,
+      summary,
+      summary_source,
+      contextualText,
+      pageType,
+      entity_type,
+      entity_name: entityName,
+      product_id: productId,
+      attributes: { ...metaAttributes },
+      search_terms: searchTerms,
+      classification_confidence:
+        typeof options.classificationConfidence === "number"
+          ? options.classificationConfidence
+          : 1,
+      classification_reason:
+        options.classificationReason || "test_backend_ingestion",
+      quality_score: null,
+      priceNumeric:
+        metaAttributes.price ?? normalized.ecommerceMeta?.priceNumeric ?? null,
+      currency:
+        metaAttributes.currency || normalized.ecommerceMeta?.currency || null,
+      inStock:
+        metaAttributes.in_stock ?? normalized.ecommerceMeta?.inStock ?? null,
+      colors: facetLists.colors,
+      sizes: facetLists.sizes,
+      contactEmails: normalized.contactInfo?.emails || [],
+      contactPhones: normalized.contactInfo?.phones || [],
+      tokenCount: chunk.tokenCount || 0,
+      _index: index,
+    };
+  });
 
   return {
     skipped: false,
@@ -267,7 +291,7 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
     url,
     contextualSummary,
     parentCount: parentChunks.length,
-    childCount: childChunks.length,
+    childCount: summarizedChildren.length,
     metrics: normalized.metrics,
     contentHash: normalized.contentHash || null,
     ecommerceMeta: normalized.ecommerceMeta || {},
@@ -276,7 +300,7 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
     search_terms: searchTerms,
     colors: facetLists.colors,
     sizes: facetLists.sizes,
-    childChunks,
+    childChunks: summarizedChildren,
     parentChunks,
     chunks,
   };
