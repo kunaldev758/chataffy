@@ -11,15 +11,26 @@ const {
  * @returns {{ isDuplicate: boolean, duplicateOf?: string, reason?: string }}
  */
 async function checkCanonicalDuplicate({
+  userId,
   agentId,
   pageUrl,
   canonicalUrl,
+  TrainingModel,
   /** In-batch set of canonicalUrlKey values already accepted this run */
   seenCanonicalKeys = null,
 }) {
-  if (!agentId || !pageUrl) {
+  if (!userId || !agentId || !pageUrl || !TrainingModel) {
     return { isDuplicate: false };
   }
+
+  const hasCompletedTrainingRow = async (url) =>
+    !!(await TrainingModel.exists({
+      userId,
+      agentId,
+      type: 0,
+      "webPage.url": url,
+      trainingStatus: 1,
+    }));
 
   let pageKey;
   try {
@@ -63,15 +74,23 @@ async function checkCanonicalDuplicate({
     };
   }
 
-  // Stored Url whose url is the canonical target
+  // Only treat a stored canonical target as a duplicate when both pipeline
+  // state and the UI-facing training collection confirm successful training.
   const byUrl = await Url.findOne({
+    userId,
     agentId,
     url: canonNormalized,
+    trainStatus: 1,
+    status: "processed",
   })
     .select("url trainStatus contentHash status")
     .lean();
 
-  if (byUrl && byUrl.url !== pageUrl) {
+  if (
+    byUrl &&
+    byUrl.url !== pageUrl &&
+    (await hasCompletedTrainingRow(byUrl.url))
+  ) {
     seenCanonicalKeys?.add(canonKey);
     return {
       isDuplicate: true,
@@ -80,17 +99,22 @@ async function checkCanonicalDuplicate({
     };
   }
 
-  // Another stored page already resolved to the same canonical
+  // Another successfully trained page already resolved to this canonical.
   const byCanonical = await Url.findOne({
+    userId,
     agentId,
     canonicalUrl: canonNormalized,
     url: { $ne: pageUrl },
-    status: { $in: ["processed", "fetched", "queued", "discovered"] },
+    trainStatus: 1,
+    status: "processed",
   })
     .select("url")
     .lean();
 
-  if (byCanonical) {
+  if (
+    byCanonical &&
+    (await hasCompletedTrainingRow(byCanonical.url))
+  ) {
     seenCanonicalKeys?.add(canonKey);
     return {
       isDuplicate: true,

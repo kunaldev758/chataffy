@@ -53,40 +53,43 @@ class ScrapingController {
   }
 
 
-  // Method 1: Simple Bulk Insert (Recommended for most cases)
+  // Upsert by owner so the same URL can be trained independently by each agent.
 async bulkInsertUrls(userId,agentId, urls) {
-  try {
-    console.log(`🚀 Bulk inserting ${urls.length} URLs...`);
-    const startTime = Date.now();
-
-    const urlDocuments = urls.map(url => ({
-      userId: userId,
-      agentId: agentId,
-      url: url,
-      trainStatus: 0,
-      status: "discovered",
-      createdAt: new Date(),
-      updatedAt: new Date()
-    }));
-
-    // MongoDB bulk insert
-    const result = await Url.insertMany(urlDocuments, {
-      ordered: false, // Continue on duplicates/errors
-      rawResult: true // Get detailed results
-    });
-
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`✅ Inserted ${result.insertedCount} URLs in ${duration}s`);
-    return result;
-
-  } catch (error) {
-    // Handle duplicate key errors gracefully
-    if (error.code === 11000) {
-      console.log(`⚠️ Some URLs already exist. Inserted: ${error.result?.nInserted || 0}`);
-      return error.result;
-    }
-    throw error;
+  console.log(`🚀 Upserting ${urls.length} URLs...`);
+  if (!urls.length) {
+    return { upsertedCount: 0, matchedCount: 0 };
   }
+
+  const startTime = Date.now();
+  const now = new Date();
+
+  const operations = urls.map((url) => ({
+    updateOne: {
+      filter: { userId, agentId, url },
+      update: {
+        $setOnInsert: {
+          userId,
+          agentId,
+          url,
+          trainStatus: 0,
+          status: "discovered",
+          createdAt: now,
+        },
+      },
+      upsert: true,
+    },
+  }));
+
+  const result = await Url.bulkWrite(operations, { ordered: false });
+  const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+  console.info("[url-training:url-upsert]", {
+    agentId,
+    requestedCount: urls.length,
+    insertedCount: result.upsertedCount || 0,
+    existingCount: result.matchedCount || 0,
+    durationSeconds: Number(duration),
+  });
+  return result;
 }
 
   // Collects same-origin, scrapable <a href> links from an HTML document.
@@ -820,7 +823,11 @@ async bulkInsertUrls(userId,agentId, urls) {
       const { userId, agentId } = req.body;
       let urls = req.body.urls;
 
-      console.log("Received request to start sitemap scraping with data:", { userId, agentId, urlCount: urls ? urls.length : 0 });
+      const submittedUrlCount = Array.isArray(urls) ? urls.length : 0;
+      console.info("[url-training:request]", {
+        agentId,
+        submittedUrlCount,
+      });
       
       if (!userId || !agentId) {
         return res.status(400).json({
@@ -836,14 +843,27 @@ async bulkInsertUrls(userId,agentId, urls) {
         });
       }
 
-      urls = filterAndDedupeWebUrls(urls);
+      let rejectedUrlCount = 0;
+      urls = filterAndDedupeWebUrls(urls, {
+        onReject: (diagnostic) => {
+          rejectedUrlCount += 1;
+          console.warn("[url-training:rejected]", {
+            agentId,
+            stage: "pre_queue_filter",
+            ...diagnostic,
+          });
+        },
+      });
+
+      console.info("[url-training:filtered]", {
+        agentId,
+        submittedUrlCount,
+        acceptedUrlCount: urls.length,
+        rejectedUrlCount,
+      });
 
       const TrainingModel = await PlanService.getTrainingModel(userId,agentId);
       const plan = await PlanService.getUserPlan(userId,agentId);
-
-      console.log("TrainingModel", TrainingModel);
-
-      console.log("plan", plan);
 
       const client = await Client.findOne({ userId });
       if (!client) {
@@ -873,6 +893,12 @@ async bulkInsertUrls(userId,agentId, urls) {
       // Check if user is already scraping
       const scrapingStatus = await Agent.findOne({ _id: agentId });
       if (scrapingStatus.dataTrainingStatus == 1) {
+        console.warn("[url-training:rejected]", {
+          agentId,
+          stage: "training_state",
+          reason: "training_already_in_progress",
+          acceptedUrlCount: urls.length,
+        });
         return res.status(409).json({
           success: false,
           error: "Scraping already in progress for this agent",
@@ -918,6 +944,13 @@ async bulkInsertUrls(userId,agentId, urls) {
       // }
 
       if (urls.length == 0) {
+        console.warn("[url-training:rejected]", {
+          agentId,
+          stage: "pre_queue_filter",
+          reason: "no_queueable_urls",
+          submittedUrlCount,
+          rejectedUrlCount,
+        });
         await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
         appEvents.emit("userEvent", agentId, "training-event", {
           message: "No urls found",
@@ -951,7 +984,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       // (add creates rows / recompute; delete removes them / recompute).
       // Live progress uses job totalUrls, not pagesAdded.total.
 
-      await urlProcessingQueue.add("processSingleUrl", {
+      const job = await urlProcessingQueue.add("processSingleUrl", {
         urls,
         userId,
         qdrantIndexName,
@@ -963,9 +996,16 @@ async bulkInsertUrls(userId,agentId, urls) {
       });
 
 
+      console.info("[url-training:queued]", {
+        agentId,
+        jobId: job.id,
+        acceptedUrlCount: urls.length,
+      });
+
       res.json({
         success: true,
-        // message: "Scraping sta successfully",
+        message: "Training started",
+        acceptedUrlCount: urls.length,
       });
     } catch (error) {
       const { userId, agentId } = req.body;
@@ -1017,7 +1057,7 @@ async bulkInsertUrls(userId,agentId, urls) {
 
       const remainingUrls = filterAndDedupeWebUrls(
         await Url.distinct("url", {
-        // userId: userId,
+        userId: userId,
         agentId: agentId,
         trainStatus: 0,
         }),

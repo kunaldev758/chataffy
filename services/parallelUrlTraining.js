@@ -32,6 +32,98 @@ const DEFAULT_EMBED_CONCURRENCY = Math.max(
   parseInt(process.env.TRAINING_EMBED_CONCURRENCY || "3", 10) || 3,
 );
 
+function createTrainingOutcomeSummary(total = 0) {
+  return {
+    total: Number(total) || 0,
+    trained: 0,
+    failed: 0,
+    skipped: 0,
+    unchanged: 0,
+    skipReasons: {},
+  };
+}
+
+function recordSkipReason(summary, reason) {
+  const key = String(reason || "skipped").slice(0, 180);
+  summary.skipReasons[key] = (summary.skipReasons[key] || 0) + 1;
+}
+
+function humanizeTrainingSkipReason(reason, duplicateOf = null) {
+  const raw = String(reason || "skipped");
+  if (raw.startsWith("canonical_duplicate:")) {
+    const target = duplicateOf ? ` (${duplicateOf})` : "";
+    return `Skipped: page already trained via canonical URL${target}`;
+  }
+  if (raw.startsWith("low_quality:")) {
+    const detail = raw.slice("low_quality:".length);
+    if (detail === "empty_input") {
+      return "Skipped: page had no usable content";
+    }
+    return `Skipped: low-quality content (${detail})`;
+  }
+  if (/non-content/i.test(raw)) {
+    return "Skipped: non-content URL (cart/checkout/login/pagination)";
+  }
+  if (/non-html/i.test(raw)) {
+    return "Skipped: non-HTML URL";
+  }
+  return raw;
+}
+
+async function upsertSkippedTrainingRow({
+  TrainingModel,
+  userId,
+  agentId,
+  url,
+  reason,
+  title = null,
+  duplicateOf = null,
+}) {
+  const error = humanizeTrainingSkipReason(reason, duplicateOf);
+  const trainingFilter = {
+    userId,
+    agentId,
+    type: 0,
+    "webPage.url": url,
+  };
+  const existingRows = await TrainingModel.find(trainingFilter)
+    .sort({ createdAt: 1 })
+    .select("_id")
+    .lean();
+
+  const trainingUpdate = {
+    userId,
+    agentId,
+    type: 0,
+    title: title || url,
+    content: "",
+    dataSize: 0,
+    trainingStatus: 2,
+    error,
+    "webPage.url": url,
+    chunkCount: 0,
+    lastEdit: Date.now(),
+  };
+
+  if (existingRows.length > 0) {
+    await TrainingModel.updateOne(
+      { _id: existingRows[0]._id },
+      { $set: trainingUpdate },
+    );
+    if (existingRows.length > 1) {
+      await TrainingModel.deleteMany({
+        _id: { $in: existingRows.slice(1).map((row) => row._id) },
+      });
+    }
+  } else {
+    await TrainingModel.create(trainingUpdate);
+  }
+
+  const { recomputeWebPageCounters } = require("../utils/agentPageCounters");
+  await recomputeWebPageCounters(TrainingModel, userId, agentId);
+  return error;
+}
+
 /**
  * @param {object} opts
  * @param {string[]} opts.urls
@@ -93,6 +185,7 @@ async function runParallelScrapeOverlapTrain(opts) {
   let anyTrainFailed = false;
   let lastProgressEmitTime = 0;
   const PROGRESS_EMIT_INTERVAL = 2000;
+  const outcomeSummary = createTrainingOutcomeSummary(totalUrlsCount);
 
   console.log(
     `[parallelUrlTraining] scrape=${scrapeConcurrency} embed=${embedConcurrency} urls=${totalUrlsCount}`,
@@ -149,7 +242,8 @@ async function runParallelScrapeOverlapTrain(opts) {
       console.log(
         `[parallelUrlTraining] train skipped unchanged url=${doc.originalUrl}`,
       );
-      await markUrlUnchanged(doc.originalUrl, agentId, {
+      outcomeSummary.unchanged += 1;
+      await markUrlUnchanged(doc.originalUrl, userId, agentId, {
         contentHash: pageResult.contentHash,
         pageType: pageResult.page?.pageType || "generic",
         canonicalUrl: doc.metadata?.canonicalUrl || null,
@@ -160,13 +254,17 @@ async function runParallelScrapeOverlapTrain(opts) {
     }
 
     if (skipped === "low_quality") {
+      const skipReason = `low_quality:${pageResult.skipReason || "below_threshold"}`;
       console.log(
         `[parallelUrlTraining] train skipped low_quality url=${doc.originalUrl} reason=${pageResult.skipReason || "below_threshold"}`,
       );
+      outcomeSummary.skipped += 1;
+      recordSkipReason(outcomeSummary, skipReason);
       await markUrlSkipped(
         doc.originalUrl,
+        userId,
         agentId,
-        `low_quality:${pageResult.skipReason || "below_threshold"}`,
+        skipReason,
         {
           canonicalUrl: doc.metadata?.canonicalUrl || null,
           language: doc.metadata?.language || "en",
@@ -175,6 +273,14 @@ async function runParallelScrapeOverlapTrain(opts) {
           pageType: "generic",
         },
       );
+      await upsertSkippedTrainingRow({
+        TrainingModel,
+        userId,
+        agentId,
+        url: doc.originalUrl,
+        reason: skipReason,
+        title: doc.metadata?.title || doc.originalUrl,
+      });
       if (doc.dataSize > 0) {
         await Client.updateOne(
           { userId },
@@ -223,10 +329,11 @@ async function runParallelScrapeOverlapTrain(opts) {
     }
 
     if (status === 1) {
+      outcomeSummary.trained += 1;
       console.log(
         `[parallelUrlTraining] train success url=${doc.originalUrl} chunks=${result.chunkCountPerUrl?.[doc.originalUrl] || 0}`,
       );
-      await markUrlProcessed(doc.originalUrl, agentId, {
+      await markUrlProcessed(doc.originalUrl, userId, agentId, {
         contentHash:
           pageResult?.contentHash || pageResult?.page?.content_hash,
         pageType:
@@ -237,10 +344,12 @@ async function runParallelScrapeOverlapTrain(opts) {
       });
     } else {
       anyTrainFailed = true;
+      outcomeSummary.failed += 1;
+      recordSkipReason(outcomeSummary, trainError || "Failed to train");
       console.log(
         `[parallelUrlTraining] train failed url=${doc.originalUrl} error=${trainError}`,
       );
-      await markUrlFailed(doc.originalUrl, agentId, trainError);
+      await markUrlFailed(doc.originalUrl, userId, agentId, trainError);
     }
 
     // Keep counters aligned with the actual rows instead of accumulating
@@ -377,8 +486,17 @@ async function runParallelScrapeOverlapTrain(opts) {
           ? "Non-content URL skipped (cart/checkout/login/pagination)."
           : nonHtmlSkipError;
         console.log(`Skipping non-content URL: ${url}`);
+        outcomeSummary.skipped += 1;
+        recordSkipReason(outcomeSummary, reason);
         if (isNonContentPath(url)) {
-          await markUrlSkipped(url, agentId, reason);
+          await markUrlSkipped(url, userId, agentId, reason);
+          await upsertSkippedTrainingRow({
+            TrainingModel,
+            userId,
+            agentId,
+            url,
+            reason,
+          });
         } else {
           await markWebUrlScrapeFailed({
             url,
@@ -405,7 +523,7 @@ async function runParallelScrapeOverlapTrain(opts) {
         return;
       }
 
-      await markUrlFetched(url, agentId);
+      await markUrlFetched(url, userId, agentId);
 
       const processResult = await processWebPage(url, sourceCode, chromeCache, {
         userId,
@@ -444,7 +562,13 @@ async function runParallelScrapeOverlapTrain(opts) {
         });
         await markUrlFailed(
           url,
+          userId,
           agentId,
+          "Failed to process/minify web page content",
+        );
+        outcomeSummary.failed += 1;
+        recordSkipReason(
+          outcomeSummary,
           "Failed to process/minify web page content",
         );
         const { recomputeWebPageCounters } = require("../utils/agentPageCounters");
@@ -476,25 +600,40 @@ async function runParallelScrapeOverlapTrain(opts) {
         if (stoppedForStorageLimit) return { skip: true };
 
         const canonCheck = await checkCanonicalDuplicate({
+          userId,
           agentId,
           pageUrl: url,
           canonicalUrl,
+          TrainingModel,
           seenCanonicalKeys,
         });
         if (canonCheck.isDuplicate) {
+          const skipReason = `canonical_duplicate:${canonCheck.reason}`;
           console.log(
             `[parallelUrlTraining] Skipping canonical duplicate ${url} → ${canonCheck.duplicateOf} (${canonCheck.reason})`,
           );
+          outcomeSummary.skipped += 1;
+          recordSkipReason(outcomeSummary, skipReason);
           await markUrlSkipped(
             url,
+            userId,
             agentId,
-            `canonical_duplicate:${canonCheck.reason}`,
+            skipReason,
             {
               canonicalUrl: canonicalUrl || null,
               language: language || "en",
               pageType: pageType || "generic",
             },
           );
+          await upsertSkippedTrainingRow({
+            TrainingModel,
+            userId,
+            agentId,
+            url,
+            reason: skipReason,
+            title: title || url,
+            duplicateOf: canonCheck.duplicateOf || canonicalUrl || null,
+          });
           return { skip: true };
         }
 
@@ -611,7 +750,17 @@ async function runParallelScrapeOverlapTrain(opts) {
 
       const { recomputeWebPageCounters } = require("../utils/agentPageCounters");
       await recomputeWebPageCounters(TrainingModel, userId, agentId);
-      await markUrlFailed(url, agentId, error?.message || "Failed to train");
+      outcomeSummary.failed += 1;
+      recordSkipReason(
+        outcomeSummary,
+        error?.message || "Failed to train",
+      );
+      await markUrlFailed(
+        url,
+        userId,
+        agentId,
+        error?.message || "Failed to train",
+      );
     } finally {
       await bumpScrapeProgress();
     }
@@ -632,7 +781,7 @@ async function runParallelScrapeOverlapTrain(opts) {
   }
 
   console.log(
-    `[parallelUrlTraining] summary scraped=${scrapedDocs.length}/${totalUrlsCount} queued=${trainQueued} completed=${trainCompleted} failed=${anyTrainFailed} stopped=${stoppedForStorageLimit}`,
+    `[parallelUrlTraining] summary scraped=${scrapedDocs.length}/${totalUrlsCount} queued=${trainQueued} completed=${trainCompleted} failed=${anyTrainFailed} stopped=${stoppedForStorageLimit} trained=${outcomeSummary.trained} skipped=${outcomeSummary.skipped} unchanged=${outcomeSummary.unchanged}`,
   );
 
   return {
@@ -641,6 +790,7 @@ async function runParallelScrapeOverlapTrain(opts) {
     trainCompleted,
     anyTrainFailed,
     stoppedForStorageLimit,
+    trainingSummary: outcomeSummary,
   };
 }
 
@@ -748,7 +898,7 @@ async function runParallelRetrainOverlap(opts) {
 
     if (skipped === "unchanged") {
       console.log(`[parallelRetrain] train skipped unchanged url=${item.url}`);
-      await markUrlUnchanged(item.url, agentId, {
+      await markUrlUnchanged(item.url, userId, agentId, {
         contentHash: pageResult.contentHash,
         pageType: pageResult.page?.pageType || "generic",
         canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
@@ -765,6 +915,7 @@ async function runParallelRetrainOverlap(opts) {
       );
       await markUrlSkipped(
         item.url,
+        userId,
         agentId,
         `low_quality:${pageResult.skipReason || "below_threshold"}`,
         {
@@ -818,7 +969,7 @@ async function runParallelRetrainOverlap(opts) {
       },
     );
 
-    await markUrlProcessed(item.url, agentId, {
+    await markUrlProcessed(item.url, userId, agentId, {
       contentHash:
         pageResult?.contentHash || pageResult?.page?.content_hash,
       pageType: pageResult?.page?.pageType || "generic",
@@ -987,14 +1138,17 @@ async function runParallelRetrainOverlap(opts) {
 
       const itemOrSkip = await withSharedLock(async () => {
         const canonCheck = await checkCanonicalDuplicate({
+          userId,
           agentId,
           pageUrl: url,
           canonicalUrl,
+          TrainingModel,
           seenCanonicalKeys: retrainCanonicalKeys,
         });
         if (canonCheck.isDuplicate) {
           await markUrlSkipped(
             url,
+            userId,
             agentId,
             `canonical_duplicate:${canonCheck.reason}`,
             {

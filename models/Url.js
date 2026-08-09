@@ -26,7 +26,7 @@ const urlSchema = new mongoose.Schema(
     },
     agentId: {
       type: mongoose.Schema.Types.ObjectId,
-      required: false,
+      required: true,
       ref: "Agent",
     },
     /** Legacy: 0-untrained, 1-trained, 2-error */
@@ -84,6 +84,8 @@ const urlSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// The unique { userId, agentId, url } index is managed by
+// scripts/migrate-url-ownership-index.js so legacy data is inspected first.
 const Url = mongoose.model("Url", urlSchema);
 
 module.exports = Url;

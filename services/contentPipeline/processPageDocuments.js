@@ -20,9 +20,14 @@ const CHARS_PER_TOKEN = 4;
  * (jobService → BatchTraining → processPageDocuments → PlanService) that
  * can leave PlanService as an empty export and break all trains.
  */
-async function webpageHasTrainingRow(agentId, url, TrainingModel = null) {
-  if (!agentId || !url) return false;
-  const filter = { agentId, type: 0, "webPage.url": url };
+async function webpageHasTrainingRow(
+  userId,
+  agentId,
+  url,
+  TrainingModel = null,
+) {
+  if (!userId || !agentId || !url) return false;
+  const filter = { userId, agentId, type: 0, "webPage.url": url };
 
   if (TrainingModel) {
     return !!(await TrainingModel.exists(filter));
@@ -152,6 +157,13 @@ async function processPageDocuments(
     try {
       const rawInput = resolveRawInput(doc);
       if (!rawInput.trim()) {
+        console.warn("[url-training:skipped]", {
+          agentId,
+          url,
+          stage: "ingestion",
+          reason: "empty_input",
+          documentIndex: docIndex,
+        });
         chunkCountPerUrl[url] = 0;
         skippedUrls.push(url);
         resultsByUrl[url] = {
@@ -238,6 +250,15 @@ async function processPageDocuments(
         : ingested.metrics?.wordCount || null;
 
       if (ingested.skipped) {
+        console.warn("[url-training:skipped]", {
+          agentId,
+          url,
+          stage: "quality_gate",
+          reason: ingested.skipReason || "quality_gate_fail",
+          qualityMode,
+          wordCount: ingested.metrics?.wordCount ?? null,
+          documentIndex: docIndex,
+        });
         chunkCountPerUrl[url] = 0;
         skippedUrls.push(url);
         resultsByUrl[url] = {
@@ -259,7 +280,7 @@ async function processPageDocuments(
       // Content-hash skip only when page is truly still trained (row still in
       // training list). After delete, Url.contentHash can remain while vectors
       // and the list row are gone — re-embed and recreate the row.
-      const existing = await Url.findOne({ url, agentId })
+      const existing = await Url.findOne({ url, userId, agentId })
         .select("contentHash trainStatus")
         .lean();
 
@@ -269,12 +290,20 @@ async function processPageDocuments(
         existing.contentHash === content_hash
       ) {
         const hasTrainingEntry = await webpageHasTrainingRow(
+          userId,
           agentId,
           url,
           TrainingModel,
         );
 
         if (hasTrainingEntry) {
+          console.info("[url-training:unchanged]", {
+            agentId,
+            url,
+            stage: "content_hash_check",
+            reason: "content_hash_match",
+            documentIndex: docIndex,
+          });
           chunkCountPerUrl[url] = 0;
           skippedUrls.push(url);
           resultsByUrl[url] = {
