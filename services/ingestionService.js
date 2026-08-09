@@ -5,6 +5,11 @@ const {
 } = require("./ingestion/contextualSummarizer");
 const { parseDocumentStructure } = require("./ingestion/structureParser");
 const { createParentChildChunks } = require("./ingestion/tokenSplitter");
+const {
+  formatAttrContextLine,
+  unionAttrs,
+  termsFromProductAttrs,
+} = require("./contentPipeline/extractors/productVariants");
 
 /**
  * Map test-backend page types → Chataffy pageType / entity_type used by retrieval filters.
@@ -59,6 +64,51 @@ function buildAttributesFromMeta(ecommerceMeta = {}, contactInfo = {}) {
     attrs.contactPhones = contactInfo.phones;
   }
   return attrs;
+}
+
+function mergeUniqueStrings(...lists) {
+  const out = [];
+  const seen = new Set();
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const raw of list) {
+      const s = String(raw || "").trim();
+      if (!s) continue;
+      const key = s.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
+/**
+ * Prefer extractor arrays; fill from ecommerce regex heuristics.
+ */
+function resolveProductFacetLists(extraAttributes = {}, ecommerceMeta = {}) {
+  const fromExtraColors = Array.isArray(extraAttributes.colors)
+    ? extraAttributes.colors
+    : extraAttributes.color
+      ? [extraAttributes.color]
+      : [];
+  const fromExtraSizes = Array.isArray(extraAttributes.sizes)
+    ? extraAttributes.sizes
+    : extraAttributes.size
+      ? [extraAttributes.size]
+      : [];
+  return {
+    colors: mergeUniqueStrings(fromExtraColors, ecommerceMeta.colors),
+    sizes: mergeUniqueStrings(fromExtraSizes, ecommerceMeta.sizes),
+  };
+}
+
+function appendAttrLineToContextual(contextualText, attrLine) {
+  if (!attrLine) return contextualText || "";
+  const base = String(contextualText || "").trim();
+  if (!base) return `[Product Attrs: ${attrLine}]`;
+  if (base.includes(attrLine)) return base;
+  return `${base}\n[Product Attrs: ${attrLine}]`;
 }
 
 /**
@@ -142,19 +192,30 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
   // Prefer extract-pipeline types when caller provides them (retrieval compatibility)
   const pageType = options.preferPageType || mapped.pageType;
   const entity_type = options.preferEntityType || mapped.entity_type;
-  const metaAttributes = {
-    ...buildAttributesFromMeta(
-      normalized.ecommerceMeta,
-      normalized.contactInfo,
-    ),
-    ...(options.extraAttributes || {}),
-  };
+  const extraAttributes =
+    options.extraAttributes && typeof options.extraAttributes === "object"
+      ? options.extraAttributes
+      : {};
+  const facetLists = resolveProductFacetLists(
+    extraAttributes,
+    normalized.ecommerceMeta || {},
+  );
+  const metaAttributes = unionAttrs(
+    buildAttributesFromMeta(normalized.ecommerceMeta, normalized.contactInfo),
+    {
+      ...extraAttributes,
+      colors: facetLists.colors,
+      sizes: facetLists.sizes,
+    },
+  );
   const entityName =
     options.preferEntityName || normalized.pageTitle || null;
   const productId = options.productId || null;
-  const searchTerms = Array.isArray(options.searchTerms)
-    ? options.searchTerms
-    : [];
+  const searchTerms = mergeUniqueStrings(
+    options.searchTerms,
+    termsFromProductAttrs(metaAttributes, entityName),
+  );
+  const attrContextLine = formatAttrContextLine(metaAttributes);
 
   // Chataffy upsert shape: embed children, generate on parent_text
   const chunks = childChunks.map((chunk, index) => ({
@@ -165,7 +226,10 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
     child_index: childIndexFromId(chunk.childIndex),
     chunk_role: "child",
     heading_path: "",
-    contextualText: chunk.contextualText,
+    contextualText: appendAttrLineToContextual(
+      chunk.contextualText,
+      attrContextLine,
+    ),
     pageType,
     entity_type,
     entity_name: entityName,
@@ -179,11 +243,14 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
     classification_reason:
       options.classificationReason || "test_backend_ingestion",
     quality_score: null,
-    priceNumeric: normalized.ecommerceMeta?.priceNumeric ?? null,
-    currency: normalized.ecommerceMeta?.currency || null,
-    inStock: normalized.ecommerceMeta?.inStock ?? null,
-    colors: normalized.ecommerceMeta?.colors || [],
-    sizes: normalized.ecommerceMeta?.sizes || [],
+    priceNumeric:
+      metaAttributes.price ?? normalized.ecommerceMeta?.priceNumeric ?? null,
+    currency:
+      metaAttributes.currency || normalized.ecommerceMeta?.currency || null,
+    inStock:
+      metaAttributes.in_stock ?? normalized.ecommerceMeta?.inStock ?? null,
+    colors: facetLists.colors,
+    sizes: facetLists.sizes,
     contactEmails: normalized.contactInfo?.emails || [],
     contactPhones: normalized.contactInfo?.phones || [],
     tokenCount: chunk.tokenCount || 0,
@@ -206,6 +273,9 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
     ecommerceMeta: normalized.ecommerceMeta || {},
     contactInfo: normalized.contactInfo || { emails: [], phones: [] },
     attributes: metaAttributes,
+    search_terms: searchTerms,
+    colors: facetLists.colors,
+    sizes: facetLists.sizes,
     childChunks,
     parentChunks,
     chunks,

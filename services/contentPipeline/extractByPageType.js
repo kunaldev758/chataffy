@@ -242,7 +242,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
       metaDescription: pageMetadata.metaDescription,
     });
   } else if (isPdp) {
-    typed = extractProductContent({
+    typed = await extractProductContent({
       url,
       html: decodedSourceCode,
       jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
@@ -258,6 +258,9 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
   let extraction_source = typed?.extraction_source || "generic";
   let entity_name = typed?.entity_name || null;
   let attributes = typed?.attributes || {};
+  let typedSearchTerms = Array.isArray(typed?.search_terms)
+    ? typed.search_terms
+    : [];
 
   const PDP_THIN_THRESHOLD = 250;
 
@@ -302,7 +305,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     canonicalUrl: generic.canonicalUrl || pageMetadata.canonicalUrl,
     language: generic.language || pageMetadata.language || "en",
     attributes,
-    search_terms: [],
+    search_terms: typedSearchTerms,
     classification_confidence: detection.confidence,
     classification_reason: detection.reason,
     extraction_source,

@@ -222,7 +222,16 @@ async function processPageDocuments(
           source_page_type: ingested.sourcePageType || null,
         },
         product_id: meta.product_id || null,
-        search_terms: meta.search_terms || [],
+        search_terms: [
+          ...new Set(
+            [
+              ...(meta.search_terms || []),
+              ...(ingested.search_terms || []),
+            ]
+              .map((t) => String(t || "").trim())
+              .filter(Boolean),
+          ),
+        ].slice(0, 80),
         classification_confidence:
           typeof meta.classification_confidence === "number"
             ? meta.classification_confidence

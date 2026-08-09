@@ -368,10 +368,30 @@ class QdrantVectorStoreManager {
         const priorTerms = Array.isArray(metadata.search_terms)
           ? metadata.search_terms
           : [];
+        const priorSizes = [
+          ...(Array.isArray(metadata.sizes) ? metadata.sizes : []),
+          ...(Array.isArray(metadata.attributes?.sizes)
+            ? metadata.attributes.sizes
+            : []),
+        ];
+        const priorColors = [
+          ...(Array.isArray(metadata.colors) ? metadata.colors : []),
+          ...(Array.isArray(metadata.attributes?.colors)
+            ? metadata.attributes.colors
+            : []),
+        ];
         const mergedTerms = [
           ...new Set(
-            [...priorTerms, ...autoTerms]
-              .map((t) => String(t).toLowerCase().trim())
+            [
+              ...priorTerms,
+              ...autoTerms,
+              ...priorColors,
+              ...priorSizes,
+              metadata.attributes?.brand,
+              metadata.attributes?.sku,
+              metadata.entity_name,
+            ]
+              .map((t) => String(t || "").toLowerCase().trim())
               .filter(Boolean),
           ),
         ].slice(0, 80);
@@ -390,13 +410,22 @@ class QdrantVectorStoreManager {
         delete metadata.sparseText;
         delete metadata.sparseBoost;
 
+        const mergeFacet = (prior, heuristic) => [
+          ...new Set(
+            [...prior, ...(heuristic || [])]
+              .map((s) => String(s || "").trim())
+              .filter(Boolean),
+          ),
+        ];
+
         const point = {
           id: uuidv4(),
           payload: {
             ...metadata,
             text: pageContent,
             search_terms: mergedTerms,
-            sizes: payloadAttrs.sizes,
+            sizes: mergeFacet(priorSizes, payloadAttrs.sizes),
+            colors: mergeFacet(priorColors, metadata.colors),
             collections: payloadAttrs.collections,
             source_type: pipelineSource,
             created_at: new Date().toISOString(),

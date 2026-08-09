@@ -3,6 +3,11 @@ const {
   stripInlineBufferImageContent,
   extractCleanProductBody,
 } = require("../htmlCleanup");
+const {
+  collectCanonicalProductAttrs,
+  unionAttrs,
+  termsFromProductAttrs,
+} = require("./productVariants");
 
 function asArray(value) {
   if (value == null) return [];
@@ -659,12 +664,56 @@ function productToMarkdown({
   if (attributes?.in_stock === false) {
     attrLines.push("- Availability: Out of stock");
   }
-  if (attributes?.color) attrLines.push(`- Color: ${attributes.color}`);
-  if (attributes?.size) attrLines.push(`- Size: ${attributes.size}`);
+  const colors = Array.isArray(attributes?.colors)
+    ? attributes.colors
+    : attributes?.color
+      ? [attributes.color]
+      : [];
+  const sizes = Array.isArray(attributes?.sizes)
+    ? attributes.sizes
+    : attributes?.size
+      ? [attributes.size]
+      : [];
+  if (colors.length) attrLines.push(`- Colors: ${colors.join(", ")}`);
+  if (sizes.length) attrLines.push(`- Sizes: ${sizes.join(", ")}`);
 
   if (attrLines.length) {
     lines.push("\n## Details");
     lines.push(attrLines.join("\n"));
+  }
+
+  const variants = Array.isArray(attributes?.variants)
+    ? attributes.variants
+    : [];
+  if (variants.length) {
+    const variantLines = [];
+    for (const v of variants.slice(0, 40)) {
+      const label =
+        [v.color, v.size].filter(Boolean).join(" / ") ||
+        v.sku ||
+        "Variant";
+      const bits = [label];
+      if (v.price != null) {
+        bits.push(formatPriceValue(v.price, cur || v.currency || ""));
+      }
+      if (
+        v.original_price != null &&
+        v.price != null &&
+        v.original_price > v.price
+      ) {
+        bits.push(
+          `(was ${formatPriceValue(v.original_price, cur || v.currency || "")})`,
+        );
+      }
+      if (v.sku) bits.push(`SKU: ${v.sku}`);
+      if (v.in_stock === false) bits.push("Out of stock");
+      else if (v.in_stock === true) bits.push("In stock");
+      variantLines.push(`- ${bits.join(" — ")}`);
+    }
+    if (variantLines.length) {
+      lines.push("\n## Variants");
+      lines.push(variantLines.join("\n"));
+    }
   }
 
   if (includeShortDescription && description) {
@@ -680,20 +729,30 @@ function productToMarkdown({
 /**
  * Product extraction: JSON-LD/DOM attributes + always-appended cleaned page body.
  * FAQ / reviews / related stay out of primary (residual / secondary FAQ own them).
+ * Variant cascade: HTML → .json → .js → JSON-LD/DOM.
  */
-function extractProductContent({ url, html, jsonLdBlocks = [] }) {
+async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
   const fromLd = extractProductFromJsonLd(jsonLdBlocks);
   const fromDom = fromLd?.confidence >= 0.85 ? null : extractProductFromDom(html, url);
   const domPrices = extractProductPricesFromDom(html);
+  const { attrs: variantAttrs, source: variantSource } =
+    await collectCanonicalProductAttrs({ html, jsonLdBlocks, url });
 
+  const priceAttrs = mergePriceAttributes(
+    fromLd?.attributes || {},
+    domPrices,
+  );
+  const baseAttrs = {
+    ...(fromDom?.attributes || {}),
+    ...(fromLd?.attributes || {}),
+    ...priceAttrs,
+  };
+
+  // Prefer rich Shopify/cascade variants; page-level sale price still from priceAttrs
   const merged = {
     entity_name: fromLd?.entity_name || fromDom?.entity_name || null,
     description: fromLd?.description || fromDom?.description || "",
-    attributes: {
-      ...(fromDom?.attributes || {}),
-      ...(fromLd?.attributes || {}), // JSON-LD wins for most fields
-      ...mergePriceAttributes(fromLd?.attributes || {}, domPrices),
-    },
+    attributes: unionAttrs(variantAttrs, baseAttrs),
     confidence: fromLd?.confidence || fromDom?.confidence || 0.3,
     source: fromLd?.source || fromDom?.source || "none",
   };
@@ -739,6 +798,7 @@ function extractProductContent({ url, html, jsonLdBlocks = [] }) {
 
   const sources = [merged.source];
   if (bodySource) sources.push("cleaned_body");
+  if (variantSource) sources.push(variantSource);
 
   const attrs = { ...(merged.attributes || {}) };
   if (url) {
@@ -760,6 +820,8 @@ function extractProductContent({ url, html, jsonLdBlocks = [] }) {
           ...(attrs.price_min != null ? { price_min: attrs.price_min } : {}),
           ...(attrs.price_max != null ? { price_max: attrs.price_max } : {}),
           ...(currency ? { currency } : {}),
+          ...(attrs.colors?.length ? { colors: attrs.colors } : {}),
+          ...(attrs.sizes?.length ? { sizes: attrs.sizes } : {}),
         },
       ];
       attrs.product_count = 1;
@@ -770,6 +832,7 @@ function extractProductContent({ url, html, jsonLdBlocks = [] }) {
     content,
     entity_name: merged.entity_name,
     attributes: attrs,
+    search_terms: termsFromProductAttrs(attrs, merged.entity_name),
     extraction_confidence: merged.confidence,
     extraction_source: sources.filter(Boolean).join("+"),
     body_chars: bodyMarkdown ? bodyMarkdown.length : 0,
@@ -783,4 +846,6 @@ module.exports = {
   extractProductPricesFromDom,
   mergePriceAttributes,
   descriptionCoveredByBody,
+  collectCanonicalProductAttrs,
+  unionAttrs,
 };
