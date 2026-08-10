@@ -110,29 +110,41 @@ function isHomepageUrl(url) {
   }
 }
 
-function isScrapableWebUrl(url) {
-  if (!url || typeof url !== "string") return false;
+function getScrapabilityRejection(url) {
+  if (!url || typeof url !== "string") {
+    return { reason: "empty_or_non_string_url" };
+  }
 
   const trimmed = url.trim();
   if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
-    return false;
+    return { reason: "unsupported_protocol" };
   }
 
   for (const protocol of NON_HTTP_PROTOCOLS) {
-    if (trimmed.toLowerCase().startsWith(protocol)) return false;
+    if (trimmed.toLowerCase().startsWith(protocol)) {
+      return { reason: "unsupported_protocol", protocol };
+    }
   }
 
   try {
     const parsed = new URL(trimmed);
-    if (!["http:", "https:"].includes(parsed.protocol)) return false;
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return { reason: "unsupported_protocol", protocol: parsed.protocol };
+    }
 
     const ext = getPathExtension(parsed.pathname);
-    if (ext && NON_HTML_EXTENSIONS.has(ext)) return false;
+    if (ext && NON_HTML_EXTENSIONS.has(ext)) {
+      return { reason: "non_html_extension", extension: ext };
+    }
 
-    return true;
-  } catch {
-    return false;
+    return null;
+  } catch (error) {
+    return { reason: "invalid_url", error: error.message };
   }
+}
+
+function isScrapableWebUrl(url) {
+  return getScrapabilityRejection(url) === null;
 }
 
 /** True for cart/checkout/login/etc. paths that should not enter the scrape queue. */
@@ -198,26 +210,52 @@ function isContentQueueableUrl(url) {
   }
 }
 
-function filterAndDedupeWebUrls(urls) {
+function filterAndDedupeWebUrls(urls, options = {}) {
   if (!Array.isArray(urls)) return [];
 
+  const onReject =
+    typeof options.onReject === "function" ? options.onReject : null;
   const seen = new Set();
   const result = [];
 
   for (const raw of urls) {
-    if (!isScrapableWebUrl(raw)) continue;
+    const rejection = getScrapabilityRejection(raw);
+    if (rejection) {
+      onReject?.({ url: raw, ...rejection });
+      continue;
+    }
 
     let normalized;
     try {
       normalized = normalizeWebUrl(raw.trim());
-    } catch {
+    } catch (error) {
+      onReject?.({
+        url: raw,
+        reason: "url_normalization_failed",
+        error: error.message,
+      });
       continue;
     }
 
-    if (isNonContentPath(normalized)) continue;
+    if (isNonContentPath(normalized)) {
+      onReject?.({
+        url: raw,
+        normalizedUrl: normalized,
+        reason: "non_content_path",
+      });
+      continue;
+    }
 
     const key = canonicalUrlKey(normalized);
-    if (seen.has(key)) continue;
+    if (seen.has(key)) {
+      onReject?.({
+        url: raw,
+        normalizedUrl: normalized,
+        reason: "duplicate_in_request",
+        canonicalKey: key,
+      });
+      continue;
+    }
 
     seen.add(key);
     result.push(normalized);

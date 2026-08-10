@@ -59,7 +59,7 @@ async function markWebUrlScrapeFailed({
   const { recomputeWebPageCounters } = require("../utils/agentPageCounters");
   await recomputeWebPageCounters(TrainingModel, userId, agentId);
 
-  await markUrlFailed(url, agentId, error);
+  await markUrlFailed(url, userId, agentId, error);
 }
 
 const redisConfig =
@@ -565,7 +565,7 @@ new Worker(
       };
 
       await emitScrapingProgress(0, totalUrlsCount, true);
-      await markUrlsQueued(urls, agentId);
+      await markUrlsQueued(urls, userId, agentId);
 
       const pipelineResult = await runParallelScrapeOverlapTrain({
         urls,
@@ -667,6 +667,7 @@ new Worker(
           client: await Client.findOne({ userId }),
           message: storageLimitEmitMessage,
           scrapingProgress: storageLimitEmitProgress,
+          trainingSummary: pipelineResult.trainingSummary || null,
         });
       } else {
         const trainTotal = scrapedDocs.length || totalUrlsCount;
@@ -684,9 +685,11 @@ new Worker(
           upsertTotal: trainTotal,
           isProcessing: false,
         });
+        const trainingSummary = pipelineResult.trainingSummary || null;
         appEvents.emit("userEvent", agentId, "training-event", {
           agent: await Agent.findOne({ _id: agentId }),
           scrapingProgress: finalProgress,
+          trainingSummary,
         });
       }
     } catch (error) {
@@ -809,6 +812,7 @@ new Worker(
       // "content unchanged" (stale contentHash) with no TrainingModel row.
       if (deletedPageUrls.length > 0) {
         const urlDeleteResult = await Url.deleteMany({
+          userId,
           agentId,
           url: { $in: deletedPageUrls },
         });
