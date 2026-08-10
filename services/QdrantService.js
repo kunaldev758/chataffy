@@ -19,12 +19,60 @@ const {
   extractPayloadAttributes,
 } = require("../utils/searchTerms");
 const { encodeSparseVector } = require("./sparseEncoder");
+const {
+  countTokens,
+  hardSplitByTokens,
+} = require("./ingestion/tokenSplitter");
 
 const DENSE_VECTOR_NAME = "dense";
 const SPARSE_VECTOR_NAME = "sparse";
 const SPARSE_VECTOR_MODIFIER = "idf";
 const USE_HYBRID_VECTORS = process.env.RAG_HYBRID_VECTORS !== "false";
 const USE_SPARSE_IDF = process.env.RAG_SPARSE_IDF !== "false";
+const EMBEDDING_SAFE_MAX_TOKENS = Math.min(
+  8000,
+  Math.max(
+    256,
+    parseInt(process.env.EMBEDDING_SAFE_MAX_TOKENS || "7800", 10) || 7800,
+  ),
+);
+
+function makeEmbeddingSafeDocuments(documents) {
+  return documents.flatMap((doc) => {
+    const embeddingText = String(
+      doc?.metadata?.embeddingText || doc?.pageContent || "",
+    );
+    if (countTokens(embeddingText) <= EMBEDDING_SAFE_MAX_TOKENS) {
+      return [doc];
+    }
+
+    const embeddingParts = hardSplitByTokens(
+      embeddingText,
+      EMBEDDING_SAFE_MAX_TOKENS,
+    );
+    const pageParts = hardSplitByTokens(
+      String(doc?.pageContent || ""),
+      EMBEDDING_SAFE_MAX_TOKENS,
+    );
+    console.warn(
+      `[QdrantService] Split oversized embedding input into ${embeddingParts.length} safe parts`,
+    );
+
+    return embeddingParts.map((part, index) => ({
+      ...doc,
+      pageContent:
+        pageParts[index] ||
+        (pageParts.length === 1 ? pageParts[0] : part),
+      metadata: {
+        ...(doc.metadata || {}),
+        embeddingText: part,
+        sparseText: part,
+        embedding_part_index: index,
+        embedding_part_count: embeddingParts.length,
+      },
+    }));
+  });
+}
 
 const PAYLOAD_INDEX_SCHEMAS = {
   user_id: "keyword",
@@ -250,6 +298,7 @@ class QdrantVectorStoreManager {
     }
 
     try {
+      documents = makeEmbeddingSafeDocuments(documents);
       await this.ensureEmbeddingsReady();
 
       const modelRecord = await getModelForCategory("embedding").catch(() => null);

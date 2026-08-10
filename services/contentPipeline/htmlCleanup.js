@@ -168,6 +168,73 @@ function stripInlineBufferImageContent(text) {
     .replace(new RegExp(inlineImageUrlPattern, "gi"), "");
 }
 
+/** Remove image/link URL walls while preserving ordinary linked prose. */
+function stripProductMarkdownNoise(text) {
+  if (!text) return "";
+  return stripInlineBufferImageContent(String(text))
+    .replace(/!\[[^\]]*]\([^)]*\)/g, "")
+    .replace(/^(?:Image(?:\s*\([^)]*\))?:\s*)?https?:\/\/\S+\s*$/gim, "")
+    .replace(
+      /^(?:Image(?:\s*\([^)]*\))?:\s*)?(?:https?:\/\/\S+\s*){2,}$/gim,
+      "",
+    )
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Convert a trusted product HTML fragment (for example Shopify body_html). */
+function productHtmlFragmentToMarkdown(html) {
+  if (!html || typeof html !== "string") return "";
+  try {
+    const TurndownService = require("turndown");
+    const $ = cheerio.load(`<div id="product-fragment">${html}</div>`);
+    $("#product-fragment script, #product-fragment style, #product-fragment noscript, #product-fragment iframe, #product-fragment svg, #product-fragment template").remove();
+    $("#product-fragment img").remove();
+    const turndown = new TurndownService({
+      headingStyle: "atx",
+      bulletListMarker: "-",
+    });
+    return stripProductMarkdownNoise(
+      turndown
+        .turndown($("#product-fragment").html() || "")
+        .replace(/[ \t]+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim(),
+    );
+  } catch (err) {
+    console.warn(
+      `[htmlCleanup] productHtmlFragmentToMarkdown failed: ${err.message}`,
+    );
+    return "";
+  }
+}
+
+/**
+ * Conservative gate for optional PDP enrichment. It rejects navigation/link
+ * shells but does not impose a total length cap on meaningful prose.
+ */
+function isUsefulProductMarkdown(markdown) {
+  const clean = stripProductMarkdownNoise(markdown);
+  if (clean.length < 80) return false;
+
+  const words = clean.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g) || [];
+  const urls = clean.match(/https?:\/\/\S+/g) || [];
+  const links = clean.match(/\[[^\]]+]\([^)]+\)/g) || [];
+  const noiseMatches =
+    clean.match(
+      /\b(your cart is empty|continue shopping|skip to content|sign in|log in|search|related products|recommended products|recently viewed|newsletter|subscribe|cookie policy)\b/gi,
+    ) || [];
+  const usefulMatches =
+    clean.match(
+      /\b(description|feature|specification|material|fabric|fit|size|care|wash|dimension|ingredient|compatib|usage|included|benefit|technology|breathable|lightweight)\b/gi,
+    ) || [];
+
+  const urlDensity = (urls.length + links.length) / Math.max(words.length, 1);
+  if (urlDensity > 0.12) return false;
+  if (noiseMatches.length >= 3 && usefulMatches.length === 0) return false;
+  return words.length >= 18 || usefulMatches.length >= 2;
+}
+
 function getDomainChromeState(chromeCache, domain) {
   if (!chromeCache[domain]) {
     chromeCache[domain] = { headerCaptured: false, footerCaptured: false };
@@ -368,14 +435,18 @@ function extractCleanProductBody(html, pageUrl = "") {
       });
     }
 
-    // Drop data:/blob: images; keep alt text when useful
+    // Drop images from PDP body markdown. Alt text is kept only when there is
+    // no remote/src URL wall (decorative Shopify galleries are not useful RAG).
     $("img").each((_, el) => {
       const src = $(el).attr("src")?.trim();
       const alt = $(el).attr("alt")?.trim();
       if (!src || isInlineBufferImageUrl(src)) {
         if (alt) $(el).replaceWith(`<p>Image (${alt})</p>`);
         else $(el).remove();
+        return;
       }
+      // Remote CDN/gallery images become noise after Turndown; strip them.
+      $(el).remove();
     });
 
     const turndown = new TurndownService({
@@ -451,7 +522,7 @@ function extractCleanProductBody(html, pageUrl = "") {
       return { markdown: "", source: null };
     }
 
-    const markdown = stripInlineBufferImageContent(
+    const markdown = stripProductMarkdownNoise(
       turndown
         .turndown(bestHtml)
         .replace(/[ \t]+/g, " ")
@@ -477,6 +548,9 @@ module.exports = {
   PRODUCT_BODY_EXCLUDE_SELECTORS,
   isInlineBufferImageUrl,
   stripInlineBufferImageContent,
+  stripProductMarkdownNoise,
+  productHtmlFragmentToMarkdown,
+  isUsefulProductMarkdown,
   getDomainChromeState,
   extractChromeHtml,
   enrichFooterHtml,

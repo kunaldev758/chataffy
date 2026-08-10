@@ -88,6 +88,11 @@ function emptyAttrs() {
   };
 }
 
+function normalizeShopifyTags(tags) {
+  if (Array.isArray(tags)) return uniqStrings(tags);
+  return uniqStrings(String(tags || "").split(","));
+}
+
 /**
  * Merge attr objects. Arrays union; scalars keep left unless empty.
  */
@@ -101,6 +106,8 @@ function unionAttrs(...sources) {
   let price_min = null;
   let price_max = null;
   let in_stock = null;
+  let product_type = null;
+  let tags = [];
 
   for (const src of sources) {
     if (!src || typeof src !== "object") continue;
@@ -119,6 +126,15 @@ function unionAttrs(...sources) {
     if (!brand && src.brand) brand = displayStr(src.brand) || brand;
     if (!sku && src.sku) sku = displayStr(src.sku) || sku;
     if (!currency && src.currency) currency = displayStr(src.currency) || currency;
+    if (!product_type && (src.product_type || src.productType)) {
+      product_type = displayStr(src.product_type || src.productType) || product_type;
+    }
+    tags = uniqStrings([
+      ...tags,
+      ...(Array.isArray(src.tags)
+        ? src.tags
+        : String(src.tags || "").split(",")),
+    ]);
 
     if (price == null && src.price != null && Number(src.price) > 0) {
       price = Number(src.price);
@@ -171,6 +187,8 @@ function unionAttrs(...sources) {
   if (price_min != null && !Number.isNaN(price_min)) out.price_min = price_min;
   if (price_max != null && !Number.isNaN(price_max)) out.price_max = price_max;
   if (in_stock != null) out.in_stock = in_stock;
+  if (product_type) out.product_type = product_type;
+  if (tags.length) out.tags = tags;
 
   // Back-compat singular mirrors
   if (out.colors[0]) out.color = out.colors[0];
@@ -184,10 +202,13 @@ function dedupeVariants(variants) {
   const out = [];
   for (const v of variants || []) {
     if (!v || typeof v !== "object") continue;
+    const idKey = normKey(v.id || v.variant_id);
     const skuKey = normKey(v.sku);
     const facetKey = `${normKey(v.color)}|${normKey(v.size)}`;
     // Prefer sku identity; else color+size; skip empty shells
-    const key = skuKey
+    const key = idKey
+      ? `id:${idKey}`
+      : skuKey
       ? `sku:${skuKey}`
       : facetKey !== "|"
         ? `facet:${facetKey}`
@@ -203,14 +224,19 @@ function dedupeVariants(variants) {
 }
 
 function variantFromParts({
+  id,
+  title,
   sku,
   color,
   size,
   price,
   currency,
   in_stock,
+  options,
 }) {
   const v = {};
+  if (id != null && id !== "") v.id = String(id);
+  if (title) v.title = displayStr(title);
   if (sku) v.sku = displayStr(sku);
   if (color) v.color = displayStr(color);
   if (size) v.size = displayStr(size);
@@ -219,6 +245,9 @@ function variantFromParts({
   }
   if (currency) v.currency = displayStr(currency);
   if (in_stock != null) v.in_stock = Boolean(in_stock);
+  if (Array.isArray(options) && options.length) {
+    v.options = options.map(displayStr).filter(Boolean);
+  }
   return Object.keys(v).length ? v : null;
 }
 
@@ -550,12 +579,15 @@ function mapShopifyVariant(variant, optionNames = [], { pricesInCents = false } 
           : null;
 
   const v = variantFromParts({
+    id: variant.id ?? variant.variant_id,
+    title: variant.title,
     sku: variant.sku,
     color,
     size,
     price,
     currency: variant.price_currency || null,
     in_stock: available,
+    options: opts,
   });
   if (v && original_price != null && original_price > (price ?? 0)) {
     v.original_price = original_price;
@@ -589,7 +621,9 @@ function attrsFromShopifyProduct(product, { pricesInCents = false } = {}) {
 
   const comparePrices = product.variants
     .map((v) =>
-      parseMoney(v.compare_at_price ?? v.compareAtPrice, { pricesInCents }),
+      parseMoney(v.compare_at_price ?? v.compareAtPrice, {
+        shopifyCents: pricesInCents,
+      }),
     )
     .filter((p) => p != null);
 
@@ -599,16 +633,37 @@ function attrsFromShopifyProduct(product, { pricesInCents = false } = {}) {
         ? product.vendor
         : product.vendor?.name || null,
     sku: product.variants.find((v) => v?.sku)?.sku || null,
+    product_type: product.product_type || product.productType || null,
+    tags: normalizeShopifyTags(product.tags),
     original_price: comparePrices.length ? Math.max(...comparePrices) : null,
     variants,
   });
 }
 
+function normalizeShopifyProduct(product, { pricesInCents = false } = {}) {
+  if (!product || typeof product !== "object") return null;
+  return {
+    title: displayStr(product.title),
+    bodyHtml: typeof product.body_html === "string" ? product.body_html : "",
+    vendor:
+      typeof product.vendor === "string"
+        ? product.vendor
+        : displayStr(product.vendor?.name),
+    productType: displayStr(product.product_type || product.productType),
+    tags: normalizeShopifyTags(product.tags),
+    attributes: attrsFromShopifyProduct(product, { pricesInCents }),
+  };
+}
+
 /**
  * Shopify product JSON embedded in PDP HTML.
+ * Returns attrs for the rich-variant cascade plus a normalized product package
+ * (title/body_html/type/tags) when the theme blob includes those root fields.
  */
 function collectFromShopify(html) {
-  if (!html) return emptyAttrs();
+  if (!html) {
+    return { attrs: emptyAttrs(), shopifyProduct: null };
+  }
   const $ = cheerio.load(html);
   const candidates = [];
 
@@ -633,7 +688,9 @@ function collectFromShopify(html) {
   }
 
   // Prefer product with the most priced variants
-  let best = null;
+  let bestAttrs = null;
+  let bestProduct = null;
+  let bestUseCents = false;
   let bestScore = -1;
   for (const product of candidates) {
     const attrs = attrsFromShopifyProduct(product, {
@@ -654,11 +711,18 @@ function collectFromShopify(html) {
     ).length;
     if (score > bestScore) {
       bestScore = score;
-      best = normalized;
+      bestAttrs = normalized;
+      bestProduct = product;
+      bestUseCents = useCents;
     }
   }
 
-  return best || emptyAttrs();
+  return {
+    attrs: bestAttrs || emptyAttrs(),
+    shopifyProduct: bestProduct
+      ? normalizeShopifyProduct(bestProduct, { pricesInCents: bestUseCents })
+      : null,
+  };
 }
 
 function shopifyProductBaseUrl(url) {
@@ -673,7 +737,7 @@ function shopifyProductBaseUrl(url) {
   }
 }
 
-async function fetchShopifyProductAttrs(baseUrl, ext) {
+async function fetchShopifyProductData(baseUrl, ext) {
   const axios = require("axios");
   const https = require("https");
   const endpoint = `${baseUrl}.${ext}`;
@@ -686,13 +750,13 @@ async function fetchShopifyProductAttrs(baseUrl, ext) {
       text = text.replace(/^while\(1\);|^for\(;;\);/, "");
     }
     const parsed = tryParseJson(text);
-    if (!parsed) return emptyAttrs();
+    if (!parsed) return null;
     const product =
       findShopifyProductObject(parsed) ||
       (parsed.product && findShopifyProductObject(parsed.product)) ||
       null;
-    if (!product) return emptyAttrs();
-    return attrsFromShopifyProduct(product, {
+    if (!product) return null;
+    return normalizeShopifyProduct(product, {
       pricesInCents: ext === "js",
     });
   };
@@ -733,13 +797,13 @@ async function fetchShopifyProductAttrs(baseUrl, ext) {
         console.warn(
           `[productVariants] Shopify .${ext} fetch failed for ${endpoint}: ${err2.message}`,
         );
-        return emptyAttrs();
+        return null;
       }
     }
     console.warn(
       `[productVariants] Shopify .${ext} fetch failed for ${endpoint}: ${err.message}`,
     );
-    return emptyAttrs();
+    return null;
   }
 }
 
@@ -863,7 +927,7 @@ function ldFillScalars(ldAttrs) {
  *   else .js rich → DONE
  *   else JSON-LD + DOM
  *
- * @returns {Promise<{ attrs: object, source: string }>}
+ * @returns {Promise<{ attrs: object, source: string, shopifyProduct: object|null }>}
  */
 async function collectCanonicalProductAttrs({
   html = "",
@@ -873,39 +937,66 @@ async function collectCanonicalProductAttrs({
   const ld = collectFromJsonLd(jsonLdBlocks);
   const dom = collectFromWooDom(html);
 
-  // 1) Embedded HTML
-  const fromHtml = collectFromShopify(html);
+  // 1) Embedded HTML (variants + optional root body_html/title)
+  const { attrs: fromHtml, shopifyProduct: htmlProduct } =
+    collectFromShopify(html);
+
+  // Prefer public .json for authoritative root fields, but never issue a
+  // second Shopify request if the same handle already yielded rich attrs.
+  const base = shopifyProductBaseUrl(url);
+  let jsonProduct = null;
+  if (base) {
+    const fromJson = await fetchShopifyProductData(base, "json");
+    jsonProduct = fromJson;
+    if (fromJson && isRichVariantAttrs(fromJson.attributes)) {
+      return {
+        attrs: unionAttrs(
+          fromJson.attributes,
+          fromHtml,
+          ldFillScalars(ld),
+          ldFillScalars(dom),
+        ),
+        source: "shopify_json",
+        shopifyProduct: fromJson,
+      };
+    }
+
+    if (isRichVariantAttrs(fromHtml)) {
+      return {
+        attrs: unionAttrs(fromHtml, ldFillScalars(ld), ldFillScalars(dom)),
+        source: "shopify_html",
+        // Prefer .json package for body_html when available; else theme blob.
+        shopifyProduct: fromJson || htmlProduct,
+      };
+    }
+
+    const fromJs = await fetchShopifyProductData(base, "js");
+    if (fromJs && isRichVariantAttrs(fromJs.attributes)) {
+      return {
+        attrs: unionAttrs(
+          fromJs.attributes,
+          ldFillScalars(ld),
+          ldFillScalars(dom),
+        ),
+        source: "shopify_js",
+        shopifyProduct: fromJson || fromJs || htmlProduct,
+      };
+    }
+  }
+
   if (isRichVariantAttrs(fromHtml)) {
     return {
       attrs: unionAttrs(fromHtml, ldFillScalars(ld), ldFillScalars(dom)),
       source: "shopify_html",
+      shopifyProduct: htmlProduct,
     };
-  }
-
-  // 2–3) Shopify product endpoints (only /products/…)
-  const base = shopifyProductBaseUrl(url);
-  if (base) {
-    const fromJson = await fetchShopifyProductAttrs(base, "json");
-    if (isRichVariantAttrs(fromJson)) {
-      return {
-        attrs: unionAttrs(fromJson, ldFillScalars(ld), ldFillScalars(dom)),
-        source: "shopify_json",
-      };
-    }
-
-    const fromJs = await fetchShopifyProductAttrs(base, "js");
-    if (isRichVariantAttrs(fromJs)) {
-      return {
-        attrs: unionAttrs(fromJs, ldFillScalars(ld), ldFillScalars(dom)),
-        source: "shopify_js",
-      };
-    }
   }
 
   // 4) JSON-LD + DOM (+ weak HTML shopify if any)
   return {
     attrs: unionAttrs(ld, fromHtml, dom),
     source: "jsonld_dom",
+    shopifyProduct: jsonProduct || htmlProduct,
   };
 }
 
@@ -916,9 +1007,10 @@ function collectCanonicalProductAttrsSync({
   html = "",
   jsonLdBlocks = [],
 } = {}) {
+  const { attrs: fromHtml } = collectFromShopify(html);
   return unionAttrs(
     collectFromJsonLd(jsonLdBlocks),
-    collectFromShopify(html),
+    fromHtml,
     collectFromWooDom(html),
   );
 }
@@ -971,6 +1063,7 @@ module.exports = {
   collectFromShopify,
   collectFromWooDom,
   attrsFromShopifyProduct,
+  normalizeShopifyProduct,
   isRichVariantAttrs,
   shopifyProductBaseUrl,
   termsFromProductAttrs,

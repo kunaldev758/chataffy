@@ -1,6 +1,9 @@
 const cheerio = require("cheerio");
 const {
   stripInlineBufferImageContent,
+  stripProductMarkdownNoise,
+  productHtmlFragmentToMarkdown,
+  isUsefulProductMarkdown,
   extractCleanProductBody,
 } = require("../htmlCleanup");
 const {
@@ -614,6 +617,36 @@ function descriptionCoveredByBody(shortDesc, bodyMarkdown) {
   return prefix.length >= 20 && bodyNorm.includes(prefix);
 }
 
+function uniqueProductEnrichment(markdown, representedText) {
+  const clean = stripProductMarkdownNoise(markdown);
+  if (!clean) return "";
+  const representedNorm = normalizeForCompare(representedText);
+  const blocks = clean
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  const kept = [];
+  const seen = new Set();
+
+  for (const block of blocks) {
+    const normalized = normalizeForCompare(block);
+    if (normalized.length < 20 || seen.has(normalized)) continue;
+    seen.add(normalized);
+    if (representedNorm && representedNorm.includes(normalized)) continue;
+    if (
+      representedNorm &&
+      normalized.includes(representedNorm) &&
+      normalized.length <= representedNorm.length * 1.35
+    ) {
+      continue;
+    }
+    kept.push(block);
+  }
+
+  const result = kept.join("\n\n").trim();
+  return isUsefulProductMarkdown(result) ? result : "";
+}
+
 /**
  * Build structured shell. Optionally omit short ## Description when body will cover it.
  */
@@ -631,6 +664,9 @@ function productToMarkdown({
   const attrLines = [];
   if (attributes?.sku) attrLines.push(`- SKU: ${attributes.sku}`);
   if (attributes?.brand) attrLines.push(`- Brand: ${attributes.brand}`);
+  if (attributes?.product_type) {
+    attrLines.push(`- Type: ${attributes.product_type}`);
+  }
 
   const cur = attributes?.currency || "";
   // Always expose current selling price as "Price" so chat answers prefer it
@@ -687,9 +723,10 @@ function productToMarkdown({
     : [];
   if (variants.length) {
     const variantLines = [];
-    for (const v of variants.slice(0, 40)) {
+    for (const v of variants) {
       const label =
         [v.color, v.size].filter(Boolean).join(" / ") ||
+        v.title ||
         v.sku ||
         "Variant";
       const bits = [label];
@@ -727,16 +764,24 @@ function productToMarkdown({
 }
 
 /**
- * Product extraction: JSON-LD/DOM attributes + always-appended cleaned page body.
- * FAQ / reviews / related stay out of primary (residual / secondary FAQ own them).
+ * Product extraction for PDPs.
+ * Shopify: title/body_html primary, structured variants kept, DOM only as gated enrichment.
+ * Non-Shopify: existing JSON-LD/DOM + cleaned body path unchanged.
  * Variant cascade: HTML → .json → .js → JSON-LD/DOM.
  */
 async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
   const fromLd = extractProductFromJsonLd(jsonLdBlocks);
   const fromDom = fromLd?.confidence >= 0.85 ? null : extractProductFromDom(html, url);
   const domPrices = extractProductPricesFromDom(html);
-  const { attrs: variantAttrs, source: variantSource } =
+  const {
+    attrs: variantAttrs,
+    source: variantSource,
+    shopifyProduct,
+  } =
     await collectCanonicalProductAttrs({ html, jsonLdBlocks, url });
+  const shopifyDescription = productHtmlFragmentToMarkdown(
+    shopifyProduct?.bodyHtml || "",
+  );
 
   const priceAttrs = mergePriceAttributes(
     fromLd?.attributes || {},
@@ -750,8 +795,16 @@ async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
 
   // Prefer rich Shopify/cascade variants; page-level sale price still from priceAttrs
   const merged = {
-    entity_name: fromLd?.entity_name || fromDom?.entity_name || null,
-    description: fromLd?.description || fromDom?.description || "",
+    entity_name:
+      shopifyProduct?.title ||
+      fromLd?.entity_name ||
+      fromDom?.entity_name ||
+      null,
+    description:
+      shopifyDescription ||
+      fromLd?.description ||
+      fromDom?.description ||
+      "",
     attributes: unionAttrs(variantAttrs, baseAttrs),
     confidence: fromLd?.confidence || fromDom?.confidence || 0.3,
     source: fromLd?.source || fromDom?.source || "none",
@@ -762,7 +815,9 @@ async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
     url,
   );
 
+  const hasShopifyDescription = shopifyDescription.length >= 40;
   const shortCovered =
+    !hasShopifyDescription &&
     bodyMarkdown &&
     merged.description &&
     descriptionCoveredByBody(merged.description, bodyMarkdown);
@@ -772,31 +827,48 @@ async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
     description: merged.description,
     attributes: merged.attributes,
     url,
-    includeShortDescription: Boolean(merged.description) && !shortCovered,
+    includeShortDescription:
+      Boolean(merged.description) && (hasShopifyDescription || !shortCovered),
   });
 
-  // Always append cleaned body when available (not only when shell is thin)
   if (bodyMarkdown) {
-    const heading =
-      shortCovered || !merged.description
-        ? "## Description"
-        : "## Full details";
-    const bodyNorm = normalizeForCompare(bodyMarkdown);
-    const contentNorm = normalizeForCompare(content);
-    const preview = bodyNorm.slice(0, Math.min(100, bodyNorm.length));
-    const alreadyEmbedded =
-      preview.length >= 40 && contentNorm.includes(preview);
-
-    if (!alreadyEmbedded) {
-      content = stripInlineBufferImageContent(
-        `${content}\n\n${heading}\n${bodyMarkdown}`
-          .replace(/\n{3,}/g, "\n\n")
-          .trim(),
+    if (hasShopifyDescription) {
+      // Shopify description is primary. Keep only meaningful, unique PDP prose;
+      // never append a whole main/body shell merely because it is longer.
+      const enrichment = uniqueProductEnrichment(
+        bodyMarkdown,
+        `${content}\n${shopifyDescription}`,
       );
+      if (enrichment) {
+        content = `${content}\n\n## Additional Product Information\n${enrichment}`
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+      }
+    } else {
+      // Preserve the existing JSON-LD/DOM fallback for non-Shopify and Shopify
+      // products whose public JSON does not contain a usable description.
+      const heading =
+        shortCovered || !merged.description
+          ? "## Description"
+          : "## Full details";
+      const bodyNorm = normalizeForCompare(bodyMarkdown);
+      const contentNorm = normalizeForCompare(content);
+      const preview = bodyNorm.slice(0, Math.min(100, bodyNorm.length));
+      const alreadyEmbedded =
+        preview.length >= 40 && contentNorm.includes(preview);
+
+      if (!alreadyEmbedded) {
+        content = stripInlineBufferImageContent(
+          `${content}\n\n${heading}\n${bodyMarkdown}`
+            .replace(/\n{3,}/g, "\n\n")
+            .trim(),
+        );
+      }
     }
   }
 
   const sources = [merged.source];
+  if (shopifyDescription) sources.push("shopify_body_html");
   if (bodySource) sources.push("cleaned_body");
   if (variantSource) sources.push(variantSource);
 
@@ -846,6 +918,8 @@ module.exports = {
   extractProductPricesFromDom,
   mergePriceAttributes,
   descriptionCoveredByBody,
+  productToMarkdown,
+  uniqueProductEnrichment,
   collectCanonicalProductAttrs,
   unionAttrs,
 };

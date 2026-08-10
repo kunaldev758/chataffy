@@ -1,4 +1,5 @@
 const { get_encoding } = require("tiktoken");
+const { TextDecoder } = require("util");
 const {
   buildHeadingSpans,
   resolveHeadingPathForChunk,
@@ -24,6 +25,38 @@ function countTokens(text) {
   } catch (_) {
     // Fallback token estimation
     return Math.ceil(String(text).length / 4);
+  }
+}
+
+/**
+ * Last-resort exact token split for indivisible lines/tables/URL walls.
+ * This never truncates input and guarantees each returned part fits maxTokens.
+ */
+function hardSplitByTokens(text, maxTokens) {
+  const value = String(text || "").trim();
+  if (!value) return [];
+  const safeMax = Math.max(1, Number(maxTokens) || 1);
+  if (countTokens(value) <= safeMax) return [value];
+
+  try {
+    const enc = getTokenizer();
+    const tokens = enc.encode(value);
+    const decoder = new TextDecoder();
+    const parts = [];
+    for (let i = 0; i < tokens.length; i += safeMax) {
+      const decoded = decoder.decode(enc.decode(tokens.slice(i, i + safeMax))).trim();
+      if (decoded) parts.push(decoded);
+    }
+    return parts;
+  } catch (_) {
+    // Conservative fallback when tokenizer decode is unavailable.
+    const charBudget = Math.max(1, safeMax * 3);
+    const parts = [];
+    for (let i = 0; i < value.length; i += charBudget) {
+      const part = value.slice(i, i + charBudget).trim();
+      if (part) parts.push(part);
+    }
+    return parts;
   }
 }
 
@@ -111,7 +144,9 @@ function splitByTokens(text, maxTokens, overlapTokens = 0) {
     chunks.push(currentChunk.trim());
   }
 
-  return chunks;
+  // Paragraph/line boundaries are preferred above, but one line can itself
+  // exceed the budget. Enforce the invariant before returning.
+  return chunks.flatMap((chunk) => hardSplitByTokens(chunk, maxTokens));
 }
 
 /**
@@ -199,6 +234,7 @@ function createParentChildChunks(
 
 module.exports = {
   countTokens,
+  hardSplitByTokens,
   splitByTokens,
   createParentChildChunks,
 };
