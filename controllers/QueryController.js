@@ -20,6 +20,7 @@ const {
   isLiveAgentRequest,
   isPureGreeting,
   detectSoftOffer,
+  isCategoryNavigationRequest,
 } = require("../services/QueryRouter");
 const {
   buildAcknowledgementResponse,
@@ -809,6 +810,7 @@ class QuestionAnsweringSystem {
     const founded = websiteData?.founded_year;
     const valueProp = websiteData?.value_proposition;
     const services = websiteData?.services_list || [];
+    const categories = websiteData?.categories_list || [];
 
     if (type) parts.push(`Company type: ${type}`);
     if (industry) parts.push(`Industry: ${industry}`);
@@ -818,6 +820,20 @@ class QuestionAnsweringSystem {
       parts.push(
         `Services/products:\n${services.map((s) => `- ${s}`).join("\n")}`,
       );
+    }
+    if (categories.length > 0) {
+      const categoryLines = categories
+        .map((category) => {
+          const name = category?.name || category;
+          if (!name) return null;
+          return `- ${name}${category?.url ? ` (${category.url})` : ""}`;
+        })
+        .filter(Boolean);
+      if (categoryLines.length > 0) {
+        parts.push(
+          `Navigation categories and collections:\n${categoryLines.join("\n")}`,
+        );
+      }
     }
 
     if (parts.length === 0) {
@@ -1213,9 +1229,10 @@ class QuestionAnsweringSystem {
 
     const wantsPageLinks =
       !wantsContactInfo &&
-      ((/\b(links?|urls?)\b/.test(q) &&
-        !/\b(social\s*media|social)\b/.test(q) &&
-        /\b(list|show|give\s+me|all|every|how\s+many)\b/.test(q)) ||
+      (isCategoryNavigationRequest(q) ||
+        (/\b(links?|urls?)\b/.test(q) &&
+          !/\b(social\s*media|social)\b/.test(q) &&
+          /\b(list|show|give\s+me|all|every|how\s+many)\b/.test(q)) ||
         /\bshow\s+me\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
         /\blist\b[\s\S]{0,40}\b(pages?|links?|urls?)\b/.test(q) ||
         (/\b(pages?)\b/.test(q) &&
@@ -1627,7 +1644,16 @@ class QuestionAnsweringSystem {
       const p = pages[i];
       const url = p.url || "";
       const title = p.title || url || `Page ${i + 1}`;
-      const line = `${i + 1}. ${title} — ${url}`;
+      const isNavigationList = p.entity_type === "category_list";
+      const navigationText = String(p.parent_text || p.text || "").trim();
+      let line =
+        isNavigationList && navigationText
+          ? `${i + 1}. ${title}\n${navigationText}`
+          : `${i + 1}. ${title} — ${url}`;
+      const remainingChars = Math.max(0, maxTotalChars - totalChars - 1);
+      if (line.length > remainingChars && isNavigationList) {
+        line = line.slice(0, remainingChars);
+      }
       if (totalChars + line.length + 1 > maxTotalChars) break;
       lines.push(line);
       totalChars += line.length + 1;

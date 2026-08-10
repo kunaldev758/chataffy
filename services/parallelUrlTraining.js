@@ -15,6 +15,9 @@ const {
   isNonContentPath,
 } = require("../utils/webUrlUtils");
 const {
+  buildNavigationDocument,
+} = require("../utils/navigationCategories");
+const {
   markUrlFetched,
   markUrlProcessed,
   markUrlFailed,
@@ -86,6 +89,7 @@ async function runParallelScrapeOverlapTrain(opts) {
 
   let metadataExtracted = false;
   let metadataFromHomepage = false;
+  let navigationDocQueued = false;
   let stoppedForStorageLimit = false;
   let scrapeCompleted = 0;
   let trainQueued = 0;
@@ -129,6 +133,15 @@ async function runParallelScrapeOverlapTrain(opts) {
   };
 
   const finalizeTrainedDoc = async (doc, result) => {
+    // Synthetic navigation vectors support PAGE_LINKS retrieval but are not
+    // crawled pages — skip TrainingList / Url lifecycle updates.
+    if (doc.metadata?.synthetic_navigation) {
+      console.log(
+        `[parallelUrlTraining] synthetic navigation trained url=${doc.originalUrl}`,
+      );
+      return;
+    }
+
     const pageResult = result?.resultsByUrl?.[doc.originalUrl];
     const skipped = pageResult?.skipped;
     const trainError =
@@ -498,6 +511,8 @@ async function runParallelScrapeOverlapTrain(opts) {
           return { skip: true };
         }
 
+        let navigationDoc = null;
+
         if (websiteMetadata) {
           const isHome = websiteMetadata._isHomepage === true;
           const shouldStore =
@@ -510,6 +525,13 @@ async function runParallelScrapeOverlapTrain(opts) {
                 ...(agentId ? { agentId } : {}),
               });
               const { _isHomepage, ...cleanMetadata } = websiteMetadata;
+              if (
+                (!cleanMetadata.categories_list ||
+                  cleanMetadata.categories_list.length === 0) &&
+                websiteData.categories_list?.length > 0
+              ) {
+                delete cleanMetadata.categories_list;
+              }
               await websiteData.updateData({
                 ...cleanMetadata,
                 website_url: cleanMetadata.website_url || url,
@@ -520,6 +542,21 @@ async function runParallelScrapeOverlapTrain(opts) {
               console.log(
                 `[parallelUrlTraining] Stored website metadata for user ${userId} from ${url}`,
               );
+
+              if (
+                isHome &&
+                !navigationDocQueued &&
+                Array.isArray(websiteMetadata.categories_list) &&
+                websiteMetadata.categories_list.length > 0
+              ) {
+                navigationDoc = buildNavigationDocument(
+                  websiteMetadata.website_url || url,
+                  websiteMetadata.categories_list,
+                );
+                if (navigationDoc) {
+                  navigationDocQueued = true;
+                }
+              }
             } catch (metadataError) {
               console.error(
                 `[parallelUrlTraining] Error storing website metadata:`,
@@ -530,6 +567,7 @@ async function runParallelScrapeOverlapTrain(opts) {
         }
 
         const contentSize = Buffer.byteLength(content, "utf8");
+        const navSize = navigationDoc?.dataSize || 0;
         const clientDoc = await Client.findOne({ userId });
         const currentDataSize = clientDoc?.currentDataSize || 0;
         const maxStorage =
@@ -538,14 +576,14 @@ async function runParallelScrapeOverlapTrain(opts) {
             ? clientDoc.customLimits.maxStorage
             : plan.limits.maxStorage;
 
-        if (currentDataSize + contentSize > maxStorage) {
+        if (currentDataSize + contentSize + navSize > maxStorage) {
           await triggerStorageLimitStop();
           return { skip: true };
         }
 
         await Client.updateOne(
           { userId },
-          { $inc: { currentDataSize: contentSize } },
+          { $inc: { currentDataSize: contentSize + navSize } },
         );
 
         return {
@@ -578,12 +616,17 @@ async function runParallelScrapeOverlapTrain(opts) {
             },
             originalUrl: url,
           },
+          navigationDoc,
         };
       });
 
       if (!docOrSkip?.skip && docOrSkip?.doc) {
         scrapedDocs.push(docOrSkip.doc);
         enqueueTrain(docOrSkip.doc);
+      }
+      if (!docOrSkip?.skip && docOrSkip?.navigationDoc) {
+        scrapedDocs.push(docOrSkip.navigationDoc);
+        enqueueTrain(docOrSkip.navigationDoc);
       }
     } catch (error) {
       const failedRow = await TrainingModel.findOneAndUpdate(

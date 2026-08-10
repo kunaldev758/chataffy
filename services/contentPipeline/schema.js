@@ -16,6 +16,7 @@ const PAGE_TYPES = Object.freeze([
 const ENTITY_TYPES = Object.freeze([
   "product",
   "listing",
+  "category_list",
   "faq",
   "job_posting",
   "service",

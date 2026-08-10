@@ -240,6 +240,15 @@ function detectMultiEntityFromRules(query) {
  * @returns {object} routing with multiEntityMode + rawEntities
  */
 function enrichRoutingMultiEntity(routing = {}, query = "") {
+  // Category/nav lists may contain "and" but remain one PAGE_LINKS request.
+  if (routing.subIntent === "PAGE_LINKS") {
+    return {
+      ...routing,
+      multiEntityMode: null,
+      rawEntities: [],
+    };
+  }
+
   const ruleHit = detectMultiEntityFromRules(query);
   const mode =
     normalizeMultiEntityMode(routing.multiEntityMode) ||

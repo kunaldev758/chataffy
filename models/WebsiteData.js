@@ -1,6 +1,22 @@
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
+const categoryLinkSchema = new Schema(
+  {
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    url: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+  },
+  { _id: false },
+);
+
 const websiteDataSchema = new Schema(
   {
     userId: {
@@ -35,6 +51,10 @@ const websiteDataSchema = new Schema(
     services_list: {
       type: [String],
       default: [], // Array of services/products
+    },
+    categories_list: {
+      type: [categoryLinkSchema],
+      default: [], // Navigation / catalog categories with source URLs
     },
     value_proposition: {
       type: String,
@@ -139,7 +159,11 @@ websiteDataSchema.statics.getOrCreate = async function (input) {
 websiteDataSchema.methods.updateData = async function (updates) {
   Object.assign(this, updates);
   this.last_extracted_at = new Date();
-  if (updates.company_name || updates.services_list?.length > 0) {
+  if (
+    updates.company_name ||
+    updates.services_list?.length > 0 ||
+    updates.categories_list?.length > 0
+  ) {
     this.extraction_status = "completed";
   } else if (Object.keys(updates).length > 0) {
     this.extraction_status = "partial";

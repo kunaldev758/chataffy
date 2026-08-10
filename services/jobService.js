@@ -18,6 +18,9 @@ const {
 } = require("./parallelUrlTraining.js");
 const { detectWebsiteLanguage } = require("../utils/websiteLanguage");
 const {
+  extractNavigationCategories,
+} = require("../utils/navigationCategories");
+const {
   classifyWebsiteType,
 } = require("./LlamaWebsiteClassifierService");
 const { websiteTypeDefinitions, industryKeywords } = require("../utils/jobService/data.js");
@@ -85,6 +88,7 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
     industry: "",
     founded_year: "",
     services_list: [],
+    categories_list: [],
     value_proposition: "",
     does_not_list: [],
     website_url: url,
@@ -189,6 +193,8 @@ const extractWebsiteMetadata = ($, url, { isHomepage = false } = {}) => {
     if (yearMatch) {
       metadata.founded_year = yearMatch[1];
     }
+
+    metadata.categories_list = extractNavigationCategories($, url);
 
     // Extract services from navigation, services section, or meta tags
     const services = new Set();
