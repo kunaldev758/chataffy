@@ -187,10 +187,10 @@ function isSimpleGreeting(question) {
   return isPureGreeting(question);
 }
 
-// function isLiveAgentRequest(question) {
-//   const normalized = (question || "").toLowerCase().trim();
-//   return LIVE_AGENT_PHRASES.some((phrase) => normalized.includes(phrase));
-// }
+function isLiveAgentRequest(question) {
+  const normalized = (question || "").toLowerCase().trim();
+  return LIVE_AGENT_PHRASES.some((phrase) => normalized.includes(phrase));
+}
 
 function classifyStructuralSubIntent(query) {
   const q = (query || "").toLowerCase();
