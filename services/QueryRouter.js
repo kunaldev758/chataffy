@@ -187,10 +187,10 @@ function isSimpleGreeting(question) {
   return isPureGreeting(question);
 }
 
-function isLiveAgentRequest(question) {
-  const normalized = (question || "").toLowerCase().trim();
-  return LIVE_AGENT_PHRASES.some((phrase) => normalized.includes(phrase));
-}
+// function isLiveAgentRequest(question) {
+//   const normalized = (question || "").toLowerCase().trim();
+//   return LIVE_AGENT_PHRASES.some((phrase) => normalized.includes(phrase));
+// }
 
 function classifyStructuralSubIntent(query) {
   const q = (query || "").toLowerCase();
@@ -644,17 +644,17 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
     };
   }
 
-  if (isLiveAgentRequest(normalizedQuestion)) {
-    return {
-      confident: true,
-      result: buildRouteResult({
-        route: ROUTES.LIVE_AGENT,
-        userLanguage,
-        confidence: 0.95,
-        source: "rules_live_agent",
-      }),
-    };
-  }
+  // if (isLiveAgentRequest(normalizedQuestion)) {
+  //   return {
+  //     confident: true,
+  //     result: buildRouteResult({
+  //       route: ROUTES.LIVE_AGENT,
+  //       userLanguage,
+  //       confidence: 0.95,
+  //       source: "rules_live_agent",
+  //     }),
+  //   };
+  // }
 
   if (isGibberishOrAccidentalMessage(normalizedQuestion)) {
     return {
