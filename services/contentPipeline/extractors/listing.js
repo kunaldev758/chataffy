@@ -50,13 +50,15 @@ const GRID_SELECTORS = [
 ].join(", ");
 
 const CARD_SELECTORS = [
-  // Shopify
+  // Shopify (prefer product markers over bare .grid__item — Impulse wraps
+  // the whole collection in .grid__item--content which also matches .grid__item)
+  ".grid-product",
+  "[data-product-handle]",
+  "[data-product-id]",
   ".product-card",
   ".product-item",
+  ".grid__item.grid-product",
   ".grid__item .card",
-  ".grid__item",
-  "[data-product-id]",
-  "[data-product-handle]",
   "li.product",
   ".card-wrapper",
   ".product-block",
@@ -89,7 +91,39 @@ const CARD_SELECTORS = [
   "article.product",
   "li.product-item",
   ".type-product",
+  // Last resort — only used when filtered to single-product cards
+  ".grid__item",
 ].join(", ");
+
+/** Nested product markers — a card containing these is a layout wrapper, not a product. */
+const NESTED_PRODUCT_CARD =
+  ".grid-product, [data-product-handle], [data-product-id], .product-card, .product-item, .product-tile, li.product, .productCard";
+
+/**
+ * Drop layout wrappers (e.g. Impulse .grid__item--content) that contain many products.
+ */
+function filterToLeafProductCards($, els) {
+  return els.filter((el) => {
+    const $el = $(el);
+    if ($el.find(NESTED_PRODUCT_CARD).filter((_, n) => n !== el).length > 0) {
+      return false;
+    }
+    // Bare .grid__item without product identity is usually nav/footer/sidebar chrome
+    const cls = `${$el.attr("class") || ""}`;
+    if (
+      /\bgrid__item\b/i.test(cls) &&
+      !/\bgrid-product\b/i.test(cls) &&
+      !$el.attr("data-product-handle") &&
+      !$el.attr("data-product-id")
+    ) {
+      const productLinks = $el.find(
+        "a[href*='/products/'], a[href*='/product/']",
+      ).length;
+      if (productLinks !== 1) return false;
+    }
+    return true;
+  });
+}
 
 function absolutize(href, pageUrl) {
   if (!href) return null;
@@ -242,9 +276,20 @@ function parseAllPrices(text) {
   return nums;
 }
 
+/**
+ * Strip "Save $X" / "Save Rs. X" spans so savings never become the sale price
+ * (e.g. sale $10.99 + Save $10.00 → min would wrongly pick 10).
+ */
+function stripSaveAmounts(text) {
+  return String(text || "").replace(
+    /\bSave\s*(?:[$€£¥₹₩]|Rs\.?|USD|EUR|GBP|INR)?\s*[\d,]+(?:\.\d+)?/gi,
+    " ",
+  );
+}
+
 /** Prices must include a currency marker — never treat "25′" in a title as $25. */
 function extractCurrencyPrices(text) {
-  const str = String(text || "");
+  const str = stripSaveAmounts(text);
   const results = [];
   const re =
     /(?:([$€£¥₹₩]|Rs\.?|USD|EUR|GBP|INR)\s*)([\d,]+(?:\.\d+)?)|\b([\d,]+(?:\.\d+)?)\s*(USD|EUR|GBP|INR)\b/gi;
@@ -310,7 +355,46 @@ function extractPriceFromCard($, $el) {
     return true;
   };
 
-  // 0. WooCommerce: <del>MRP</del> <ins>sale</ins>
+  // 0a. Shopify Impulse / Expanse: .grid-product__price--original + Sale price
+  const $gpOriginal = $el
+    .find(".grid-product__price--original, .grid-product__price .price--compare")
+    .first();
+  if ($gpOriginal.length) {
+    const priced = extractCurrencyPrices(cleanText($gpOriginal.text()));
+    if (priced.length) {
+      out.original_price = priced[0].amount;
+      out.currency = priced[0].currency || out.currency;
+    }
+  }
+  const $gpPrice = $el.find(".grid-product__price").first();
+  if ($gpPrice.length && out.price == null) {
+    const clone = $gpPrice.clone();
+    clone
+      .find(
+        ".grid-product__price--original, .grid-product__price--savings, .visually-hidden, .price--compare, s, del, strike",
+      )
+      .remove();
+    const priced = extractCurrencyPrices(cleanText(clone.text()));
+    if (priced.length) {
+      out.price = priced[0].amount;
+      out.currency = priced[0].currency || out.currency;
+    } else {
+      // Fallback: "Sale price" label then amount in full price node (sans Save)
+      const saleHint = cleanText(stripSaveAmounts($gpPrice.text())).match(
+        /Sale\s*price\s*([₹$€£]|Rs\.?)?\s*([\d,]+(?:\.\d+)?)/i,
+      );
+      if (saleHint) {
+        const n = parsePrice(saleHint[2]);
+        if (n != null) {
+          out.price = n;
+          out.currency =
+            extractCurrencySymbol(saleHint[1] || "") || out.currency || "$";
+        }
+      }
+    }
+  }
+
+  // 0b. WooCommerce: <del>MRP</del> <ins>sale</ins>
   const $ins = $el
     .find("ins .woocommerce-Price-amount, ins .amount, p.price ins, .price ins")
     .first();
@@ -398,6 +482,7 @@ function extractPriceFromCard($, $el) {
   // 2. Compare-at / Was price
   if (out.original_price == null) {
     const compareSelectors = [
+      ".grid-product__price--original",
       ".price--non-sale",
       ".price--rrp",
       ".price-item--regular",
@@ -407,13 +492,18 @@ function extractPriceFromCard($, $el) {
       ".price__regular",
       ".was-price",
       "[class*='compare-at' i]",
+      "[class*='price--original' i]",
       "del",
       "s",
       "strike",
     ].join(", ");
 
     for (const el of $el.find(compareSelectors).toArray()) {
-      const text = cleanText($(el).text());
+      const $node = $(el);
+      if ($node.closest(".grid-product__price--savings, [class*='savings' i]").length) {
+        continue;
+      }
+      const text = cleanText($node.text());
       const priced = extractCurrencyPrices(text);
       if (priced.length) {
         out.original_price = priced[0].amount;
@@ -439,10 +529,24 @@ function extractPriceFromCard($, $el) {
     }
   }
 
-  // 4. Fallback: currency amounts in .price node (min = sale, max = original)
+  // 4. Fallback: currency amounts in price node (min = sale, max = original).
+  // Prefer a dedicated price container over the whole card (avoids review noise).
   if (out.price == null || out.original_price == null || out.price_min == null) {
-    const priceNodeText = cleanText($el.find("p.price, span.price, .price").first().text());
-    const fullText = priceNodeText || cleanText($el.text());
+    const $priceNode = $el
+      .find(
+        ".grid-product__price, p.price, span.price, .price, [class*='product__price' i]",
+      )
+      .first();
+    let priceNodeText = "";
+    if ($priceNode.length) {
+      const $clone = $priceNode.clone();
+      $clone
+        .find(".grid-product__price--savings, [class*='savings' i]")
+        .remove();
+      priceNodeText = cleanText(stripSaveAmounts($clone.text()));
+    }
+    const fullText =
+      priceNodeText || cleanText(stripSaveAmounts($el.text()));
     if (out.price_min == null && priceNodeText) applyRange(priceNodeText);
     const priced = extractCurrencyPrices(fullText);
     if (priced.length >= 2) {
@@ -624,7 +728,7 @@ function extractListingFromDom(html, pageUrl = "") {
   const $grid = $(GRID_SELECTORS).first();
   const scope = $grid.length ? $grid : $.root();
 
-  let cards = scope.find(CARD_SELECTORS).toArray();
+  let cards = filterToLeafProductCards($, scope.find(CARD_SELECTORS).toArray());
 
   if (cards.length > 0) {
     for (const el of cards) {
@@ -811,6 +915,21 @@ function extractListingContent({
         p.price != null &&
         p.original_price != null &&
         (prev.original_price == null || prev.price === p.original_price)
+      ) {
+        merged.price = p.price;
+        merged.original_price = p.original_price;
+        if (p.currency) merged.currency = p.currency;
+      }
+      // Prefer a later card whose sale/compare pair is tighter (leaf product card
+      // after a layout wrapper that aggregated every price on the grid).
+      if (
+        p.price != null &&
+        p.original_price != null &&
+        prev.price != null &&
+        prev.original_price != null &&
+        p.original_price < prev.original_price &&
+        p.price > prev.price &&
+        p.price < p.original_price
       ) {
         merged.price = p.price;
         merged.original_price = p.original_price;
