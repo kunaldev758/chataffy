@@ -4,6 +4,12 @@ const { extractGenericMarkdown } = require("./extractGenericMarkdown");
 const {
   detectPageType,
 } = require("./detectPageType");
+const {
+  hasPrimaryPdpDom,
+  countPrimaryListingCards,
+  isStrongProductDetailUrl,
+  isStrongListingUrl,
+} = require("./detectPageType");
 const { classifyPageTypeLlm } = require("./classifyPageTypeLlm");
 const { applyValidation } = require("./validatePage");
 const { extractProductContent } = require("./extractors/product");
@@ -11,11 +17,12 @@ const { extractListingContent } = require("./extractors/listing");
 const { extractWithReadability } = require("./extractors/contentReadability");
 const { extractFaqContent } = require("./extractors/faq");
 const { processResidualSections } = require("./residualSections");
-const { GRID_SELECTORS, CARD_SELECTORS } = require("./extractors/listing");
+const { GRID_SELECTORS } = require("./extractors/listing");
 const { resolveProductId } = require("./productId");
 const {
   decodeCloudflareEmailsInHtml,
 } = require("../../utils/cloudflareEmail");
+const { maybeRecoverExtract } = require("./extractRecovery");
 
 /**
  * Build a section descriptor for multi-entity indexing of one URL.
@@ -70,68 +77,42 @@ function mergeAttrMaps(target = {}, extra = {}) {
 }
 
 /**
- * True for a single product detail URL (PDP), e.g.
- * /products/after-hours-lip-liner, /product/foo, /p/sku, /dp/asin.
+ * True for a single product detail page.
+ * Classic URL shapes OR strong primary PDP DOM (BigCommerce /products?less PDPs).
  * Bare /products or /products/ (no handle) is NOT a PDP.
  */
-function isProductDetailUrl(url = "") {
-  if (!url) return false;
-  let path = "";
-  try {
-    path = new URL(url, "http://localhost").pathname || "";
-  } catch {
-    path = String(url);
+function isProductDetailUrl(url = "", $ = null) {
+  if (isStrongProductDetailUrl(url)) return true;
+  // BC-style /slug PDPs: require primary PDP shell and not a catalog URL
+  if ($ && hasPrimaryPdpDom($) && !isStrongListingUrl(url)) {
+    return true;
   }
-  return /\/(products?|item|sku|dp|pd)\/[^/?#]+/i.test(path);
+  return false;
 }
 
 /**
  * True for collection / category / catalog / shop index URLs (PLP).
- * Never true for a clear PDP URL — related-product cards on a PDP must not
- * flip the page to listing (that caused Mink Envy PDP → listing extractor).
+ * Never true for a clear PDP — related-product cards must not flip PDP → listing.
  */
 function isListingUrl(url = "", $ = null) {
-  // Explicit product-detail URLs always win over DOM / listing heuristics
-  if (isProductDetailUrl(url)) return false;
+  // Explicit product-detail always wins over DOM / listing heuristics
+  if (isProductDetailUrl(url, $)) return false;
+  if (isStrongListingUrl(url)) return true;
 
-  const path = (() => {
-    try {
-      return new URL(url || "", "http://localhost").pathname || "";
-    } catch {
-      return String(url || "");
-    }
-  })();
-
-  // Collection / category / catalog / shop index (with or without handle)
-  if (
-    /\/(collections?|category|categories|catalog|all-products|search|browse|brands?|goods)(\/|$)/i.test(
-      path,
-    )
-  ) {
-    return true;
-  }
-
-  // /shop or /store index only (not /shop/something-product-like handled elsewhere)
-  if (/\/(shop|store)\/?$/i.test(path)) return true;
-
-  // Bare /products or /products/ with no product handle → product index listing
-  if (/\/products?\/?$/i.test(path)) return true;
-
-  // DOM multi-card heuristic only when URL is not a PDP
-  if ($) {
-    const cardCount = $(CARD_SELECTORS).length;
-    if (cardCount >= 2) return true;
+  // Primary listing region only (not related rails / global cards)
+  if ($ && !hasPrimaryPdpDom($)) {
+    const { cardCount, gridCount } = countPrimaryListingCards($);
+    if (cardCount >= 2 || (gridCount > 0 && cardCount >= 1)) return true;
   }
   return false;
 }
 
 /**
  * After pageType=product, resolve PDP vs PLP.
- * Clear /products/{handle} URLs always force product (PDP extractor).
- * Collection/catalog URLs or multi-card DOMs force listing (PLP).
+ * Precedence: PDP URL/DOM → listing URL/primary grid → detection prior.
  */
 function resolveProductEntityType(detection, url, $ = null) {
-  if (isProductDetailUrl(url)) {
+  if (isProductDetailUrl(url, $)) {
     return {
       ...detection,
       pageType: "product",
@@ -311,29 +292,74 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     extraction_source,
   };
 
+  // Additive recovery (only when typed/generic is unhealthy) — keeps happy path unchanged
+  let recoveryUsed = false;
+  const recovery = await maybeRecoverExtract({
+    url,
+    html: decodedSourceCode,
+    baseline: base,
+    pageMetadata,
+    alreadyRanListing: isListing,
+    alreadyRanProduct: isPdp,
+    isProductDetail: isProductDetailUrl(url, $meta),
+  });
+  if (recovery.applied && recovery.winner) {
+    recoveryUsed = true;
+    base.content = recovery.winner.content;
+    base.entity_name = recovery.winner.entity_name || base.entity_name;
+    base.attributes = recovery.winner.attributes || {};
+    base.search_terms = recovery.winner.search_terms || [];
+    base.extraction_source = recovery.winner.extraction_source;
+    if (recovery.winner.pageType) base.pageType = recovery.winner.pageType;
+    if (recovery.winner.entity_type) {
+      base.entity_type = recovery.winner.entity_type;
+    }
+    if (recovery.winner.reasonSuffix) {
+      base.classification_reason = [
+        base.classification_reason,
+        recovery.winner.reasonSuffix,
+      ]
+        .filter(Boolean)
+        .join("+");
+    }
+  }
+
+  const effectiveIsListing =
+    base.pageType === "product" && base.entity_type === "listing";
+  const effectiveIsPdp =
+    base.pageType === "product" && base.entity_type !== "listing";
+
   // 4) Validation — deterministic wins over LLM
   const validated = applyValidation(base, llmResult);
-  // Re-assert PDP / PLP after validation (URL rules beat LLM / weak DOM)
-  if (isProductDetailUrl(url)) {
+  // Re-assert PDP / PLP after validation using primary-region aware helpers
+  if (isProductDetailUrl(url, $meta)) {
     validated.entity_type = "product";
     validated.pageType = "product";
-  } else if (isListingUrl(url) || isListing) {
-    // LLM must not flip a real PLP → product
+  } else if (
+    isListingUrl(url, $meta) ||
+    isListing ||
+    (recoveryUsed && effectiveIsListing)
+  ) {
     validated.entity_type = "listing";
+    validated.pageType = "product";
+  } else if (recoveryUsed && effectiveIsPdp) {
+    validated.entity_type = "product";
     validated.pageType = "product";
   }
 
-  const pageProductId = isPdp
-    ? resolveProductId({
-        url,
-        canonicalUrl: validated.canonicalUrl || pageMetadata.canonicalUrl,
-        attributes: validated.attributes,
-        entity_name: validated.entity_name,
-        entity_type: "product",
-        jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
-        html: decodedSourceCode,
-      })
-    : null;
+  const pageProductId =
+    (effectiveIsPdp || isPdp || isProductDetailUrl(url, $meta)) &&
+    validated.entity_type !== "listing"
+      ? resolveProductId({
+          url,
+          canonicalUrl: validated.canonicalUrl || pageMetadata.canonicalUrl,
+          attributes: validated.attributes,
+          entity_name: validated.entity_name,
+          entity_type: "product",
+          jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
+          html: decodedSourceCode,
+        })
+      : null;
 
   if (pageProductId) {
     validated.attributes = {
@@ -360,7 +386,11 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
 
   let faqExtracted = false;
   // Secondary FAQ only on real PDPs — not PLP/collection pages
-  if (isPdp && !isListingUrl(url)) {
+  if (
+    (effectiveIsPdp || isPdp) &&
+    validated.entity_type !== "listing" &&
+    !isListingUrl(url, $meta)
+  ) {
     const faq = extractFaqContent({
       html: decodedSourceCode,
       jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
@@ -403,8 +433,12 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
   // 6) Residual scan: uncovered DOM → link-list attrs + prose sections
   // On PLPs, mark the product grid covered so residual doesn't re-index cards as related links.
   let residualStats = null;
+  const residualIsListing =
+    effectiveIsListing ||
+    isListing ||
+    validated.entity_type === "listing";
   try {
-    const extraCoveredSelectors = isListing
+    const extraCoveredSelectors = residualIsListing
       ? GRID_SELECTORS.split(",").map((s) => s.trim()).filter(Boolean)
       : [];
 
@@ -414,7 +448,9 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
       existingSections: sections,
       markFaqCovered: faqExtracted || validated.pageType === "faq",
       extraCoveredSelectors,
-      deterministicPage: Boolean(detection.deterministic || isListing),
+      deterministicPage: Boolean(
+        detection.deterministic || residualIsListing,
+      ),
       usageContext: { userId, agentId, conversationId },
     });
     residualStats = residual.stats;
@@ -425,7 +461,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     ) {
       // Don't let residual related_product_urls overwrite listing product_urls
       const residualAttrs = { ...residual.pageAttributes };
-      if (isListing && validated.attributes?.product_urls?.length) {
+      if (residualIsListing && validated.attributes?.product_urls?.length) {
         delete residualAttrs.related_product_urls;
       }
       sections[0].attributes = mergeAttrMaps(

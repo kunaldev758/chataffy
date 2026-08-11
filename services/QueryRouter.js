@@ -677,17 +677,17 @@ function applyRuleEngine(question, { chatMessages, conversationState } = {}) {
     };
   }
 
-  if (isLiveAgentRequest(normalizedQuestion)) {
-    return {
-      confident: true,
-      result: buildRouteResult({
-        route: ROUTES.LIVE_AGENT,
-        userLanguage,
-        confidence: 0.95,
-        source: "rules_live_agent",
-      }),
-    };
-  }
+  // if (isLiveAgentRequest(normalizedQuestion)) {
+  //   return {
+  //     confident: true,
+  //     result: buildRouteResult({
+  //       route: ROUTES.LIVE_AGENT,
+  //       userLanguage,
+  //       confidence: 0.95,
+  //       source: "rules_live_agent",
+  //     }),
+  //   };
+  // }
 
   if (isGibberishOrAccidentalMessage(normalizedQuestion)) {
     return {
