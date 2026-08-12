@@ -259,6 +259,7 @@ async function processPageDocuments(
         : ingested.metrics?.wordCount || null;
 
       if (ingested.skipped) {
+        const extractedText = String(rawInput || "");
         console.warn("[url-training:skipped]", {
           agentId,
           url,
@@ -267,6 +268,32 @@ async function processPageDocuments(
           qualityMode,
           wordCount: ingested.metrics?.wordCount ?? null,
           documentIndex: docIndex,
+        });
+        console.warn("[pageType:trace]", {
+          stage: "quality_gate_skip",
+          url,
+          reason: ingested.skipReason || "quality_gate_fail",
+          qualityMode,
+          wordCount: ingested.metrics?.wordCount ?? null,
+          rawInputChars: extractedText.length,
+          // Filtered extract used for ingestion — shows why word-count gate fails
+          contentPreview: extractedText.slice(0, 1200),
+          contentWordsSample: extractedText
+            .split(/\s+/)
+            .filter(Boolean)
+            .slice(0, 50),
+          // Extract pipeline type (prefer*) vs normalizer remap
+          extractPageType: meta.pageType || null,
+          extractEntityType: meta.entity_type || null,
+          extractSource: meta.extraction_source || null,
+          extractReason: meta.classification_reason || null,
+          extractConfidence: meta.classification_confidence ?? null,
+          ingestedPageType: ingested.pageType || null,
+          ingestedSourcePageType: ingested.sourcePageType || null,
+          finalPageType:
+            meta.pageType || ingested.pageType || "generic",
+          finalEntityType:
+            meta.entity_type || ingested.entity_type || "general",
         });
         chunkCountPerUrl[url] = 0;
         skippedUrls.push(url);

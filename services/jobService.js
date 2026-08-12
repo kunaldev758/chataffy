@@ -339,6 +339,24 @@ const processWebPage = async (
       websiteMetadata._isHomepage = true;
     }
 
+    console.log("[pageType:trace]", {
+      stage: "processWebPage",
+      url: webPageURL,
+      pageType: pageType || "generic",
+      entity_type: entity_type || "general",
+      extraction_source: extraction_source || "generic",
+      classification_reason: classification_reason || "rules",
+      classification_confidence:
+        typeof classification_confidence === "number"
+          ? classification_confidence
+          : 0,
+      contentChars: String(cleanContent || "").length,
+      contentWords: String(cleanContent || "")
+        .split(/\s+/)
+        .filter(Boolean).length,
+      sectionCount: Array.isArray(sections) ? sections.length : 0,
+    });
+
     return {
       content: cleanContent,
       webPageURL,

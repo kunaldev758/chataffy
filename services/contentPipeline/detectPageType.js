@@ -1,10 +1,36 @@
 const { PAGE_TYPES, ENTITY_TYPES } = require("./schema");
+const { GRID_SELECTORS } = require("./extractors/listing");
 
 /** Rule confidence at or above this skips LLM page-type classification. */
 const RULE_CONFIDENCE_THRESHOLD = 0.72;
 
 /** At or above this, page is treated as fully deterministic (no page/section LLM). */
 const DETERMINISTIC_CONFIDENCE = 0.85;
+
+/**
+ * Product-card selectors for page-type detection.
+ * Intentionally narrower than listing CARD_SELECTORS (excludes layout-only
+ * `.card-body` / bare `.grid__item`) so related-product chrome on PDPs is
+ * less likely to flip a page to listing without a real product grid.
+ */
+const LISTING_CARD_SELECTORS = [
+  ".grid-product",
+  "[data-product-handle]",
+  "[data-product-id]",
+  ".product-card",
+  ".product-item",
+  "li.product",
+  ".product-block",
+  "article.card",
+  ".productCard",
+  "li.product-item",
+  ".product-tile",
+  "[class*='product-card' i]",
+  "[class*='productCard' i]",
+  "[class*='productTile' i]",
+  "[class*='product-item' i]",
+  "article.product",
+].join(", ");
 
 const SCHEMA_TO_PAGE = {
   product: { pageType: "product", entity_type: "product", weight: 0.94 },
@@ -193,11 +219,36 @@ function scoreFromUrl(url = "") {
 }
 
 /**
- * Light DOM / text signals (works with cheerio $ or plain hints).
+ * True for clear PDP URL shapes (/products/handle, /dp/asin, …).
+ * Mirrored lightly here so DOM listing signals do not override known PDPs
+ * inside detectPageType (full resolver still runs later in extractByPageType).
  */
-function scoreFromDom({ $, title = "", metaDescription = "", textSample = "" } = {}) {
+function looksLikeProductDetailUrl(url = "") {
+  if (!url) return false;
+  let path = "";
+  try {
+    path = new URL(url, "http://localhost").pathname || "";
+  } catch {
+    path = String(url);
+  }
+  return /\/(products?|item|sku|dp|pd)\/[^/?#]+/i.test(path);
+}
+
+/**
+ * Light DOM / text signals (works with cheerio $ or plain hints).
+ * Listing grids reuse extractors/listing GRID_SELECTORS so BigCommerce /
+ * Woo / Magento PLPs classify as product+listing even when URL rules miss.
+ */
+function scoreFromDom({
+  $,
+  title = "",
+  metaDescription = "",
+  textSample = "",
+  url = "",
+} = {}) {
   const signals = [];
   const hay = `${title} ${metaDescription} ${textSample}`.toLowerCase();
+  const urlIsPdp = looksLikeProductDetailUrl(url);
 
   if ($) {
     if (
@@ -210,18 +261,33 @@ function scoreFromDom({ $, title = "", metaDescription = "", textSample = "" } =
         reason: "dom:product",
       });
     }
-    if (
-      $(
-        "#ProductGridContainer, #product-grid, .product-grid, .collection-products, [data-product-grid]",
-      ).length
-    ) {
+
+    // Product listing / category grid (Shopify, BigCommerce, Woo, Magento, …)
+    const gridCount = $(GRID_SELECTORS).length;
+    if (gridCount > 0 && !urlIsPdp) {
       signals.push({
         pageType: "product",
         entity_type: "listing",
-        weight: 0.75,
+        weight: 0.82,
         reason: "dom:product_grid",
       });
     }
+
+    // Multi product-card pages without a matched grid wrapper (custom themes).
+    // Skip on clear PDP URLs so related-product carousels do not win.
+    if (!urlIsPdp) {
+      const cardCount = $(LISTING_CARD_SELECTORS).length;
+      if (cardCount >= 2) {
+        signals.push({
+          pageType: "product",
+          entity_type: "listing",
+          // Slightly below grid so a real grid match stays preferred.
+          weight: gridCount > 0 ? 0.8 : 0.78,
+          reason: `dom:product_cards:${cardCount}`,
+        });
+      }
+    }
+
     if (
       $('script[type="application/ld+json"]').length === 0 &&
       ($(".faq, .faqs, [itemtype*='FAQPage']").length >= 1 ||
@@ -268,6 +334,7 @@ function scoreFromDom({ $, title = "", metaDescription = "", textSample = "" } =
   if (/\b(add to cart|buy now|in stock|out of stock|sku)\b/i.test(hay)) {
     signals.push({
       pageType: "product",
+      // Prefer listing when multi-card/grid already signaled; else PDP-ish.
       entity_type: "product",
       weight: 0.62,
       reason: "text:commerce",
@@ -292,6 +359,7 @@ function isDeterministicPageType({
   schemaTypes = [],
   fromUrl = null,
   fromSchema = null,
+  fromDom = null,
 } = {}) {
   if (confidence >= DETERMINISTIC_CONFIDENCE) return true;
   if (fromUrl?.deterministic) return true;
@@ -299,6 +367,15 @@ function isDeterministicPageType({
 
   // Explicit ecommerce / FAQ contracts
   if (entity_type === "listing" && /\/(collections?|category|categories|catalog)(\/|$)/i.test(url)) {
+    return true;
+  }
+  // Strong DOM listing grid (BigCommerce/custom PLPs without collection URL)
+  if (
+    pageType === "product" &&
+    entity_type === "listing" &&
+    confidence >= 0.8 &&
+    fromDom?.entity_type === "listing"
+  ) {
     return true;
   }
   if (
@@ -336,7 +413,13 @@ function detectPageType({
   if (fromSchema) candidates.push(fromSchema);
   const fromUrl = scoreFromUrl(url);
   if (fromUrl) candidates.push(fromUrl);
-  const fromDom = scoreFromDom({ $, title, metaDescription, textSample });
+  const fromDom = scoreFromDom({
+    $,
+    title,
+    metaDescription,
+    textSample,
+    url,
+  });
   if (fromDom) candidates.push(fromDom);
 
   if (candidates.length === 0) {
@@ -422,6 +505,7 @@ function detectPageType({
     schemaTypes,
     fromUrl,
     fromSchema,
+    fromDom,
   });
 
   const needsLlm = !deterministic && confidence < RULE_CONFIDENCE_THRESHOLD;

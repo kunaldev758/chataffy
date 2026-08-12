@@ -268,9 +268,42 @@ async function runParallelScrapeOverlapTrain(opts) {
 
     if (skipped === "low_quality") {
       const skipReason = `low_quality:${pageResult.skipReason || "below_threshold"}`;
+      const extractedPageType =
+        pageResult.page?.pageType ||
+        doc.metadata?.pageType ||
+        null;
+      const extractedEntityType =
+        pageResult.page?.entity_type ||
+        doc.metadata?.entity_type ||
+        null;
       console.log(
         `[parallelUrlTraining] train skipped low_quality url=${doc.originalUrl} reason=${pageResult.skipReason || "below_threshold"}`,
       );
+      console.warn("[pageType:trace]", {
+        stage: "train_skip_low_quality",
+        url: doc.originalUrl,
+        skipReason: pageResult.skipReason || "below_threshold",
+        // Prefer real extract/ingest type — do not invent "generic" here.
+        pageType: extractedPageType,
+        entity_type: extractedEntityType,
+        extraction_source: doc.metadata?.extraction_source || null,
+        classification_reason: doc.metadata?.classification_reason || null,
+        classification_confidence:
+          doc.metadata?.classification_confidence ?? null,
+        contentChars: String(doc.content || "").length,
+        contentPreview: String(doc.content || "").slice(0, 1200),
+        contentWordsSample: String(doc.content || "")
+          .split(/\s+/)
+          .filter(Boolean)
+          .slice(0, 50),
+        qualityScore: pageResult.qualityScore,
+        pageFromIngest: pageResult.page
+          ? {
+              pageType: pageResult.page.pageType,
+              entity_type: pageResult.page.entity_type,
+            }
+          : null,
+      });
       outcomeSummary.skipped += 1;
       recordSkipReason(outcomeSummary, skipReason);
       await markUrlSkipped(
@@ -283,7 +316,7 @@ async function runParallelScrapeOverlapTrain(opts) {
           language: doc.metadata?.language || "en",
           qualityScore: pageResult.qualityScore,
           contentHash: pageResult.contentHash,
-          pageType: "generic",
+          pageType: extractedPageType || "generic",
         },
       );
       await upsertSkippedTrainingRow({
@@ -711,7 +744,7 @@ async function runParallelScrapeOverlapTrain(opts) {
         const currentDataSize = clientDoc?.currentDataSize || 0;
         const maxStorage =
           clientDoc?.customLimits?.isCustomLimits &&
-          clientDoc.customLimits?.maxStorage != null
+            clientDoc.customLimits?.maxStorage != null
             ? clientDoc.customLimits.maxStorage
             : plan.limits.maxStorage;
 

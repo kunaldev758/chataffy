@@ -35,8 +35,11 @@ function isEmpty(value) {
  * Merge rule + extraction + optional LLM enrichment.
  * @param {object} base - deterministic extraction result
  * @param {object|null} llm - classifyPageTypeLlm result
+ * @param {object} [options]
+ * @param {string} [options.url]
  */
-function applyValidation(base, llm = null) {
+function applyValidation(base, llm = null, options = {}) {
+  const url = options.url || null;
   const out = {
     pageType: base.pageType || "generic",
     entity_type: base.entity_type || "general",
@@ -62,10 +65,27 @@ function applyValidation(base, llm = null) {
     extraction_source: base.extraction_source || "generic",
   };
 
-  if (!llm) return out;
+  if (!llm) {
+    if (url) {
+      console.log("[pageType:trace]", {
+        stage: "applyValidation",
+        url,
+        hadLlm: false,
+        pageType: out.pageType,
+        entity_type: out.entity_type,
+        note: "no_llm_passthrough",
+      });
+    }
+    return out;
+  }
 
   // Classification: allow LLM to refine only when rule confidence was low,
   // or when base is still generic/general
+  const before = {
+    pageType: out.pageType,
+    entity_type: out.entity_type,
+    confidence: out.classification_confidence,
+  };
   const ruleWeak =
     out.classification_confidence < 0.72 ||
     out.pageType === "generic" ||
@@ -84,6 +104,30 @@ function applyValidation(base, llm = null) {
     ]
       .filter(Boolean)
       .join("+");
+  }
+
+  if (url) {
+    console.log("[pageType:trace]", {
+      stage: "applyValidation",
+      url,
+      hadLlm: true,
+      ruleWeak,
+      before,
+      llm: {
+        pageType: llm.pageType,
+        entity_type: llm.entity_type,
+        confidence: llm.confidence,
+      },
+      after: {
+        pageType: out.pageType,
+        entity_type: out.entity_type,
+        confidence: out.classification_confidence,
+      },
+      classificationApplied: ruleWeak,
+      changed:
+        before.pageType !== out.pageType ||
+        before.entity_type !== out.entity_type,
+    });
   }
 
   // entity_name: fill only if missing

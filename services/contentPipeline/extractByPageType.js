@@ -156,6 +156,20 @@ function resolveProductEntityType(detection, url, $ = null) {
   };
 }
 
+function countWords(text = "") {
+  return String(text || "")
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+function logPageTypeTrace(stage, url, fields = {}) {
+  console.log("[pageType:trace]", {
+    stage,
+    url,
+    ...fields,
+  });
+}
+
 /**
  * Phase 3 orchestrator:
  * metadata → rule page-type → optional LLM →
@@ -172,9 +186,19 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
   // HTTP scraping does not execute Cloudflare's client-side email decoder.
   // Normalize protected addresses once before any typed or generic extractor runs.
   const decodedSourceCode = decodeCloudflareEmailsInHtml(sourceCode);
+  const htmlChars = String(decodedSourceCode || "").length;
   const $meta = cheerio.load(decodedSourceCode);
   const pageMetadata = extractPageMetadata($meta, url);
   const textSample = $meta("body").text().replace(/\s+/g, " ").trim().slice(0, 4000);
+  const bodyWordCount = countWords($meta("body").text().replace(/\s+/g, " ").trim());
+
+  logPageTypeTrace("input", url, {
+    htmlChars,
+    bodyWordCount,
+    title: pageMetadata.title || null,
+    schemaTypes: (pageMetadata.schemaTypes || []).slice(0, 12),
+    textSampleChars: textSample.length,
+  });
 
   // 1) Rule-based detection
   let detection = detectPageType({
@@ -186,9 +210,24 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     $: $meta,
   });
 
+  logPageTypeTrace("rules", url, {
+    pageType: detection.pageType,
+    entity_type: detection.entity_type,
+    confidence: detection.confidence,
+    reason: detection.reason,
+    needsLlm: detection.needsLlm,
+    deterministic: detection.deterministic,
+    sources: detection.sources || [],
+  });
+
   // 2) LLM only when rules are ambiguous AND page is not deterministic
   let llmResult = null;
   if (detection.needsLlm && !detection.deterministic) {
+    const beforeLlm = {
+      pageType: detection.pageType,
+      entity_type: detection.entity_type,
+      confidence: detection.confidence,
+    };
     llmResult = await classifyPageTypeLlm({
       url,
       title: pageMetadata.title,
@@ -210,20 +249,69 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
         reason: `${detection.reason}+${llmResult.reason || "llm"}`,
         needsLlm: false,
       };
+      logPageTypeTrace("llm", url, {
+        called: true,
+        before: beforeLlm,
+        llm: {
+          pageType: llmResult.pageType,
+          entity_type: llmResult.entity_type,
+          confidence: llmResult.confidence,
+          reason: llmResult.reason,
+        },
+        after: {
+          pageType: detection.pageType,
+          entity_type: detection.entity_type,
+          confidence: detection.confidence,
+        },
+        changed:
+          beforeLlm.pageType !== detection.pageType ||
+          beforeLlm.entity_type !== detection.entity_type,
+      });
+    } else {
+      logPageTypeTrace("llm", url, {
+        called: true,
+        result: null,
+        kept: beforeLlm,
+        note: "llm_returned_null_rules_kept",
+      });
     }
   } else {
+    const skipReason = detection.deterministic
+      ? "deterministic_page_short_circuit"
+      : "rules_confident";
     const { recordPageTypeLlmUsage } = require("./llmUsageStats");
     recordPageTypeLlmUsage({
       skipped: true,
-      skipReason: detection.deterministic
-        ? "deterministic_page_short_circuit"
-        : "rules_confident",
+      skipReason,
+    });
+    logPageTypeTrace("llm", url, {
+      called: false,
+      skipReason,
+      pageType: detection.pageType,
+      entity_type: detection.entity_type,
+      confidence: detection.confidence,
     });
   }
 
   // 2b) product pageType → PDP vs PLP entity split
   if (detection.pageType === "product") {
+    const beforeEntity = {
+      pageType: detection.pageType,
+      entity_type: detection.entity_type,
+      reason: detection.reason,
+    };
     detection = resolveProductEntityType(detection, url, $meta);
+    logPageTypeTrace("pdp_plp_resolve", url, {
+      before: beforeEntity,
+      after: {
+        pageType: detection.pageType,
+        entity_type: detection.entity_type,
+        reason: detection.reason,
+      },
+      isProductDetailUrl: isProductDetailUrl(url),
+      isListingUrl: isListingUrl(url, $meta),
+      changed: beforeEntity.entity_type !== detection.entity_type,
+    });
   }
 
   const isListing =
@@ -233,7 +321,9 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
 
   // 3) Typed extraction — branch product vs listing
   let typed = null;
+  let extractBranch = "none";
   if (isListing) {
+    extractBranch = "listing";
     typed = extractListingContent({
       url,
       html: decodedSourceCode,
@@ -242,12 +332,14 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
       metaDescription: pageMetadata.metaDescription,
     });
   } else if (isPdp) {
+    extractBranch = "product";
     typed = await extractProductContent({
       url,
       html: decodedSourceCode,
       jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
     });
   } else if (["faq", "blog", "docs"].includes(detection.pageType)) {
+    extractBranch = "readability";
     typed = extractWithReadability(url, decodedSourceCode);
   }
 
@@ -263,15 +355,30 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     : [];
 
   const PDP_THIN_THRESHOLD = 250;
+  let contentFallback = "typed_kept";
+
+  logPageTypeTrace("extract_branch", url, {
+    branch: extractBranch,
+    pageType: detection.pageType,
+    entity_type: detection.entity_type,
+    typedChars: String(typed?.content || "").length,
+    typedWords: countWords(typed?.content || ""),
+    typedSource: typed?.extraction_source || null,
+    genericChars: String(generic?.content || "").length,
+    genericWords: countWords(generic?.content || ""),
+  });
 
   if (!content || content.length < 80) {
     if (isListing && content && content.length >= 40) {
       // PLP: keep listing markdown even if modest; do not replace with noisy generic.
       extraction_source = typed?.extraction_source || extraction_source;
+      contentFallback = "listing_thin_kept";
     } else {
       content = generic.content;
       extraction_source =
         typed && typed.content ? `${typed.extraction_source}+generic` : "generic";
+      contentFallback =
+        typed && typed.content ? "typed_thin_plus_generic" : "generic_only";
       if (!entity_name && detection.pageType !== "product") {
         entity_name = generic.title || null;
       }
@@ -292,8 +399,28 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
         .replace(/\n{3,}/g, "\n\n")
         .trim();
       extraction_source = `${extraction_source}+generic`;
+      contentFallback = "pdp_merged_generic";
     }
   }
+
+  logPageTypeTrace("content_fallback", url, {
+    contentFallback,
+    extraction_source,
+    contentChars: String(content || "").length,
+    contentWords: countWords(content),
+    pageType: detection.pageType,
+    entity_type: detection.entity_type,
+    // Show thin extracts so quality-gate misses are diagnosable early
+    ...(countWords(content) < 40
+      ? {
+          contentPreview: String(content || "").slice(0, 1200),
+          contentWordsSample: String(content || "")
+            .split(/\s+/)
+            .filter(Boolean)
+            .slice(0, 50),
+        }
+      : {}),
+  });
 
   const base = {
     pageType: detection.pageType,
@@ -312,15 +439,56 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
   };
 
   // 4) Validation — deterministic wins over LLM
-  const validated = applyValidation(base, llmResult);
+  const beforeValidation = {
+    pageType: base.pageType,
+    entity_type: base.entity_type,
+    confidence: base.classification_confidence,
+  };
+  const validated = applyValidation(base, llmResult, { url });
+  logPageTypeTrace("validation", url, {
+    before: beforeValidation,
+    after: {
+      pageType: validated.pageType,
+      entity_type: validated.entity_type,
+      confidence: validated.classification_confidence,
+      reason: validated.classification_reason,
+    },
+    hadLlm: Boolean(llmResult),
+    changed:
+      beforeValidation.pageType !== validated.pageType ||
+      beforeValidation.entity_type !== validated.entity_type,
+  });
+
   // Re-assert PDP / PLP after validation (URL rules beat LLM / weak DOM)
+  const beforeForce = {
+    pageType: validated.pageType,
+    entity_type: validated.entity_type,
+  };
+  let forceReason = null;
   if (isProductDetailUrl(url)) {
     validated.entity_type = "product";
     validated.pageType = "product";
+    forceReason = "force_product_detail_url";
   } else if (isListingUrl(url) || isListing) {
     // LLM must not flip a real PLP → product
     validated.entity_type = "listing";
     validated.pageType = "product";
+    forceReason = isListingUrl(url)
+      ? "force_listing_url"
+      : "force_listing_flag";
+  }
+  if (forceReason) {
+    logPageTypeTrace("url_force", url, {
+      forceReason,
+      before: beforeForce,
+      after: {
+        pageType: validated.pageType,
+        entity_type: validated.entity_type,
+      },
+      changed:
+        beforeForce.pageType !== validated.pageType ||
+        beforeForce.entity_type !== validated.entity_type,
+    });
   }
 
   const pageProductId = isPdp
@@ -467,8 +635,23 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     .filter(Boolean)
     .join("\n\n---\n\n");
 
+  const finalContent = combinedContent || validated.content;
+  logPageTypeTrace("final", url, {
+    pageType: validated.pageType,
+    entity_type: validated.entity_type,
+    confidence: validated.classification_confidence,
+    reason: validated.classification_reason,
+    extraction_source: validated.extraction_source,
+    deterministic: Boolean(detection.deterministic),
+    contentChars: String(finalContent || "").length,
+    contentWords: countWords(finalContent),
+    sectionCount: sections.length,
+    sectionTypes: sections.map((s) => `${s.pageType}/${s.entity_type}`),
+    residualStats: residualStats || null,
+  });
+
   return {
-    content: combinedContent || validated.content,
+    content: finalContent,
     webPageURL: url,
     title: validated.title,
     metaDescription: validated.metaDescription,

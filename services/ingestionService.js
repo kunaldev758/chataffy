@@ -133,7 +133,11 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
   // Stage C: Quality Gates
   // Webpages: strict (test-backend). Snippets/files/FAQs: lenient so short content still trains.
   const qualityMode = options.qualityMode === "lenient" ? "lenient" : "strict";
-  const quality = checkQualityGates(normalized, { mode: qualityMode });
+  const quality = checkQualityGates(normalized, {
+    mode: qualityMode,
+    preferPageType: options.preferPageType,
+    preferEntityType: options.preferEntityType,
+  });
   if (!quality.pass) {
     console.warn(`  └─ Stage C (Quality Gate FAIL): ${quality.reason}`);
     return {
@@ -152,7 +156,11 @@ async function processPageForIngestion(rawInput, url = "", options = {}) {
     };
   }
   console.log(
-    `  ├─ Stage C (Quality Gate PASS): Text quality verified (${qualityMode})`,
+    `  ├─ Stage C (Quality Gate PASS): Text quality verified (${qualityMode}` +
+      (quality.minWords != null && quality.minWords !== 30
+        ? `, minWords=${quality.minWords}`
+        : "") +
+      `)`,
   );
 
   // Stages E & F: Page-level contextual header & Document Structure
