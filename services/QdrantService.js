@@ -268,10 +268,29 @@ class QdrantVectorStoreManager {
           enc = null;
         }
 
-        const contents = documents.map(
+        const rawContents = documents.map(
           (doc) => doc.metadata?.embeddingText || doc.pageContent,
         );
-        // console.log(`Generating embeddings for ${contents.length} documents...`);
+
+        // Always-on safety: never send > EMBED_MAX_TOKENS to OpenAI (1:1 mapping).
+        let contents = rawContents;
+        try {
+          const { ensureEmbedTokenLimit } = require("./ingestion/tokenSplitter");
+          const limited = ensureEmbedTokenLimit(rawContents, undefined, {
+            oneToOne: true,
+          });
+          contents = limited.texts;
+          if (limited.splitCount > 0) {
+            console.warn(
+              `[QdrantService] Embedding hard-split: ${limited.splitCount} oversized input(s) capped (EMBED_SAFE_TOKENS)`,
+            );
+          }
+        } catch (splitErr) {
+          console.warn(
+            `[QdrantService] ensureEmbedTokenLimit skipped: ${splitErr.message}`,
+          );
+          contents = rawContents;
+        }
 
         // Batch embedding requests for efficiency
         const batchSize = 100; // OpenAI embedding batch limit

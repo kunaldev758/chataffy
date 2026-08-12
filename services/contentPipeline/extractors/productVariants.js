@@ -977,4 +977,5 @@ module.exports = {
   formatAttrContextLine,
   mergeStringLists,
   uniqStrings,
+  parseMoney,
 };

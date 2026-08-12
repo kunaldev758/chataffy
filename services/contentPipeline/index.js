@@ -107,4 +107,8 @@ module.exports = {
   SECTION_RULE_THRESHOLD,
   extractCleanProductBody: htmlCleanup.extractCleanProductBody,
   PRODUCT_BODY_SELECTORS: htmlCleanup.PRODUCT_BODY_SELECTORS,
+  sanitizeProductMarkdown: require("./sanitizeProductMarkdown")
+    .sanitizeProductMarkdown,
+  isLowValueResidual: require("./sanitizeProductMarkdown").isLowValueResidual,
+  isPdpRagCleanupEnabled: require("./pdpCleanupConfig").isPdpRagCleanupEnabled,
 };

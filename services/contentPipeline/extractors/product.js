@@ -7,7 +7,16 @@ const {
   collectCanonicalProductAttrs,
   unionAttrs,
   termsFromProductAttrs,
+  parseMoney,
 } = require("./productVariants");
+const {
+  isPdpRagCleanupEnabled,
+  getPdpCleanBodyMinChars,
+  getPdpVariantMarkdownLimit,
+} = require("../pdpCleanupConfig");
+const {
+  sanitizeProductMarkdown,
+} = require("../sanitizeProductMarkdown");
 
 function asArray(value) {
   if (value == null) return [];
@@ -616,6 +625,8 @@ function descriptionCoveredByBody(shortDesc, bodyMarkdown) {
 
 /**
  * Build structured shell. Optionally omit short ## Description when body will cover it.
+ * When compactVariants is true (PDP_RAG_CLEANUP), avoid dumping all variant lines into
+ * semantic markdown — attributes.variants remains the source of truth.
  */
 function productToMarkdown({
   entity_name,
@@ -623,6 +634,7 @@ function productToMarkdown({
   attributes,
   url,
   includeShortDescription = true,
+  compactVariants = false,
 }) {
   const lines = [];
   if (entity_name) lines.push(`# ${entity_name}`);
@@ -686,33 +698,80 @@ function productToMarkdown({
     ? attributes.variants
     : [];
   if (variants.length) {
-    const variantLines = [];
-    for (const v of variants.slice(0, 40)) {
-      const label =
-        [v.color, v.size].filter(Boolean).join(" / ") ||
-        v.sku ||
-        "Variant";
-      const bits = [label];
-      if (v.price != null) {
-        bits.push(formatPriceValue(v.price, cur || v.currency || ""));
-      }
-      if (
-        v.original_price != null &&
-        v.price != null &&
-        v.original_price > v.price
-      ) {
-        bits.push(
-          `(was ${formatPriceValue(v.original_price, cur || v.currency || "")})`,
-        );
-      }
-      if (v.sku) bits.push(`SKU: ${v.sku}`);
-      if (v.in_stock === false) bits.push("Out of stock");
-      else if (v.in_stock === true) bits.push("In stock");
-      variantLines.push(`- ${bits.join(" — ")}`);
-    }
-    if (variantLines.length) {
+    if (compactVariants) {
+      const colorPart = colors.length
+        ? colors.join(", ")
+        : [...new Set(variants.map((v) => v.color).filter(Boolean))].join(", ");
+      const sizePart = sizes.length
+        ? sizes.join(", ")
+        : [...new Set(variants.map((v) => v.size).filter(Boolean))].join(", ");
+      const summaryBits = [`${variants.length} variants available`];
+      if (colorPart) summaryBits.push(`across ${colorPart}`);
+      if (sizePart) summaryBits.push(`in sizes ${sizePart}`);
       lines.push("\n## Variants");
-      lines.push(variantLines.join("\n"));
+      lines.push(summaryBits.join(" ") + ".");
+
+      const limit = getPdpVariantMarkdownLimit();
+      if (limit > 0 && variants.length <= limit) {
+        // Small catalogs: keep exact lines for lexical "Black / XL" hits
+        for (const v of variants) {
+          const label =
+            [v.color, v.size].filter(Boolean).join(" / ") ||
+            v.sku ||
+            "Variant";
+          const bits = [label];
+          if (v.price != null) {
+            bits.push(formatPriceValue(v.price, cur || v.currency || ""));
+          }
+          if (v.in_stock === false) bits.push("Out of stock");
+          else if (v.in_stock === true) bits.push("In stock");
+          lines.push(`- ${bits.join(" — ")}`);
+        }
+      } else if (limit > 0 && variants.length > limit) {
+        for (const v of variants.slice(0, limit)) {
+          const label =
+            [v.color, v.size].filter(Boolean).join(" / ") ||
+            v.sku ||
+            "Variant";
+          const bits = [label];
+          if (v.price != null) {
+            bits.push(formatPriceValue(v.price, cur || v.currency || ""));
+          }
+          if (v.in_stock === false) bits.push("Out of stock");
+          else if (v.in_stock === true) bits.push("In stock");
+          lines.push(`- ${bits.join(" — ")}`);
+        }
+        lines.push(`- …and ${variants.length - limit} more`);
+      }
+    } else {
+      const variantLines = [];
+      for (const v of variants.slice(0, 40)) {
+        const label =
+          [v.color, v.size].filter(Boolean).join(" / ") ||
+          v.sku ||
+          "Variant";
+        const bits = [label];
+        if (v.price != null) {
+          bits.push(formatPriceValue(v.price, cur || v.currency || ""));
+        }
+        if (
+          v.original_price != null &&
+          v.price != null &&
+          v.original_price > v.price
+        ) {
+          bits.push(
+            `(was ${formatPriceValue(v.original_price, cur || v.currency || "")})`,
+          );
+        }
+        if (v.sku) bits.push(`SKU: ${v.sku}`);
+        if (v.in_stock === false) bits.push("Out of stock");
+        else if (v.in_stock === true) bits.push("In stock");
+        variantLines.push(`- ${bits.join(" — ")}`);
+      }
+      if (variantLines.length) {
+        lines.push("\n## Variants");
+        lines.push(variantLines.join("\n"));
+      }
     }
   }
 
@@ -727,11 +786,56 @@ function productToMarkdown({
 }
 
 /**
+ * Reuse Shopify cents heuristic from variant path (integer >= 1000 → /100).
+ * Applied to top-level price fields so Original price is not ₹99900.
+ */
+function normalizeShopifyCentsFields(attrs = {}) {
+  const out = { ...attrs };
+  const looksCents = (v) =>
+    v != null && /^\d+$/.test(String(v).trim()) && Number(v) >= 1000;
+
+  // Prefer evidence from variants when present
+  const sample =
+    Array.isArray(out.variants) && out.variants[0]
+      ? out.variants[0].price
+      : out.price;
+  // If variant prices are already major units (~699) but original is 99900, fix original only
+  const originalLooksCents = looksCents(out.original_price);
+  const priceLooksMajor =
+    out.price != null && Number(out.price) > 0 && Number(out.price) < 1000;
+
+  for (const key of ["price", "original_price", "price_min", "price_max"]) {
+    if (out[key] == null) continue;
+    if (key === "original_price" && originalLooksCents && priceLooksMajor) {
+      out[key] = parseMoney(out[key], { shopifyCents: true });
+      continue;
+    }
+    if (looksCents(out[key]) && (looksCents(sample) || key === "original_price")) {
+      // Only force cents when value itself looks like cents
+      if (looksCents(out[key])) {
+        const normalized = parseMoney(out[key], { shopifyCents: true });
+        if (normalized != null) out[key] = normalized;
+      }
+    }
+  }
+
+  if (
+    out.original_price != null &&
+    out.price != null &&
+    out.original_price <= out.price
+  ) {
+    delete out.original_price;
+  }
+  return out;
+}
+
+/**
  * Product extraction: JSON-LD/DOM attributes + always-appended cleaned page body.
  * FAQ / reviews / related stay out of primary (residual / secondary FAQ own them).
  * Variant cascade: HTML → .json → .js → JSON-LD/DOM.
  */
 async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
+  const cleanupEnabled = isPdpRagCleanupEnabled();
   const fromLd = extractProductFromJsonLd(jsonLdBlocks);
   const fromDom = fromLd?.confidence >= 0.85 ? null : extractProductFromDom(html, url);
   const domPrices = extractProductPricesFromDom(html);
@@ -749,7 +853,7 @@ async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
   };
 
   // Prefer rich Shopify/cascade variants; page-level sale price still from priceAttrs
-  const merged = {
+  let merged = {
     entity_name: fromLd?.entity_name || fromDom?.entity_name || null,
     description: fromLd?.description || fromDom?.description || "",
     attributes: unionAttrs(variantAttrs, baseAttrs),
@@ -757,10 +861,30 @@ async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
     source: fromLd?.source || fromDom?.source || "none",
   };
 
-  const { markdown: bodyMarkdown, source: bodySource } = extractCleanProductBody(
-    html,
-    url,
-  );
+  // Cents normalization always safe for Shopify-style integers (does not change
+  // already-normalized variant cascade prices).
+  merged.attributes = normalizeShopifyCentsFields(merged.attributes);
+
+  const { markdown: rawBodyMarkdown, source: bodySource } =
+    extractCleanProductBody(html, url, { preferTightBody: cleanupEnabled });
+
+  const bodyChars = rawBodyMarkdown ? rawBodyMarkdown.length : 0;
+  let bodyMarkdown = rawBodyMarkdown || "";
+  let cleanupStats = null;
+  let usedUncleanedBodyFallback = false;
+
+  if (cleanupEnabled && bodyMarkdown) {
+    const cleaned = sanitizeProductMarkdown(bodyMarkdown, { dedupe: true });
+    cleanupStats = cleaned.stats;
+    const minChars = getPdpCleanBodyMinChars();
+    if (cleaned.text.length >= minChars) {
+      bodyMarkdown = cleaned.text;
+    } else {
+      usedUncleanedBodyFallback = true;
+      // keep rawBodyMarkdown
+      bodyMarkdown = rawBodyMarkdown;
+    }
+  }
 
   const shortCovered =
     bodyMarkdown &&
@@ -773,6 +897,7 @@ async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
     attributes: merged.attributes,
     url,
     includeShortDescription: Boolean(merged.description) && !shortCovered,
+    compactVariants: cleanupEnabled,
   });
 
   // Always append cleaned body when available (not only when shell is thin)
@@ -794,6 +919,31 @@ async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
           .trim(),
       );
     }
+  }
+
+  if (cleanupEnabled) {
+    const fullClean = sanitizeProductMarkdown(content, { dedupe: true });
+    // Never destroy structured shell if sanitizer over-reaches
+    if (fullClean.text.length >= Math.min(80, content.length * 0.4)) {
+      content = fullClean.text;
+      cleanupStats = {
+        ...(cleanupStats || {}),
+        ...fullClean.stats,
+        usedUncleanedBodyFallback,
+      };
+    }
+    console.log("[pdpCleanup:trace]", {
+      url,
+      enabled: true,
+      bodyChars,
+      cleanedBodyChars: usedUncleanedBodyFallback
+        ? bodyChars
+        : bodyMarkdown.length,
+      usedUncleanedBodyFallback,
+      contentWords: content.split(/\s+/).filter(Boolean).length,
+      finalMarkdownChars: content.length,
+      ...(cleanupStats || {}),
+    });
   }
 
   const sources = [merged.source];
@@ -848,4 +998,6 @@ module.exports = {
   descriptionCoveredByBody,
   collectCanonicalProductAttrs,
   unionAttrs,
+  productToMarkdown,
+  normalizeShopifyCentsFields,
 };

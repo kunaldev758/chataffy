@@ -16,6 +16,8 @@ const { resolveProductId } = require("./productId");
 const {
   decodeCloudflareEmailsInHtml,
 } = require("../../utils/cloudflareEmail");
+const { isPdpRagCleanupEnabled } = require("./pdpCleanupConfig");
+const { isLowValueResidual } = require("./sanitizeProductMarkdown");
 
 /**
  * Build a section descriptor for multi-entity indexing of one URL.
@@ -605,6 +607,19 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
 
     for (const sec of residual.sections || []) {
       if (!sec.content || sec.content.length < 40) continue;
+      // PDP-only: skip low-value general residual (related rails / CSS / image spam)
+      if (
+        isPdp &&
+        isPdpRagCleanupEnabled() &&
+        sec.entity_type === "general" &&
+        isLowValueResidual(sec)
+      ) {
+        if (residualStats) {
+          residualStats.skippedLowValue =
+            (residualStats.skippedLowValue || 0) + 1;
+        }
+        continue;
+      }
       sections.push(
         buildSection({
           pageType: sec.pageType,

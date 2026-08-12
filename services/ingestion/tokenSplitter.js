@@ -48,8 +48,93 @@ function getTrailingOverlap(chunkText, overlapTokens) {
 }
 
 /**
+ * Hard-split a single oversized string by character windows until each piece
+ * is within maxTokens. Used when one minified line (e.g. Shopify JSON) cannot
+ * be split on newlines.
+ */
+function hardSplitByTokens(text, maxTokens) {
+  const raw = String(text || "");
+  if (!raw) return [];
+  if (countTokens(raw) <= maxTokens) return [raw];
+
+  const pieces = [];
+  // Start from a conservative char window (~2.5 chars/token for dense JSON).
+  let windowChars = Math.max(64, Math.floor(maxTokens * 2.5));
+  let start = 0;
+  while (start < raw.length) {
+    let end = Math.min(raw.length, start + windowChars);
+    let slice = raw.slice(start, end);
+    let tokens = countTokens(slice);
+    // Shrink quickly if over budget (avoid many tiny encode steps).
+    while (tokens > maxTokens && end > start + 16) {
+      const ratio = maxTokens / tokens;
+      const nextLen = Math.max(16, Math.floor((end - start) * Math.min(0.85, ratio * 0.95)));
+      end = start + nextLen;
+      slice = raw.slice(start, end);
+      tokens = countTokens(slice);
+    }
+    if (!slice) {
+      slice = raw.slice(start, start + 1);
+      end = start + 1;
+    }
+    pieces.push(slice);
+    start = end;
+  }
+  return pieces.filter(Boolean);
+}
+
+/**
+ * Append text to the current chunk, hard-splitting when a single piece exceeds maxTokens.
+ */
+function appendWithinTokenBudget({
+  chunks,
+  currentChunk,
+  currentTokens,
+  piece,
+  maxTokens,
+  overlapTokens,
+}) {
+  let chunk = currentChunk;
+  let tokens = currentTokens;
+  const pieceTokens = countTokens(piece);
+
+  if (pieceTokens > maxTokens) {
+    if (chunk.trim()) {
+      chunks.push(chunk.trim());
+      chunk = getTrailingOverlap(chunk, overlapTokens);
+      tokens = countTokens(chunk);
+    }
+    for (const part of hardSplitByTokens(piece, maxTokens)) {
+      if (chunk.trim() && countTokens(chunk + part) > maxTokens) {
+        chunks.push(chunk.trim());
+        chunk = getTrailingOverlap(chunk, overlapTokens);
+      }
+      chunk = (chunk || "") + part;
+      if (countTokens(chunk) > maxTokens) {
+        chunks.push(chunk.trim());
+        chunk = getTrailingOverlap(chunk, overlapTokens);
+      }
+    }
+    return { currentChunk: chunk, currentTokens: countTokens(chunk) };
+  }
+
+  if (tokens + pieceTokens > maxTokens && chunk.trim()) {
+    const overlap = getTrailingOverlap(chunk, overlapTokens);
+    chunks.push(chunk.trim());
+    chunk = (overlap ? overlap : "") + piece;
+    tokens = countTokens(chunk);
+  } else {
+    chunk += piece;
+    tokens += pieceTokens;
+  }
+  return { currentChunk: chunk, currentTokens: tokens };
+}
+
+/**
  * Splits text into chunks by token count using cl100k_base tokenizer.
  * Respects paragraph boundaries and applies sliding window token overlap.
+ * Oversized single lines (minified JSON, etc.) are hard-split so no chunk
+ * exceeds maxTokens — this prevents OpenAI embedding 8192-token failures.
  *
  * @param {string} text          - Input text to split
  * @param {number} maxTokens     - Maximum tokens per chunk
@@ -82,36 +167,93 @@ function splitByTokens(text, maxTokens, overlapTokens = 0) {
       }
       const lines = para.split(/\n/);
       for (const line of lines) {
-        const lineTokens = countTokens(line);
-        if (currentTokens + lineTokens > maxTokens && currentChunk.trim()) {
-          const overlap = getTrailingOverlap(currentChunk, overlapTokens);
-          chunks.push(currentChunk.trim());
-          currentChunk = (overlap ? overlap : "") + line + "\n";
-          currentTokens = countTokens(currentChunk);
-        } else {
-          currentChunk += line + "\n";
-          currentTokens += lineTokens;
-        }
+        const lineWithNl = line + "\n";
+        const next = appendWithinTokenBudget({
+          chunks,
+          currentChunk,
+          currentTokens,
+          piece: lineWithNl,
+          maxTokens,
+          overlapTokens,
+        });
+        currentChunk = next.currentChunk;
+        currentTokens = next.currentTokens;
       }
       continue;
     }
 
-    if (currentTokens + paraTokens > maxTokens && currentChunk.trim()) {
-      const overlap = getTrailingOverlap(currentChunk, overlapTokens);
-      chunks.push(currentChunk.trim());
-      currentChunk = (overlap ? overlap : "") + para + "\n\n";
-      currentTokens = countTokens(currentChunk);
-    } else {
-      currentChunk += para + "\n\n";
-      currentTokens += paraTokens;
-    }
+    const next = appendWithinTokenBudget({
+      chunks,
+      currentChunk,
+      currentTokens,
+      piece: para + "\n\n",
+      maxTokens,
+      overlapTokens,
+    });
+    currentChunk = next.currentChunk;
+    currentTokens = next.currentTokens;
   }
 
   if (currentChunk.trim()) {
     chunks.push(currentChunk.trim());
   }
 
-  return chunks;
+  // Final safety: never return a chunk above maxTokens
+  const safe = [];
+  for (const c of chunks) {
+    if (countTokens(c) <= maxTokens) {
+      safe.push(c);
+    } else {
+      safe.push(...hardSplitByTokens(c, maxTokens));
+    }
+  }
+  return safe;
+}
+
+/**
+ * Ensure every string is within maxTokens for embedding APIs.
+ * Prefer hard-splitting over truncation. Always-on safety net.
+ *
+ * @param {string[]} texts
+ * @param {number} [maxTokens]
+ * @param {{ oneToOne?: boolean }} [opts] - when true, keep array length (first piece only)
+ * @returns {{ texts: string[], splitCount: number }}
+ */
+function ensureEmbedTokenLimit(texts, maxTokens, opts = {}) {
+  const limit =
+    Number.isFinite(Number(maxTokens)) && Number(maxTokens) > 0
+      ? Number(maxTokens)
+      : Number(process.env.EMBED_MAX_TOKENS) || 8192;
+  // Leave headroom for tokenizer variance / model differences
+  const safeLimit = Math.max(
+    256,
+    Number(process.env.EMBED_SAFE_TOKENS) || Math.min(limit - 392, 7800),
+  );
+  const oneToOne = Boolean(opts.oneToOne);
+
+  const out = [];
+  let splitCount = 0;
+  for (const raw of texts || []) {
+    const text = typeof raw === "string" ? raw : String(raw || "");
+    if (!text) {
+      out.push("");
+      continue;
+    }
+    if (countTokens(text) <= safeLimit) {
+      out.push(text);
+      continue;
+    }
+    splitCount += 1;
+    const parts = hardSplitByTokens(text, safeLimit);
+    if (oneToOne) {
+      out.push(parts[0] || text.slice(0, Math.max(256, safeLimit * 3)));
+    } else if (parts.length) {
+      out.push(...parts);
+    } else {
+      out.push(text.slice(0, safeLimit * 3));
+    }
+  }
+  return { texts: out, splitCount };
 }
 
 /**
@@ -200,5 +342,7 @@ function createParentChildChunks(
 module.exports = {
   countTokens,
   splitByTokens,
+  hardSplitByTokens,
+  ensureEmbedTokenLimit,
   createParentChildChunks,
 };

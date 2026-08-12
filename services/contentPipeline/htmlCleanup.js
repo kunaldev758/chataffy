@@ -327,18 +327,48 @@ function cleanupHtmlDom($, webPageURL, { isHomepage, chromeState } = {}) {
 }
 
 /**
+ * Quality check for preferred PDP body candidates.
+ * Fail-open: unhealthy → caller may use existing broad fallbacks.
+ */
+function isHealthyProductBody(text, htmlSnippet = "") {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (raw.length < 80) return false;
+  const words = raw.split(/\s+/).filter(Boolean).length;
+  if (words < 20) return false;
+
+  const html = String(htmlSnippet || "");
+  const imgCount = (html.match(/<img\b/gi) || []).length;
+  const linkCount = (html.match(/<a\b/gi) || []).length;
+  if (words > 0 && (imgCount + linkCount) / words > 0.45) return false;
+  if (imgCount >= 12 && words < 80) return false;
+
+  if (
+    /your cart is empty|continue shopping|you may also like|skip to content/i.test(
+      raw,
+    ) &&
+    words < 120
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Extract cleaned product page body markdown for PDP primary content.
  * Strips chrome / facets / FAQ / reviews / related; keeps description, specs,
  * materials, care, size guide, shipping/returns when present on the page.
  *
  * @param {string} html
  * @param {string} [pageUrl]
+ * @param {{ preferTightBody?: boolean }} [options]
  * @returns {{ markdown: string, source: string|null }}
  */
-function extractCleanProductBody(html, pageUrl = "") {
+function extractCleanProductBody(html, pageUrl = "", options = {}) {
   if (!html || typeof html !== "string") {
     return { markdown: "", source: null };
   }
+
+  const preferTightBody = Boolean(options.preferTightBody);
 
   try {
     const TurndownService = require("turndown");
@@ -352,6 +382,26 @@ function extractCleanProductBody(html, pageUrl = "") {
     $(
       "[id*='cookie'], [class*='cookie'], [id*='consent'], [class*='consent'], #onetrust-banner-sdk, .cc-window, .popup, .modal, .advertisement, .ad",
     ).remove();
+
+    if (preferTightBody) {
+      $(
+        [
+          "[class*='cart-drawer']",
+          "[id*='cart-drawer']",
+          "[class*='cart-notification']",
+          "[class*='sticky-atc']",
+          "[class*='sticky-add']",
+          "[class*='related-product']",
+          "[class*='product-recommendations']",
+          "[class*='recommend']",
+          ".complementary-products",
+          "cart-drawer",
+          "cart-notification",
+        ].join(", "),
+      ).remove();
+      // Images are visual noise for semantic RAG; drop from PDP body.
+      $("img").remove();
+    }
 
     // Absolute-ize links for RAG
     if (pageUrl) {
@@ -438,12 +488,23 @@ function extractCleanProductBody(html, pageUrl = "") {
     };
 
     let { bestHtml, bestSource, bestLen } = pickBest(preferredSelectors);
-    if (bestLen < 120) {
-      const fallback = pickBest(fallbackSelectors);
-      if (fallback.bestLen > bestLen) {
-        bestHtml = fallback.bestHtml;
-        bestSource = fallback.bestSource;
-        bestLen = fallback.bestLen;
+    const preferredText = bestHtml
+      ? cheerio.load(bestHtml).text().replace(/\s+/g, " ").trim()
+      : "";
+    const preferredHealthy =
+      preferTightBody &&
+      bestLen >= 120 &&
+      isHealthyProductBody(preferredText, bestHtml);
+
+    // When cleanup is on and preferred body is healthy, do NOT fall back to main/body.
+    if (!preferTightBody || !preferredHealthy) {
+      if (bestLen < 120 || (preferTightBody && !preferredHealthy)) {
+        const fallback = pickBest(fallbackSelectors);
+        if (fallback.bestLen > bestLen) {
+          bestHtml = fallback.bestHtml;
+          bestSource = fallback.bestSource;
+          bestLen = fallback.bestLen;
+        }
       }
     }
 
@@ -482,4 +543,5 @@ module.exports = {
   enrichFooterHtml,
   cleanupHtmlDom,
   extractCleanProductBody,
+  isHealthyProductBody,
 };
