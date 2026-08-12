@@ -1222,17 +1222,31 @@ async function runParallelRetrainOverlap(opts) {
           seenCanonicalKeys: retrainCanonicalKeys,
         });
         if (canonCheck.isDuplicate) {
+          const skipReason = `canonical_duplicate:${canonCheck.reason}`;
           await markUrlSkipped(
             url,
             userId,
             agentId,
-            `canonical_duplicate:${canonCheck.reason}`,
+            skipReason,
             {
               canonicalUrl: canonicalUrl || null,
               language: language || "en",
               pageType: pageType || "generic",
             },
           );
+
+          // Keep retraining canonical duplicates consistent with initial training:
+          // they must create/update a TrainingModel row with trainingStatus=2
+          // so the UI shows them under "Failed".
+          await upsertSkippedTrainingRow({
+            TrainingModel,
+            userId,
+            agentId,
+            url,
+            reason: skipReason,
+            title: title || url,
+            duplicateOf: canonCheck.duplicateOf || canonicalUrl || null,
+          });
           return { skip: true };
         }
 

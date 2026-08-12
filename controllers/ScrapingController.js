@@ -89,6 +89,18 @@ async bulkInsertUrls(userId,agentId, urls) {
     existingCount: result.matchedCount || 0,
     durationSeconds: Number(duration),
   });
+  // Persist manual additions into the same discovery inventory used for
+  // "Total Web Pages" (onboardingExtractedUrls).
+  //
+  // Initial onboarding inventory is already persisted during onboarding.
+  // This step only extends the inventory for any web pages added later.
+  if (Array.isArray(urls) && urls.length > 0) {
+    await Agent.updateOne(
+      { _id: agentId },
+      { $addToSet: { onboardingExtractedUrls: { $each: urls } } },
+    );
+  }
+
   return result;
 }
 
@@ -1367,6 +1379,8 @@ async bulkInsertUrls(userId,agentId, urls) {
     const TrainingModel = await PlanService.getTrainingModel(userId);
     const base = { userId, agentId, type: 0 };
 
+    const { countWebPageInventory } = require("../utils/agentPageCounters");
+
     const completedClause = {
       $or: [{ trainingStatus: 1 }, { trainingStatus: { $exists: false } }],
     };
@@ -1375,7 +1389,7 @@ async bulkInsertUrls(userId,agentId, urls) {
       TrainingModel.countDocuments({ ...base, ...completedClause }),
       TrainingModel.countDocuments({ ...base, trainingStatus: 2 }),
       TrainingModel.countDocuments({ ...base, trainingStatus: 0 }),
-      TrainingModel.countDocuments(base),
+      countWebPageInventory(agentId),
     ]);
 
     return { total, synced, failed, pending };
