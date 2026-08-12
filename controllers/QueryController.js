@@ -65,6 +65,9 @@ const {
   runMultiEntityRetrieval,
 } = require("../services/retrieval/multiEntityRetrieval");
 const {
+  buildControlledCatalogContext,
+} = require("../services/retrieval/productCatalogContext");
+const {
   rerankByAttributes,
   logRerankStats,
   filterMatchesBySizes,
@@ -1007,7 +1010,7 @@ class QuestionAnsweringSystem {
         requestedCount,
       });
     } else if (effectiveMode === "list") {
-      context = this.buildInPageListContext(matches, {
+      context = this.buildCatalogListContext(matches, {
         ...contextLimits,
         requestedCount,
       });
@@ -1499,14 +1502,32 @@ class QuestionAnsweringSystem {
     return sized;
   }
 
+  buildCatalogListContext(matches, options = {}) {
+    const controlled = buildControlledCatalogContext(matches, options);
+    if (controlled.context) {
+      return controlled.context;
+    }
+    // Non-product / unstructured list pages: keep prior chunk assembly.
+    return this.buildInPageListContext(matches, options);
+  }
+
   buildCatalogListResult(matches, companyName, requestedCount) {
     const listLimits = getContextLimitsForMode("list");
-    const contextBlocks = this.buildInPageListContext(matches, {
+    const contextBlocks = this.buildCatalogListContext(matches, {
       ...listLimits,
       requestedCount,
     });
     return {
-      context: `The user wants a complete list of items from ${companyName}'s website matching their request. Use ONLY the content below. List EVERY matching item in readable HTML. For each item, show labeled Name and Link fields; include Price only when present in the content below. Price must be the current selling/sale/"Now" amount — never a crossed-out original, Was, MSRP, or compare-at price when a lower current price is also present. If a price is missing, omit the Price field entirely — do not write "Not listed" or any placeholder. Write "Not available" when a Link is absent; never invent a value. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest other sizes unless the user asked for alternatives.\n\n${contextBlocks}`,
+      context: `The user wants a complete list of items from ${companyName}'s website matching their request. Use ONLY the content below.
+
+Product URL policy:
+- MAIN CATALOG: include ONLY products that have a real Product URL in a navigational HTML list with labeled Name, Price (only when present), and Link fields.
+- SUGGESTION-ONLY: products with no Product URL must NOT appear in the main list. You may mention them briefly by name (and price if present) as soft suggestions only.
+- Never write "Link: Not available", "Price: Not listed", or any placeholder. Never invent a URL or price.
+- Price must be the current selling/sale/"Now" amount — never a crossed-out original, Was, MSRP, or compare-at price when a lower current price is also present.
+- Do not say information is unavailable if it appears below. Do not suggest other sizes unless the user asked for alternatives.
+
+${contextBlocks}`,
       matches,
       responseMode: "list",
       requestedCount,
