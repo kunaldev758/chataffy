@@ -1506,7 +1506,7 @@ class QuestionAnsweringSystem {
       requestedCount,
     });
     return {
-      context: `The user wants a complete list of items from ${companyName}'s website matching their request. Use ONLY the content below. List EVERY matching item in readable HTML. For each item, show labeled Name, Price, and Link fields in that order. Price must be the current selling/sale/"Now" amount — never a crossed-out original, Was, MSRP, or compare-at price when a lower current price is also present. Write "Not listed" or "Not available" when a value is absent; never invent a value. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest other sizes unless the user asked for alternatives.\n\n${contextBlocks}`,
+      context: `The user wants a complete list of items from ${companyName}'s website matching their request. Use ONLY the content below. List EVERY matching item in readable HTML. For each item, show labeled Name and Link fields; include Price only when present in the content below. Price must be the current selling/sale/"Now" amount — never a crossed-out original, Was, MSRP, or compare-at price when a lower current price is also present. If a price is missing, omit the Price field entirely — do not write "Not listed" or any placeholder. Write "Not available" when a Link is absent; never invent a value. Do not skip items. Do not say information is unavailable if it appears below. Do not suggest other sizes unless the user asked for alternatives.\n\n${contextBlocks}`,
       matches,
       responseMode: "list",
       requestedCount,
