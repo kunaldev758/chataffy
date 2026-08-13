@@ -100,6 +100,14 @@ const {
   AWAITING_FOLLOW_UP,
 } = require("../services/conversationStateService");
 const Conversation = require("../models/Conversation");
+const {
+  conversationRecallAnswerPrompt,
+  conversationRecallAnswerInstructions,
+} = require("../prompts/conversation-recall-prompt");
+const {
+  fetchRecalledTurn,
+  buildRecallContext,
+} = require("../services/conversationRecallService");
 
 // --- Configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -760,6 +768,60 @@ class QuestionAnsweringSystem {
       answer,
       conversationId,
       isAgentRequest: true,
+    };
+  }
+
+  /**
+   * CONVERSATION_RECALL: fetch the requested ChatMessage turn and answer
+   * from that text only. Does not touch Qdrant, HyDE, or ragState.
+   */
+  async respondToConversationRecall({
+    question,
+    companyName,
+    routing,
+    websiteData,
+    conversationId,
+    userId,
+    agentId,
+  }) {
+    const fetched = await fetchRecalledTurn({
+      conversationId,
+      recall: routing.recall,
+      currentQuestion: question,
+    });
+    const context = buildRecallContext(fetched);
+
+    console.log(
+      `[QueryController] Conversation recall: target=${fetched.target} index=${fetched.requestedIndex} found=${fetched.found} total=${fetched.total}`,
+    );
+
+    const result = await this.generateAnswer(
+      question,
+      context,
+      "",
+      companyName,
+      websiteData,
+      {
+        userLanguage: routing.userLanguage,
+        forcePremium: false,
+        conversationRecall: true,
+        recallMeta: {
+          target: fetched.target,
+          indexType: fetched.indexType,
+          index: fetched.index ?? fetched.requestedIndex,
+          found: fetched.found,
+          total: fetched.total,
+        },
+      },
+    );
+
+    this.logAnswerUsage(userId, agentId, result, conversationId);
+
+    return {
+      success: true,
+      answer: result.answer,
+      conversationId,
+      isAgentRequest: false,
     };
   }
 
@@ -1917,6 +1979,8 @@ ${contextBlocks}`,
       wasExpanded = false,
       forcePremium = false,
       subIntent = null,
+      conversationRecall = false,
+      recallMeta = null,
     } = answerOptions;
 
     const effectiveMode =
@@ -1931,9 +1995,9 @@ ${contextBlocks}`,
 
     const chatModel = selectChatModel({
       responseMode: effectiveMode,
-      retrievalMaxScore,
-      wasExpanded,
-      forcePremium,
+      retrievalMaxScore: conversationRecall ? null : retrievalMaxScore,
+      wasExpanded: conversationRecall ? false : wasExpanded,
+      forcePremium: conversationRecall ? false : forcePremium,
       premiumModel,
       briefModel,
     });
@@ -1942,12 +2006,13 @@ ${contextBlocks}`,
       briefModel,
       premiumModel,
       responseMode: effectiveMode,
-      retrievalMaxScore,
-      wasExpanded,
-      forcePremium,
+      retrievalMaxScore: conversationRecall ? null : retrievalMaxScore,
+      wasExpanded: conversationRecall ? false : wasExpanded,
+      forcePremium: conversationRecall ? false : forcePremium,
     });
 
     const useMediumPrompt =
+      !conversationRecall &&
       effectiveMode === "brief" &&
       (forcePremium ||
         (retrievalMaxScore !== undefined &&
@@ -1956,26 +2021,36 @@ ${contextBlocks}`,
     const promptTier = useMediumPrompt ? "medium" : "compact";
 
     let systemPrompt;
-    if (websiteData && (organisation || websiteData.company_name)) {
-      systemPrompt = buildSystemPrompt(websiteData, organisation, {
-        tier: promptTier,
+    let answerInstructions;
+    if (conversationRecall) {
+      // Recalled transcript only — never the knowledge-base system prompt.
+      systemPrompt = conversationRecallAnswerPrompt({
+        companyName: organisation,
+        userLanguage,
       });
+      answerInstructions = conversationRecallAnswerInstructions(recallMeta);
     } else {
-      systemPrompt = buildFallbackPrompt(organisation, promptTier);
+      if (websiteData && (organisation || websiteData.company_name)) {
+        systemPrompt = buildSystemPrompt(websiteData, organisation, {
+          tier: promptTier,
+        });
+      } else {
+        systemPrompt = buildFallbackPrompt(organisation, promptTier);
+      }
+
+      systemPrompt = appendReplyLanguage(systemPrompt, userLanguage);
+
+      answerInstructions = buildAnswerInstructions(
+        effectiveMode,
+        organisation,
+        {
+          requestedCount,
+          wantsProductUrls,
+          compareEntities: answerOptions.compareEntities || null,
+          multiEntityMode: answerOptions.multiEntityMode || null,
+        },
+      );
     }
-
-    systemPrompt = appendReplyLanguage(systemPrompt, userLanguage);
-
-    const answerInstructions = buildAnswerInstructions(
-      effectiveMode,
-      organisation,
-      {
-        requestedCount,
-        wantsProductUrls,
-        compareEntities: answerOptions.compareEntities || null,
-        multiEntityMode: answerOptions.multiEntityMode || null,
-      },
-    );
 
     const userPrompt = `Context:
 ---
@@ -1999,11 +2074,13 @@ ${answerInstructions}`;
 
     try {
       // Determine dynamic max_tokens based on query type
-      const dynamicMaxTokens = this.determineMaxTokens(
-        question,
-        effectiveMode,
-        subIntent,
-      );
+      const dynamicMaxTokens = conversationRecall
+        ? 250
+        : this.determineMaxTokens(
+            question,
+            effectiveMode,
+            subIntent,
+          );
 
       // Log when dynamic token limit is applied (only if different from default)
       if (dynamicMaxTokens > 200) {
@@ -2815,6 +2892,7 @@ ${answerInstructions}`;
         this.isCompanyIdentityQuestion(normalizedQuestion, companyName);
       if (
         isIdentityRequest &&
+        routing.route !== ROUTES.CONVERSATION_RECALL &&
         (routing.route !== ROUTES.SEMANTIC_RAG || !routing.rewrittenQuery)
       ) {
         if (routing.route !== ROUTES.SEMANTIC_RAG) {
@@ -2842,7 +2920,7 @@ ${answerInstructions}`;
       }
 
       console.log(
-        `[QueryController] Route: ${routing.route} | subIntent: ${routing.subIntent} | multiEntity: ${routing.multiEntityMode || "none"} | rawEntities: [${(routing.rawEntities || []).join(", ")}] | userLang: ${routing.userLanguage} | confidence: ${routing.confidence} | followUp: ${routing.followUp} | needsRewrite: ${routing.needsRewrite} | rewriteReason: ${routing.rewriteReason || "none"} | lexicalTerms: [${(routing.lexicalTerms || []).join(", ")}] | constraints: [${(routing.constraints || []).map((c) => `${c.field}${c.operator === "eq" ? "=" : ":" + c.operator + ":"}${c.value}@${c.confidence}`).join(", ")}] | source: ${routing.source}`,
+        `[QueryController] Route: ${routing.route} | subIntent: ${routing.subIntent} | recall: ${routing.recall ? `${routing.recall.target}:${routing.recall.indexType}:${routing.recall.index ?? "last"}` : "none"} | multiEntity: ${routing.multiEntityMode || "none"} | rawEntities: [${(routing.rawEntities || []).join(", ")}] | userLang: ${routing.userLanguage} | confidence: ${routing.confidence} | followUp: ${routing.followUp} | needsRewrite: ${routing.needsRewrite} | rewriteReason: ${routing.rewriteReason || "none"} | lexicalTerms: [${(routing.lexicalTerms || []).join(", ")}] | constraints: [${(routing.constraints || []).map((c) => `${c.field}${c.operator === "eq" ? "=" : ":" + c.operator + ":"}${c.value}@${c.confidence}`).join(", ")}] | source: ${routing.source}`,
       );
 
       const langOpts = { userLanguage: routing.userLanguage };
@@ -2905,6 +2983,19 @@ ${answerInstructions}`;
             clear: true,
           });
           return result;
+        });
+      }
+
+      // Quote a past chat turn. Skip RAG / rewrite / ragState updates.
+      if (routing.route === ROUTES.CONVERSATION_RECALL) {
+        return await this.respondToConversationRecall({
+          question,
+          companyName,
+          routing,
+          websiteData,
+          conversationId,
+          userId,
+          agentId,
         });
       }
 
