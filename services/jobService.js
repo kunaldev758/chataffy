@@ -650,6 +650,13 @@ new Worker(
       stoppedForStorageLimit =
         stoppedForStorageLimit || !!pipelineResult.stoppedForStorageLimit;
 
+      if (pipelineResult.stoppedForDelete) {
+        console.log(
+          `[urlProcessingQueue] agent ${agentId} deleted — aborting remaining job work`,
+        );
+        return;
+      }
+
       if (pipelineResult.anyTrainFailed) {
         await Agent.updateOne(
           { _id: agentId },
@@ -1050,6 +1057,13 @@ new Worker(
 
       const successCount = retrainResult.successCount || 0;
       const failCount = retrainResult.failCount || 0;
+
+      if (retrainResult.stoppedForDelete) {
+        console.log(
+          `[retrainTrainingData] agent ${agentId} deleted — aborting remaining job work`,
+        );
+        return;
+      }
 
       await Agent.updateOne(
         { _id: agentId },

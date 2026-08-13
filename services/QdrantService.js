@@ -20,6 +20,19 @@ const {
 } = require("../utils/searchTerms");
 const { encodeSparseVector } = require("./sparseEncoder");
 
+function isMissingCollectionError(error) {
+  const status = error?.status;
+  const message = String(
+    error?.data?.status?.error || error?.message || error || "",
+  );
+  return (
+    status === 404 ||
+    /not found/i.test(message) ||
+    /doesn't exist/i.test(message) ||
+    /does not exist/i.test(message)
+  );
+}
+
 const DENSE_VECTOR_NAME = "dense";
 const SPARSE_VECTOR_NAME = "sparse";
 const SPARSE_VECTOR_MODIFIER = "idf";
@@ -594,6 +607,12 @@ class QdrantVectorStoreManager {
       // console.log(`Successfully upserted ${totalUpserted} vectors total.`);
       // return { success: true, vectorCount: totalUpserted };
     } catch (error) {
+      if (isMissingCollectionError(error)) {
+        console.log(
+          `[QdrantService] skip upsert — collection "${this.collectionName}" no longer exists`,
+        );
+        return { success: false, error: "Agent deleted", failedUrls: [] };
+      }
       console.error("Error upserting documents to Qdrant:", error);
       return { success: false, error: error.message,failedUrls: [] };
     }
@@ -1029,6 +1048,9 @@ class QdrantVectorStoreManager {
           : result?.result?.status,
       };
     } catch (error) {
+      if (isMissingCollectionError(error)) {
+        return { success: false, error: "Agent deleted" };
+      }
       console.error("Error deleting points by fields:", error);
       return { success: false, error: error.message || error };
     }

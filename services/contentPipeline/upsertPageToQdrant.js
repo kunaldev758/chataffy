@@ -37,7 +37,7 @@ async function upsertPageToQdrant({
 
   const deleteResult = await vectorStore.deleteByFields(deleteFilter);
 
-  if (!deleteResult.success) {
+  if (!deleteResult.success && deleteResult.error !== "Agent deleted") {
     console.warn(
       `[contentPipeline] deleteByFields warning for ${url}: ${deleteResult.error}`,
     );

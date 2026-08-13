@@ -1,5 +1,6 @@
 const QdrantVectorStoreManager = require("../QdrantService");
 const Url = require("../../models/Url");
+const Agent = require("../../models/Agent");
 const { normalizeToCommonSchema, hashContent } = require("./normalizeSchema");
 const { upsertPageToQdrant } = require("./upsertPageToQdrant");
 const { processPageForIngestion } = require("../ingestionService");
@@ -120,6 +121,36 @@ async function processPageDocuments(
   let estimatedCost = null;
 
   const docTotal = documents.length;
+
+  if (agentId) {
+    const agentExists = await Agent.exists({ _id: agentId });
+    if (!agentExists) {
+      console.log(
+        `[contentPipeline] agent ${agentId} deleted — skipping collection upsert`,
+      );
+      const empty = {
+        success: false,
+        error: "Agent deleted",
+        totalChunks: 0,
+        chunkCountPerUrl: {},
+        failedUrls: [],
+        skippedUrls: [],
+        resultsByUrl: {},
+        storageMB: 0,
+        estimatedCost: null,
+      };
+      for (const doc of documents || []) {
+        const url = resolveDocUrl(doc, userId, agentId);
+        empty.failedUrls.push(url);
+        empty.resultsByUrl[url] = {
+          success: false,
+          error: "Agent deleted",
+        };
+      }
+      return empty;
+    }
+  }
+
   const vectorStore = new QdrantVectorStoreManager(qdrantIndexName);
   await vectorStore.createCollection();
 
@@ -448,8 +479,15 @@ async function processPageDocuments(
     }
   }
 
+  const agentDeleted =
+    failedUrls.length > 0 &&
+    failedUrls.every(
+      (url) => resultsByUrl[url]?.error === "Agent deleted",
+    );
+
   return {
     success: failedUrls.length === 0,
+    error: agentDeleted ? "Agent deleted" : undefined,
     totalChunks,
     chunkCountPerUrl,
     failedUrls,

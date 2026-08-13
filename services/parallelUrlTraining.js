@@ -34,6 +34,59 @@ const DEFAULT_EMBED_CONCURRENCY = Math.max(
   1,
   parseInt(process.env.TRAINING_EMBED_CONCURRENCY || "3", 10) || 3,
 );
+const AGENT_DELETE_CHECK_INTERVAL_MS = 2000;
+
+/**
+ * In-memory abort flag for website/agent delete mid-training.
+ * The scrape hot path only reads a boolean; Mongo is polled at most every 2s.
+ * Write paths can pass { force: true } so we do not recreate rows after delete.
+ */
+function createDeletedAgentStop(agentId, logLabel = "parallelUrlTraining") {
+  let stoppedForDelete = false;
+  let lastCheckAt = 0;
+  let pendingCheck = null;
+
+  async function refreshStoppedForDelete({ force = false } = {}) {
+    if (stoppedForDelete) return true;
+    if (!agentId) return false;
+
+    const now = Date.now();
+    if (
+      !force &&
+      lastCheckAt !== 0 &&
+      now - lastCheckAt < AGENT_DELETE_CHECK_INTERVAL_MS
+    ) {
+      return false;
+    }
+
+    if (pendingCheck) return pendingCheck;
+
+    pendingCheck = (async () => {
+      lastCheckAt = Date.now();
+      try {
+        const exists = await Agent.exists({ _id: agentId });
+        if (!exists) {
+          stoppedForDelete = true;
+          console.log(
+            `[${logLabel}] agent ${agentId} deleted — stopping remaining work`,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `[${logLabel}] agent-delete check failed:`,
+          err?.message || err,
+        );
+      } finally {
+        pendingCheck = null;
+      }
+      return stoppedForDelete;
+    })();
+
+    return pendingCheck;
+  }
+
+  return { refreshStoppedForDelete };
+}
 
 function createTrainingOutcomeSummary(total = 0) {
   return {
@@ -183,6 +236,25 @@ async function runParallelScrapeOverlapTrain(opts) {
   let metadataFromHomepage = false;
   let navigationDocQueued = false;
   let stoppedForStorageLimit = false;
+  let stoppedForDelete = false;
+  const deletedAgentStop = createDeletedAgentStop(
+    agentId,
+    "parallelUrlTraining",
+  );
+
+  async function shouldStopRemainingWork() {
+    if (stoppedForStorageLimit || stoppedForDelete) return true;
+    stoppedForDelete = await deletedAgentStop.refreshStoppedForDelete();
+    return stoppedForDelete;
+  }
+
+  async function shouldStopForDeletedAgent({ force = false } = {}) {
+    if (stoppedForDelete) return true;
+    stoppedForDelete = await deletedAgentStop.refreshStoppedForDelete({
+      force,
+    });
+    return stoppedForDelete;
+  }
   let scrapeCompleted = 0;
   let trainQueued = 0;
   let trainCompleted = 0;
@@ -210,6 +282,7 @@ async function runParallelScrapeOverlapTrain(opts) {
 
   const bumpScrapeProgress = async () => {
     scrapeCompleted += 1;
+    if (stoppedForDelete) return;
     const now = Date.now();
     if (
       now - lastProgressEmitTime >= PROGRESS_EMIT_INTERVAL ||
@@ -226,6 +299,9 @@ async function runParallelScrapeOverlapTrain(opts) {
   };
 
   const finalizeTrainedDoc = async (doc, result) => {
+    if (stoppedForDelete) return;
+    if (await shouldStopForDeletedAgent({ force: true })) return;
+
     // Synthetic navigation vectors support PAGE_LINKS retrieval but are not
     // crawled pages — skip TrainingList / Url lifecycle updates.
     if (doc.metadata?.synthetic_navigation) {
@@ -411,7 +487,12 @@ async function runParallelScrapeOverlapTrain(opts) {
     );
     const trainPromise = (async () => {
       await trainLimiter.acquire();
+      let trainStarted = false;
       try {
+        if (stoppedForDelete) return;
+        if (await shouldStopForDeletedAgent()) return;
+
+        trainStarted = true;
         console.log(
           `[parallelUrlTraining] train start active<=${embedConcurrency} completed=${trainCompleted}/${trainQueued} url=${doc.originalUrl}`,
         );
@@ -459,6 +540,9 @@ async function runParallelScrapeOverlapTrain(opts) {
         );
         await finalizeTrainedDoc(doc, result);
       } catch (trainErr) {
+        if (stoppedForDelete || (await shouldStopForDeletedAgent({ force: true }))) {
+          return;
+        }
         anyTrainFailed = true;
         console.error(
           `[parallelUrlTraining] train failed for ${doc.originalUrl}:`,
@@ -486,6 +570,14 @@ async function runParallelScrapeOverlapTrain(opts) {
       } finally {
         trainLimiter.release();
         trainCompleted += 1;
+        if (stoppedForDelete) {
+          console.log(
+            trainStarted
+              ? `[parallelUrlTraining] train aborted agent-deleted completed=${trainCompleted}/${trainQueued} url=${doc.originalUrl}`
+              : `[parallelUrlTraining] train skipped agent-deleted completed=${trainCompleted}/${trainQueued} url=${doc.originalUrl}`,
+          );
+          return;
+        }
         console.log(
           `[parallelUrlTraining] train finished completed=${trainCompleted}/${trainQueued} url=${doc.originalUrl}`,
         );
@@ -523,7 +615,10 @@ async function runParallelScrapeOverlapTrain(opts) {
 
   await mapWithConcurrency(urls, scrapeConcurrency, async (url) => {
     try {
-      if (stoppedForStorageLimit) {
+      if (stoppedForStorageLimit || stoppedForDelete) {
+        return;
+      }
+      if (await shouldStopRemainingWork()) {
         return;
       }
 
@@ -565,7 +660,10 @@ async function runParallelScrapeOverlapTrain(opts) {
         `[parallelUrlTraining] scrape done url=${url} html_bytes=${Buffer.byteLength(sourceCode || "", "utf8")}`,
       );
 
-      if (stoppedForStorageLimit) {
+      if (stoppedForStorageLimit || stoppedForDelete) {
+        return;
+      }
+      if (await shouldStopRemainingWork()) {
         return;
       }
 
@@ -581,6 +679,9 @@ async function runParallelScrapeOverlapTrain(opts) {
       );
 
       if (!processResult?.content) {
+        if (stoppedForDelete || (await shouldStopForDeletedAgent({ force: true }))) {
+          return;
+        }
         const failedRow = await TrainingModel.findOneAndUpdate(
           { userId, agentId, type: 0, "webPage.url": url },
           {
@@ -643,7 +744,8 @@ async function runParallelScrapeOverlapTrain(opts) {
       } = processResult;
 
       const docOrSkip = await withSharedLock(async () => {
-        if (stoppedForStorageLimit) return { skip: true };
+        if (stoppedForStorageLimit || stoppedForDelete) return { skip: true };
+        if (await shouldStopRemainingWork()) return { skip: true };
 
         const canonCheck = await checkCanonicalDuplicate({
           userId,
@@ -792,6 +894,8 @@ async function runParallelScrapeOverlapTrain(opts) {
         };
       });
 
+      if (stoppedForDelete) return;
+
       if (!docOrSkip?.skip && docOrSkip?.doc) {
         scrapedDocs.push(docOrSkip.doc);
         enqueueTrain(docOrSkip.doc);
@@ -801,6 +905,9 @@ async function runParallelScrapeOverlapTrain(opts) {
         enqueueTrain(docOrSkip.navigationDoc);
       }
     } catch (error) {
+      if (stoppedForDelete || (await shouldStopForDeletedAgent({ force: true }))) {
+        return;
+      }
       const failedRow = await TrainingModel.findOneAndUpdate(
         { userId, agentId, "webPage.url": url },
         {
@@ -844,7 +951,7 @@ async function runParallelScrapeOverlapTrain(opts) {
 
   await Promise.all(trainPromises);
 
-  if (!stoppedForStorageLimit) {
+  if (!stoppedForStorageLimit && !stoppedForDelete) {
     await emitScrapingProgress(totalUrlsCount, totalUrlsCount, true);
     if (trainQueued > 0) {
       await emitTrainingProgress({
@@ -857,7 +964,7 @@ async function runParallelScrapeOverlapTrain(opts) {
   }
 
   console.log(
-    `[parallelUrlTraining] summary scraped=${scrapedDocs.length}/${totalUrlsCount} queued=${trainQueued} completed=${trainCompleted} failed=${anyTrainFailed} stopped=${stoppedForStorageLimit} trained=${outcomeSummary.trained} skipped=${outcomeSummary.skipped} unchanged=${outcomeSummary.unchanged}`,
+    `[parallelUrlTraining] summary scraped=${scrapedDocs.length}/${totalUrlsCount} queued=${trainQueued} completed=${trainCompleted} failed=${anyTrainFailed} stopped=${stoppedForStorageLimit} deleted=${stoppedForDelete} trained=${outcomeSummary.trained} skipped=${outcomeSummary.skipped} unchanged=${outcomeSummary.unchanged}`,
   );
 
   return {
@@ -866,6 +973,7 @@ async function runParallelScrapeOverlapTrain(opts) {
     trainCompleted,
     anyTrainFailed,
     stoppedForStorageLimit,
+    stoppedForDelete,
     trainingSummary: outcomeSummary,
   };
 }
@@ -905,7 +1013,17 @@ async function runParallelRetrainOverlap(opts) {
   let successCount = 0;
   let failCount = 0;
   let lastProgressEmitTime = 0;
+  let stoppedForDelete = false;
+  const deletedAgentStop = createDeletedAgentStop(agentId, "parallelRetrain");
   const PROGRESS_EMIT_INTERVAL = 2000;
+
+  async function shouldStopForDeletedAgent({ force = false } = {}) {
+    if (stoppedForDelete) return true;
+    stoppedForDelete = await deletedAgentStop.refreshStoppedForDelete({
+      force,
+    });
+    return stoppedForDelete;
+  }
 
   console.log(
     `[parallelRetrain] scrape=${scrapeConcurrency} embed=${embedConcurrency} entries=${totalEntries}`,
@@ -951,6 +1069,7 @@ async function runParallelRetrainOverlap(opts) {
 
   const bumpScrapeProgress = async () => {
     scrapeCompleted += 1;
+    if (stoppedForDelete) return;
     const now = Date.now();
     if (
       now - lastProgressEmitTime >= PROGRESS_EMIT_INTERVAL ||
@@ -967,6 +1086,9 @@ async function runParallelRetrainOverlap(opts) {
   };
 
   const finalizeRetrainItem = async (item, result) => {
+    if (stoppedForDelete) return;
+    if (await shouldStopForDeletedAgent({ force: true })) return;
+
     const pageResult = result?.resultsByUrl?.[item.url];
     const skipped = pageResult?.skipped;
     const failed =
@@ -1073,7 +1195,12 @@ async function runParallelRetrainOverlap(opts) {
     );
     const trainPromise = (async () => {
       await trainLimiter.acquire();
+      let trainStarted = false;
       try {
+        if (stoppedForDelete) return;
+        if (await shouldStopForDeletedAgent()) return;
+
+        trainStarted = true;
         console.log(
           `[parallelRetrain] train start active<=${embedConcurrency} completed=${trainCompleted}/${trainQueued} url=${item.url}`,
         );
@@ -1121,6 +1248,9 @@ async function runParallelRetrainOverlap(opts) {
         );
         await finalizeRetrainItem(item, result);
       } catch (trainErr) {
+        if (stoppedForDelete || (await shouldStopForDeletedAgent({ force: true }))) {
+          return;
+        }
         console.error(
           `[parallelRetrain] train failed for ${item.url}:`,
           trainErr,
@@ -1133,6 +1263,14 @@ async function runParallelRetrainOverlap(opts) {
       } finally {
         trainLimiter.release();
         trainCompleted += 1;
+        if (stoppedForDelete) {
+          console.log(
+            trainStarted
+              ? `[parallelRetrain] train aborted agent-deleted completed=${trainCompleted}/${trainQueued} url=${item.url}`
+              : `[parallelRetrain] train skipped agent-deleted completed=${trainCompleted}/${trainQueued} url=${item.url}`,
+          );
+          return;
+        }
         console.log(
           `[parallelRetrain] train finished completed=${trainCompleted}/${trainQueued} url=${item.url}`,
         );
@@ -1153,6 +1291,8 @@ async function runParallelRetrainOverlap(opts) {
     const prevStatus = entry.trainingStatus;
 
     try {
+      if (stoppedForDelete) return;
+      if (await shouldStopForDeletedAgent()) return;
       if (!isScrapableWebUrl(url) || isNonContentPath(url)) {
         console.log(`[parallelRetrain] Skipping non-content URL: ${url}`);
         await markEntryFailed({
@@ -1175,6 +1315,9 @@ async function runParallelRetrainOverlap(opts) {
         `[parallelRetrain] scrape done url=${url} html_bytes=${Buffer.byteLength(rawHtml || "", "utf8")}`,
       );
 
+      if (stoppedForDelete) return;
+      if (await shouldStopForDeletedAgent()) return;
+
       const processResult = await processWebPage(url, rawHtml, chromeCache, {
         userId,
         agentId,
@@ -1185,6 +1328,9 @@ async function runParallelRetrainOverlap(opts) {
       );
 
       if (!processResult?.content) {
+        if (stoppedForDelete || (await shouldStopForDeletedAgent({ force: true }))) {
+          return;
+        }
         await markEntryFailed({
           entry,
           prevStatus,
@@ -1213,6 +1359,9 @@ async function runParallelRetrainOverlap(opts) {
       } = processResult;
 
       const itemOrSkip = await withSharedLock(async () => {
+        if (stoppedForDelete) return { skip: true };
+        if (await shouldStopForDeletedAgent()) return { skip: true };
+
         const canonCheck = await checkCanonicalDuplicate({
           userId,
           agentId,
@@ -1295,10 +1444,15 @@ async function runParallelRetrainOverlap(opts) {
         };
       });
 
+      if (stoppedForDelete) return;
+
       if (!itemOrSkip?.skip && itemOrSkip?.item) {
         enqueueTrain(itemOrSkip.item);
       }
     } catch (err) {
+      if (stoppedForDelete || (await shouldStopForDeletedAgent({ force: true }))) {
+        return;
+      }
       console.error(`[parallelRetrain] Error retraining ${url}:`, err);
       await markEntryFailed({
         entry,
@@ -1312,21 +1466,29 @@ async function runParallelRetrainOverlap(opts) {
 
   await Promise.all(trainPromises);
 
-  await emitScrapingProgress(totalEntries, totalEntries, false);
-  if (trainQueued > 0) {
-    await emitTrainingProgress({
-      trainingProcessed: trainCompleted,
-      trainingTotal: trainQueued,
-      trainingFraction: 1,
-      force: true,
-    });
+  if (!stoppedForDelete) {
+    await emitScrapingProgress(totalEntries, totalEntries, false);
+    if (trainQueued > 0) {
+      await emitTrainingProgress({
+        trainingProcessed: trainCompleted,
+        trainingTotal: trainQueued,
+        trainingFraction: 1,
+        force: true,
+      });
+    }
   }
 
   console.log(
-    `[parallelRetrain] summary entries=${totalEntries} success=${successCount} failed=${failCount} queued=${trainQueued} completed=${trainCompleted}`,
+    `[parallelRetrain] summary entries=${totalEntries} success=${successCount} failed=${failCount} queued=${trainQueued} completed=${trainCompleted} deleted=${stoppedForDelete}`,
   );
 
-  return { successCount, failCount, trainQueued, trainCompleted };
+  return {
+    successCount,
+    failCount,
+    trainQueued,
+    trainCompleted,
+    stoppedForDelete,
+  };
 }
 
 module.exports = {
