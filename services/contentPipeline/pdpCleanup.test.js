@@ -256,13 +256,201 @@ test("isLowValueResidual catches related/CSS/image spam", () => {
 });
 
 test("normalizeShopifyCentsFields fixes original_price 99900 when price is 699", () => {
-  const attrs = normalizeShopifyCentsFields({
-    price: 699,
-    original_price: 99900,
-    currency: "INR",
-  });
+  const attrs = normalizeShopifyCentsFields(
+    {
+      price: 699,
+      original_price: 99900,
+      currency: "INR",
+    },
+    { enabled: true },
+  );
   assert.equal(attrs.price, 699);
   assert.equal(attrs.original_price, 999);
+});
+
+test("normalizeShopifyCentsFields converts 899–1299 cent ranges to dollars", () => {
+  const attrs = normalizeShopifyCentsFields(
+    {
+      price: 899,
+      price_min: 899,
+      price_max: 1299,
+      variants: [
+        { sku: "H1-2MSE-R1OJ-1", price: 899, size: "5-Pack" },
+        { sku: "GA007", price: 1299, size: "10-Pack" },
+      ],
+    },
+    { enabled: true },
+  );
+  assert.equal(attrs.price, 8.99);
+  assert.equal(attrs.price_min, 8.99);
+  assert.equal(attrs.price_max, 12.99);
+  assert.equal(attrs.variants[0].price, 8.99);
+  assert.equal(attrs.variants[1].price, 12.99);
+});
+
+test("normalizeShopifyCentsFields is a no-op when disabled (BigCommerce integer dollars)", () => {
+  const attrs = normalizeShopifyCentsFields({
+    price: 4495,
+    sku: "VGC0028",
+    variants: [{ sku: "VGC0028", price: 4495 }],
+  });
+  assert.equal(attrs.price, 4495);
+  assert.equal(attrs.variants[0].price, 4495);
+
+  const smashed = normalizeShopifyCentsFields(
+    {
+      price: 4495,
+      variants: [{ sku: "VGC0028", price: 4495 }],
+    },
+    { enabled: true },
+  );
+  assert.equal(smashed.price, 44.95);
+});
+
+test("isShopifyStorefront detects Shopify CDN but not BigCommerce", () => {
+  const { isShopifyStorefront } = require("./extractors/productVariants");
+  assert.equal(
+    isShopifyStorefront({
+      url: "https://www.saltsupply.com/products/foo",
+      html: '<img src="https://cdn.shopify.com/s/files/1/x.png">',
+    }),
+    true,
+  );
+  assert.equal(
+    isShopifyStorefront({
+      url: "https://sidelinepower.com/sideline-power-play-clock-with-30-digits-ac-dc/",
+      html: '<img src="https://cdn11.bigcommerce.com/s-xlby0xbgov/products/252/x.jpg">',
+    }),
+    false,
+  );
+  assert.equal(
+    isShopifyStorefront({ variantSource: "shopify_json" }),
+    true,
+  );
+});
+
+test("shopifyRawPricesLookLikeCents treats Ajax integers as cents, dollar strings as dollars", () => {
+  const {
+    shopifyRawPricesLookLikeCents,
+    attrsFromShopifyProduct,
+  } = require("./extractors/productVariants");
+
+  assert.equal(shopifyRawPricesLookLikeCents([899, 1299]), true);
+  assert.equal(shopifyRawPricesLookLikeCents(["8.99", "12.99"]), false);
+  assert.equal(shopifyRawPricesLookLikeCents([50]), false);
+
+  const fromCents = attrsFromShopifyProduct(
+    {
+      vendor: "Salt Supply Co.",
+      options: [{ name: "Quantity" }],
+      variants: [
+        { sku: "H1-2MSE-R1OJ-1", option1: "5-Pack", price: 899 },
+        { sku: "GA007", option1: "10-Pack", price: 1299 },
+      ],
+    },
+    { pricesInCents: true },
+  );
+  assert.equal(fromCents.variants[0].price, 8.99);
+  assert.equal(fromCents.variants[1].price, 12.99);
+
+  const fromDollars = attrsFromShopifyProduct(
+    {
+      vendor: "Salt Supply Co.",
+      options: [{ name: "Quantity" }],
+      variants: [
+        { sku: "H1-2MSE-R1OJ-1", option1: "5-Pack", price: "8.99" },
+        { sku: "GA007", option1: "10-Pack", price: "12.99" },
+      ],
+    },
+    { pricesInCents: false },
+  );
+  assert.equal(fromDollars.variants[0].price, 8.99);
+  assert.equal(fromDollars.variants[1].price, 12.99);
+});
+
+test("collectFromShopify converts theme-embed cent prices under 1000", () => {
+  const { collectFromShopify } = require("./extractors/productVariants");
+  const html = `
+    <!-- Shopify.theme -->
+    <script type="application/json">
+      ${JSON.stringify({
+        id: 1,
+        title: "12g CO2 Cartridges",
+        vendor: "Salt Supply Co.",
+        options: [{ name: "Quantity" }],
+        variants: [
+          {
+            id: 11,
+            sku: "H1-2MSE-R1OJ-1",
+            option1: "5-Pack",
+            price: 899,
+            available: true,
+            inventory_management: "shopify",
+          },
+          {
+            id: 12,
+            sku: "GA007",
+            option1: "10-Pack",
+            price: 1299,
+            available: true,
+            inventory_management: "shopify",
+          },
+        ],
+      })}
+    </script>
+  `;
+  const attrs = collectFromShopify(html, {
+    url: "https://www.saltsupply.com/products/copy-of-copy-of-12g-co2-maintenance-pack",
+  });
+  assert.equal(attrs.variants.length, 2);
+  assert.equal(attrs.variants[0].price, 8.99);
+  assert.equal(attrs.variants[1].price, 12.99);
+});
+
+test("BigCommerce integer Offer.price stays dollars through product markdown path", async () => {
+  const { extractProductContent } = require("./extractors/product");
+  const html = `
+<!doctype html>
+<html>
+  <head>
+    <title>Sideline Power Play Clock with 30″ Digits (AC/DC)</title>
+    <script type="application/ld+json">
+      ${JSON.stringify({
+        "@context": "https://schema.org/",
+        "@type": "Product",
+        name: "Sideline Power Play Clock with 30″ Digits (AC/DC)",
+        sku: "VGC0028",
+        url: "https://sidelinepower.com/sideline-power-play-clock-with-30-digits-ac-dc/",
+        offers: {
+          "@type": "Offer",
+          priceCurrency: "USD",
+          price: "4495",
+          availability: "https://schema.org/InStock",
+        },
+      })}
+    </script>
+  </head>
+  <body>
+    <h1>Sideline Power Play Clock with 30″ Digits (AC/DC)</h1>
+    <span class="price">Now: $4,495.00</span>
+    <img src="https://cdn11.bigcommerce.com/s-xlby0xbgov/products/252/x.jpg" />
+  </body>
+</html>`;
+  const result = await extractProductContent({
+    url: "https://sidelinepower.com/sideline-power-play-clock-with-30-digits-ac-dc/",
+    html,
+    jsonLdBlocks: [
+      {
+        "@type": "Product",
+        name: "Sideline Power Play Clock with 30″ Digits (AC/DC)",
+        sku: "VGC0028",
+        offers: { price: "4495", priceCurrency: "USD" },
+      },
+    ],
+  });
+  assert.match(result.content, /\$4,?495(\.00)?/);
+  assert.doesNotMatch(result.content, /\$44\.95/);
+  assert.equal(result.attributes.price, 4495);
 });
 
 test("productToMarkdown compactVariants summarizes instead of dumping 40 lines", () => {

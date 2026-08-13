@@ -3,6 +3,8 @@ const { extractPageMetadata } = require("./extractPageMetadata");
 const { extractGenericMarkdown } = require("./extractGenericMarkdown");
 const {
   detectPageType,
+  schemaHasProduct,
+  schemaHasListing,
 } = require("./detectPageType");
 const { classifyPageTypeLlm } = require("./classifyPageTypeLlm");
 const { applyValidation } = require("./validatePage");
@@ -87,24 +89,22 @@ function isProductDetailUrl(url = "") {
   return /\/(products?|item|sku|dp|pd)\/[^/?#]+/i.test(path);
 }
 
+function urlPathname(url = "") {
+  try {
+    return new URL(url || "", "http://localhost").pathname || "";
+  } catch {
+    return String(url || "");
+  }
+}
+
 /**
- * True for collection / category / catalog / shop index URLs (PLP).
- * Never true for a clear PDP URL — related-product cards on a PDP must not
- * flip the page to listing (that caused Mink Envy PDP → listing extractor).
+ * Path-only PLP signals (collections, category, bare /products, …).
+ * Does NOT use related-product DOM cards — those are ambiguous on BigCommerce PDPs.
  */
-function isListingUrl(url = "", $ = null) {
-  // Explicit product-detail URLs always win over DOM / listing heuristics
-  if (isProductDetailUrl(url)) return false;
+function isListingPathUrl(url = "") {
+  if (!url || isProductDetailUrl(url)) return false;
+  const path = urlPathname(url);
 
-  const path = (() => {
-    try {
-      return new URL(url || "", "http://localhost").pathname || "";
-    } catch {
-      return String(url || "");
-    }
-  })();
-
-  // Collection / category / catalog / shop index (with or without handle)
   if (
     /\/(collections?|category|categories|catalog|all-products|search|browse|brands?|goods)(\/|$)/i.test(
       path,
@@ -112,43 +112,99 @@ function isListingUrl(url = "", $ = null) {
   ) {
     return true;
   }
-
-  // /shop or /store index only (not /shop/something-product-like handled elsewhere)
   if (/\/(shop|store)\/?$/i.test(path)) return true;
-
-  // Bare /products or /products/ with no product handle → product index listing
   if (/\/products?\/?$/i.test(path)) return true;
+  return false;
+}
 
-  // DOM multi-card heuristic only when URL is not a PDP
-  if ($) {
-    const cardCount = $(CARD_SELECTORS).length;
-    if (cardCount >= 2) return true;
-  }
+function domListingCardCount($ = null) {
+  if (!$) return 0;
+  return $(CARD_SELECTORS).length;
+}
+
+/**
+ * True for collection / category / catalog / shop index URLs (PLP).
+ * Optional $ enables multi-card DOM — callers that need ambiguity-aware
+ * behavior should use resolveProductEntityType instead.
+ */
+function isListingUrl(url = "", $ = null) {
+  if (isProductDetailUrl(url)) return false;
+  if (isListingPathUrl(url)) return true;
+  if (domListingCardCount($) >= 2) return true;
   return false;
 }
 
 /**
  * After pageType=product, resolve PDP vs PLP.
- * Clear /products/{handle} URLs always force product (PDP extractor).
- * Collection/catalog URLs or multi-card DOMs force listing (PLP).
+ * Clear URL shapes stay deterministic. Schema Product + related cards on a
+ * flat URL is ambiguous → needsLlm (do not force listing).
+ *
+ * @param {object} detection
+ * @param {string} url
+ * @param {object|null} $
+ * @param {string[]} [schemaTypes]
  */
-function resolveProductEntityType(detection, url, $ = null) {
+function resolveProductEntityType(
+  detection,
+  url,
+  $ = null,
+  schemaTypes = [],
+) {
   if (isProductDetailUrl(url)) {
     return {
       ...detection,
       pageType: "product",
       entity_type: "product",
       reason: `${detection.reason || "rules"}+force_product_url`,
+      deterministic: true,
+      needsLlm: false,
     };
   }
-  if (isListingUrl(url, $)) {
+
+  if (isListingPathUrl(url)) {
     return {
       ...detection,
       pageType: "product",
       entity_type: "listing",
       reason: `${detection.reason || "rules"}+force_listing_url`,
+      deterministic: true,
+      needsLlm: false,
     };
   }
+
+  const multiCards = domListingCardCount($) >= 2;
+  const hasProductSchema = schemaHasProduct(schemaTypes);
+  const hasListingSchema = schemaHasListing(schemaTypes);
+
+  // BigCommerce / custom PDP: schema Product + related-product cards, flat URL.
+  // Not sure → leave product as default and let the page-type LLM decide.
+  if (multiCards && hasProductSchema && !hasListingSchema) {
+    return {
+      ...detection,
+      pageType: "product",
+      entity_type:
+        detection.entity_type === "listing"
+          ? "product"
+          : detection.entity_type || "product",
+      reason: `${detection.reason || "rules"}+pdp_plp_ambiguous_use_llm`,
+      deterministic: false,
+      needsLlm: true,
+      // Pull confidence under RULE_CONFIDENCE_THRESHOLD so LLM is not skipped
+      confidence: Math.min(Number(detection.confidence) || 0, 0.7),
+    };
+  }
+
+  if (multiCards) {
+    return {
+      ...detection,
+      pageType: "product",
+      entity_type: "listing",
+      reason: `${detection.reason || "rules"}+force_listing_dom`,
+      deterministic: true,
+      needsLlm: false,
+    };
+  }
+
   if (detection.entity_type === "listing") {
     return { ...detection, pageType: detection.pageType || "product" };
   }
@@ -221,6 +277,40 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     deterministic: detection.deterministic,
     sources: detection.sources || [],
   });
+
+  // 1b) Soft PDP/PLP resolve BEFORE LLM so schema+related-cards can request LLM
+  if (detection.pageType === "product") {
+    const beforeEntity = {
+      pageType: detection.pageType,
+      entity_type: detection.entity_type,
+      reason: detection.reason,
+      needsLlm: detection.needsLlm,
+      deterministic: detection.deterministic,
+    };
+    detection = resolveProductEntityType(
+      detection,
+      url,
+      $meta,
+      pageMetadata.schemaTypes || [],
+    );
+    logPageTypeTrace("pdp_plp_resolve", url, {
+      before: beforeEntity,
+      after: {
+        pageType: detection.pageType,
+        entity_type: detection.entity_type,
+        reason: detection.reason,
+        needsLlm: detection.needsLlm,
+        deterministic: detection.deterministic,
+      },
+      isProductDetailUrl: isProductDetailUrl(url),
+      isListingPathUrl: isListingPathUrl(url),
+      isListingUrl: isListingUrl(url, $meta),
+      changed:
+        beforeEntity.entity_type !== detection.entity_type ||
+        beforeEntity.needsLlm !== detection.needsLlm ||
+        beforeEntity.deterministic !== detection.deterministic,
+    });
+  }
 
   // 2) LLM only when rules are ambiguous AND page is not deterministic
   let llmResult = null;
@@ -295,25 +385,25 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     });
   }
 
-  // 2b) product pageType → PDP vs PLP entity split
+  // 2b) Clear URL shapes always beat LLM (Shopify /products/handle, /collections/)
   if (detection.pageType === "product") {
-    const beforeEntity = {
-      pageType: detection.pageType,
-      entity_type: detection.entity_type,
-      reason: detection.reason,
-    };
-    detection = resolveProductEntityType(detection, url, $meta);
-    logPageTypeTrace("pdp_plp_resolve", url, {
-      before: beforeEntity,
-      after: {
-        pageType: detection.pageType,
-        entity_type: detection.entity_type,
-        reason: detection.reason,
-      },
-      isProductDetailUrl: isProductDetailUrl(url),
-      isListingUrl: isListingUrl(url, $meta),
-      changed: beforeEntity.entity_type !== detection.entity_type,
-    });
+    if (isProductDetailUrl(url)) {
+      detection = {
+        ...detection,
+        entity_type: "product",
+        deterministic: true,
+        needsLlm: false,
+        reason: `${detection.reason || "rules"}+force_product_url`,
+      };
+    } else if (isListingPathUrl(url)) {
+      detection = {
+        ...detection,
+        entity_type: "listing",
+        deterministic: true,
+        needsLlm: false,
+        reason: `${detection.reason || "rules"}+force_listing_url`,
+      };
+    }
   }
 
   const isListing =
@@ -326,7 +416,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
   let extractBranch = "none";
   if (isListing) {
     extractBranch = "listing";
-    typed = extractListingContent({
+    typed = await extractListingContent({
       url,
       html: decodedSourceCode,
       jsonLdBlocks: pageMetadata.jsonLdBlocks || [],
@@ -461,7 +551,7 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
       beforeValidation.entity_type !== validated.entity_type,
   });
 
-  // Re-assert PDP / PLP after validation (URL rules beat LLM / weak DOM)
+  // Re-assert clear URL PDP / PLP after validation (path rules beat LLM / weak DOM)
   const beforeForce = {
     pageType: validated.pageType,
     entity_type: validated.entity_type,
@@ -471,13 +561,11 @@ async function extractByPageType(url, sourceCode, chromeCache = {}, usageContext
     validated.entity_type = "product";
     validated.pageType = "product";
     forceReason = "force_product_detail_url";
-  } else if (isListingUrl(url) || isListing) {
-    // LLM must not flip a real PLP → product
+  } else if (isListingPathUrl(url)) {
+    // Real collection/category URLs must stay listing; do not use related-card DOM
     validated.entity_type = "listing";
     validated.pageType = "product";
-    forceReason = isListingUrl(url)
-      ? "force_listing_url"
-      : "force_listing_flag";
+    forceReason = "force_listing_url";
   }
   if (forceReason) {
     logPageTypeTrace("url_force", url, {
@@ -693,5 +781,6 @@ module.exports = {
   buildSection,
   resolveProductEntityType,
   isListingUrl,
+  isListingPathUrl,
   isProductDetailUrl,
 };

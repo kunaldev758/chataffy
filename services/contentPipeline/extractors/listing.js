@@ -144,6 +144,220 @@ function cleanText(s) {
     .trim();
 }
 
+/** Reject swatch / filter chrome mistaken for product titles (e.g. "+"). */
+function isJunkListingName(name) {
+  const n = cleanText(name);
+  if (!n || n.length < 2) return true;
+  if (/^\+$/.test(n)) return true;
+  if (/^(\+|–|-)?\s*(show more|show less|see more|load more|view more|more)$/i.test(n)) {
+    return true;
+  }
+  if (
+    /^(log in|sign in|account|cart|checkout|search|view all|privacy|terms|menu|close|filter|sort|collections?|shipping|shipping policy|returns?|returns policy|package protection|customer reviews|ask a question|share|add to cart|sold out)$/i.test(
+      n,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * /collections/{handle} only — not /collections or /collections/all alone necessarily.
+ * Returns { origin, handle } or null.
+ */
+function shopifyCollectionPath(url = "") {
+  if (!url) return null;
+  try {
+    const u = new URL(String(url));
+    const m = u.pathname.match(/\/collections\/([^/?#]+)\/?$/i);
+    if (!m) return null;
+    const handle = decodeURIComponent(m[1]);
+    // Bare index-ish handles still have products.json on many stores
+    if (!handle) return null;
+    return { origin: u.origin, handle };
+  } catch {
+    return null;
+  }
+}
+
+function variantPricesMajor(variants = []) {
+  const prices = [];
+  for (const v of variants || []) {
+    if (!v || v.price == null || v.price === "") continue;
+    // Collection products.json uses dollar strings ("689.00") — never Shopify cents
+    const n = Number(String(v.price).replace(/,/g, ""));
+    if (Number.isFinite(n) && n > 0) prices.push(n);
+  }
+  return prices;
+}
+
+function mapShopifyCollectionProduct(product, origin) {
+  if (!product || typeof product !== "object") return null;
+  const name = cleanText(product.title || product.name || "");
+  if (isJunkListingName(name)) return null;
+  const handle = String(product.handle || "").trim();
+  const url = handle
+    ? `${origin}/products/${handle}`
+    : typeof product.url === "string"
+      ? product.url
+      : null;
+  const prices = variantPricesMajor(product.variants);
+  const row = {
+    name,
+    url: url || null,
+    brand:
+      typeof product.vendor === "string" && product.vendor.trim()
+        ? product.vendor.trim()
+        : null,
+  };
+  if (prices.length) {
+    const min = Math.min(...prices);
+    const max = Math.max(...prices);
+    row.price = min;
+    if (max > min) {
+      row.price_min = min;
+      row.price_max = max;
+    }
+  }
+  const available = Array.isArray(product.variants)
+    ? product.variants.some((v) => v && v.available === true)
+    : null;
+  if (available === true) row.in_stock = true;
+  else if (available === false && Array.isArray(product.variants) && product.variants.length) {
+    row.in_stock = false;
+  }
+  for (const k of Object.keys(row)) {
+    if (row[k] == null) delete row[k];
+  }
+  return row.name || row.url ? row : null;
+}
+
+
+// listing currency updater --> 
+function inferListingCurrencyFromHtml(html = "") {
+  const sample = String(html || "").slice(0, 80000);
+  // if (/₹|\bINR\b|Rs\.?/i.test(sample)) return "₹";
+  if (/\bINR\b|Rs\.?\s*[\d,]/i.test(sample)) return "₹";
+  // if('bicommerce/test/€')
+  if (/Shopify\.currency[\s\S]{0,120}"active"\s*:\s*"INR"/i.test(sample)) return "₹";
+  if (/€|\bEUR\b/i.test(sample)) return "€";
+  if (/£|\bGBP\b/i.test(sample)) return "£";
+  if (/\$|\bUSD\b/i.test(sample)) return "$";
+  return "";
+}
+
+/**
+ * Fetch /collections/{handle}/products.json (paginated).
+ * Fail-soft: network/404/empty → [].
+ * Prices are major units (not cents).
+ */
+async function fetchShopifyCollectionProducts(pageUrl, { html = "" } = {}) {
+  const path = shopifyCollectionPath(pageUrl);
+  if (!path) return [];
+
+  const axios = require("axios");
+  const https = require("https");
+  const currency = inferListingCurrencyFromHtml(html);
+  const limit = Math.min(50, MAX_PRODUCTS);
+  const maxPages = Math.ceil(MAX_PRODUCTS / limit) + 1;
+  const out = [];
+  const seen = new Set();
+
+  const fetchPage = async (page, insecure = false) => {
+    const endpoint = `${path.origin}/collections/${encodeURIComponent(path.handle)}/products.json`;
+    const res = await axios.get(endpoint, {
+      params: { limit, page },
+      timeout: Number(process.env.SHOPIFY_VARIANT_FETCH_TIMEOUT_MS) || 5000,
+      headers: {
+        Accept: "application/json, text/javascript, */*",
+        "User-Agent":
+          "Mozilla/5.0 (compatible; ChataffyBot/1.0; +https://chataffy.com)",
+      },
+      validateStatus: (s) => s >= 200 && s < 300,
+      responseType: "text",
+      transformResponse: [(data) => data],
+      maxRedirects: 3,
+      ...(insecure
+        ? { httpsAgent: new https.Agent({ rejectUnauthorized: false }) }
+        : {}),
+    });
+    let text = String(res.data || "").trim();
+    if (text.startsWith("while(1);") || text.startsWith("for(;;);")) {
+      text = text.replace(/^while\(1\);|^for\(;;\);/, "");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return [];
+    }
+    return Array.isArray(parsed?.products) ? parsed.products : [];
+  };
+
+  try {
+    for (let page = 1; page <= maxPages && out.length < MAX_PRODUCTS; page++) {
+      let batch;
+      try {
+        batch = await fetchPage(page, false);
+      } catch (err) {
+        const msg = String(err.message || "");
+        const isTls =
+          /certificate|TLS|SSL|UNABLE_TO_VERIFY/i.test(msg) ||
+          err.code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE";
+        if (!isTls || page > 1) {
+          if (page === 1) {
+            console.warn(
+              `[listing] Shopify collection products.json failed for ${pageUrl}: ${err.message}`,
+            );
+          }
+          break;
+        }
+        try {
+          batch = await fetchPage(page, true);
+        } catch (err2) {
+          console.warn(
+            `[listing] Shopify collection products.json failed for ${pageUrl}: ${err2.message}`,
+          );
+          break;
+        }
+      }
+      if (!batch.length) break;
+      for (const raw of batch) {
+        const row = mapShopifyCollectionProduct(raw, path.origin);
+        if (!row) continue;
+        if (currency && !row.currency) row.currency = currency;
+        const key = (row.url || row.name || "").toLowerCase();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(row);
+        if (out.length >= MAX_PRODUCTS) break;
+      }
+      if (batch.length < limit) break;
+    }
+  } catch (err) {
+    console.warn(
+      `[listing] Shopify collection products.json failed for ${pageUrl}: ${err.message}`,
+    );
+    return [];
+  }
+
+  return out;
+}
+
+function isRichShopifyCollectionProducts(products) {
+  if (!Array.isArray(products) || !products.length) return false;
+  const priced = products.filter(
+    (p) =>
+      p &&
+      p.name &&
+      !isJunkListingName(p.name) &&
+      p.price != null &&
+      Number(p.price) > 0,
+  );
+  return priced.length >= 1;
+}
+
 function parsePrice(text) {
   const m = String(text || "")
     .replace(/,/g, "")
@@ -193,15 +407,24 @@ function extractListingFromJsonLd(jsonLdBlocks = [], pageUrl = "") {
         ? Number(offer.price)
         : offer?.lowPrice != null
           ? Number(offer.lowPrice)
-          : null;
+          : offer?.minPrice != null
+            ? Number(offer.minPrice)
+            : null;
     const price_min =
-      offer?.lowPrice != null ? Number(offer.lowPrice) : null;
+      offer?.lowPrice != null
+        ? Number(offer.lowPrice)
+        : offer?.minPrice != null
+          ? Number(offer.minPrice)
+          : null;
     const price_max =
-      offer?.highPrice != null ? Number(offer.highPrice) : null;
+      offer?.highPrice != null
+        ? Number(offer.highPrice)
+        : offer?.maxPrice != null
+          ? Number(offer.maxPrice)
+          : null;
     const key = (url || name).toLowerCase();
     if (!name && !url) return;
-    if (seen.has(key)) return;
-    seen.add(key);
+
     const row = { name: name || null, url: url || null };
     if (price != null && !Number.isNaN(price)) {
       row.price = price;
@@ -221,6 +444,26 @@ function extractListingFromJsonLd(jsonLdBlocks = [], pageUrl = "") {
       const symbol = extractCurrencySymbol(offer?.priceCurrency || "");
       if (symbol) row.currency = symbol;
     }
+
+    if (seen.has(key)) {
+      // Same product URL from multiple JSON-LD blocks — fill missing prices
+      const prev = products.find(
+        (p) => (p.url || p.name || "").toLowerCase() === key,
+      );
+      if (prev) {
+        if (prev.price == null && row.price != null) prev.price = row.price;
+        if (prev.price_min == null && row.price_min != null) {
+          prev.price_min = row.price_min;
+        }
+        if (prev.price_max == null && row.price_max != null) {
+          prev.price_max = row.price_max;
+        }
+        if (!prev.currency && row.currency) prev.currency = row.currency;
+        if (!prev.name && row.name) prev.name = row.name;
+      }
+      return;
+    }
+    seen.add(key);
     products.push(row);
   };
 
@@ -654,16 +897,15 @@ function extractCard($, el, pageUrl) {
   ) {
     return null;
   }
-  if (
-    name &&
-    /^(log in|sign in|account|cart|checkout|search|view all|privacy|terms|menu|close|filter|sort|collections?|shipping|shipping policy|returns?|returns policy|package protection|customer reviews|ask a question|share)$/i.test(
-      name.trim(),
-    )
-  ) {
-    return null;
-  }
 
-  const row = { name: name || null, url: url || null };
+  let resolvedName = name;
+  if (isJunkListingName(resolvedName)) {
+    const alt = cleanText($el.find("img[alt]").first().attr("alt") || "");
+    resolvedName = !isJunkListingName(alt) ? alt : "";
+  }
+  if (isJunkListingName(resolvedName)) return null;
+
+  const row = { name: resolvedName, url: url || null };
   if (price != null && !Number.isNaN(price)) {
     row.price = price;
     if (currency) row.currency = currency;
@@ -708,6 +950,12 @@ function extractListingFromDom(html, pageUrl = "") {
         /\.(jpe?g|png|gif|webp|svg)(\?|$)/i.test(row.url) ||
         /facebook\.com\/sharer|twitter\.com\/intent|pinterest\.com\/pin/i.test(row.url) ||
         /hcaptcha\.com|claims\.route\.com/i.test(row.url))
+    ) {
+      return;
+    }
+    if (
+      row.name &&
+      isJunkListingName(row.name)
     ) {
       return;
     }
@@ -866,106 +1114,154 @@ function resolveListingTitle(title, html, pageUrl) {
 
 /**
  * PLP / collection listing extraction.
- * Prefer JSON-LD item lists; fall back to product grid DOM cards.
+ * Prefer Shopify /collections/{handle}/products.json when available;
+ * else JSON-LD item lists; fall back to product grid DOM cards.
  * Facet sidebars are stripped — not indexed as content.
  *
- * @returns {{ content, entity_name, attributes, products, extraction_source, extraction_confidence }}
+ * @returns {Promise<{ content, entity_name, attributes, products, extraction_source, extraction_confidence }>}
  */
-function extractListingContent({
+async function extractListingContent({
   url,
   html,
   jsonLdBlocks = [],
   title = null,
   metaDescription = null,
 } = {}) {
+  // 1) Shopify collection products.json (additive — fail-soft to LD/DOM)
+  let fromShopify = [];
+  try {
+    fromShopify = await fetchShopifyCollectionProducts(url, { html });
+  } catch (err) {
+    console.warn(
+      `[listing] collection products fetch error for ${url}: ${err.message}`,
+    );
+    fromShopify = [];
+  }
+
   const fromLd = extractListingFromJsonLd(jsonLdBlocks, url);
   const fromDom = extractListingFromDom(html, url);
 
-  // Merge: prefer richer DOM price fields when JSON-LD only has a single price
-  const byKey = new Map();
-  for (const p of [...fromLd, ...fromDom]) {
-    const key = (p.url || p.name || "").toLowerCase();
-    if (!key) continue;
-    if (!byKey.has(key)) {
+  let products = [];
+  let source = "listing_empty";
+
+  if (isRichShopifyCollectionProducts(fromShopify)) {
+    // Prefer API catalog; optionally fill missing fields from LD/DOM by URL
+    const byKey = new Map();
+    for (const p of fromShopify) {
+      const key = (p.url || p.name || "").toLowerCase();
+      if (!key || isJunkListingName(p.name)) continue;
       byKey.set(key, { ...p });
-    } else {
-      const prev = byKey.get(key);
-      const merged = {
-        name: prev.name || p.name,
-        url: prev.url || p.url,
-        price: prev.price != null ? prev.price : p.price,
-        currency: prev.currency || p.currency,
-        brand: prev.brand || p.brand,
-        category: prev.category || p.category,
-        availability: prev.availability || p.availability,
-        in_stock:
-          prev.in_stock != null
-            ? prev.in_stock
-            : p.in_stock != null
-              ? p.in_stock
-              : null,
-        original_price:
-          prev.original_price != null ? prev.original_price : p.original_price,
-        price_min: prev.price_min != null ? prev.price_min : p.price_min,
-        price_max: prev.price_max != null ? prev.price_max : p.price_max,
-      };
-
-      // If DOM has sale + original and LD price equals the compare-at, use sale
-      if (
-        p.price != null &&
-        p.original_price != null &&
-        (prev.original_price == null || prev.price === p.original_price)
-      ) {
-        merged.price = p.price;
-        merged.original_price = p.original_price;
-        if (p.currency) merged.currency = p.currency;
-      }
-      // Prefer a later card whose sale/compare pair is tighter (leaf product card
-      // after a layout wrapper that aggregated every price on the grid).
-      if (
-        p.price != null &&
-        p.original_price != null &&
-        prev.price != null &&
-        prev.original_price != null &&
-        p.original_price < prev.original_price &&
-        p.price > prev.price &&
-        p.price < p.original_price
-      ) {
-        merged.price = p.price;
-        merged.original_price = p.original_price;
-        if (p.currency) merged.currency = p.currency;
-      }
-      // Prefer DOM range / real currency prices over title-dimension false positives
-      if (
-        p.price_min != null &&
-        p.price_max != null &&
-        (prev.price_min == null || prev.price_max == null)
-      ) {
-        merged.price_min = p.price_min;
-        merged.price_max = p.price_max;
-        merged.price = p.price != null ? p.price : p.price_min;
-        if (p.currency) merged.currency = p.currency;
-      } else if (
-        p.price != null &&
-        (prev.price == null ||
-          (prev.price < 100 && p.price >= 100) ||
-          (p.price_min != null && prev.price_min == null))
-      ) {
-        merged.price = p.price;
-        if (p.currency) merged.currency = p.currency;
-        if (p.original_price != null) merged.original_price = p.original_price;
-        if (p.price_min != null) merged.price_min = p.price_min;
-        if (p.price_max != null) merged.price_max = p.price_max;
-      }
-      if (p.in_stock === false) merged.in_stock = false;
-
-      for (const k of Object.keys(merged)) {
-        if (merged[k] == null) delete merged[k];
-      }
-      byKey.set(key, merged);
     }
+    for (const p of [...fromLd, ...fromDom]) {
+      if (!p) continue;
+      if (p.name && isJunkListingName(p.name)) continue;
+      const key = (p.url || p.name || "").toLowerCase();
+      if (!key || !byKey.has(key)) continue;
+      const prev = byKey.get(key);
+      if (prev.price == null && p.price != null) prev.price = p.price;
+      if (!prev.currency && p.currency) prev.currency = p.currency;
+      if (prev.original_price == null && p.original_price != null) {
+        prev.original_price = p.original_price;
+      }
+      if (prev.in_stock == null && p.in_stock != null) prev.in_stock = p.in_stock;
+    }
+    products = [...byKey.values()].slice(0, MAX_PRODUCTS);
+    source =
+      fromLd.length || fromDom.length
+        ? "shopify_collection_json+dom_listing"
+        : "shopify_collection_json";
+  } else {
+    // Existing LD + DOM merge (unchanged behavior for BigCommerce / non-Shopify)
+    const byKey = new Map();
+    for (const p of [...fromLd, ...fromDom]) {
+      const key = (p.url || p.name || "").toLowerCase();
+      if (!key) continue;
+      if (p.name && isJunkListingName(p.name)) continue;
+      if (!byKey.has(key)) {
+        byKey.set(key, { ...p });
+      } else {
+        const prev = byKey.get(key);
+        const merged = {
+          name: prev.name || p.name,
+          url: prev.url || p.url,
+          price: prev.price != null ? prev.price : p.price,
+          currency: prev.currency || p.currency,
+          brand: prev.brand || p.brand,
+          category: prev.category || p.category,
+          availability: prev.availability || p.availability,
+          in_stock:
+            prev.in_stock != null
+              ? prev.in_stock
+              : p.in_stock != null
+                ? p.in_stock
+                : null,
+          original_price:
+            prev.original_price != null ? prev.original_price : p.original_price,
+          price_min: prev.price_min != null ? prev.price_min : p.price_min,
+          price_max: prev.price_max != null ? prev.price_max : p.price_max,
+        };
+
+        if (
+          p.price != null &&
+          p.original_price != null &&
+          (prev.original_price == null || prev.price === p.original_price)
+        ) {
+          merged.price = p.price;
+          merged.original_price = p.original_price;
+          if (p.currency) merged.currency = p.currency;
+        }
+        if (
+          p.price != null &&
+          p.original_price != null &&
+          prev.price != null &&
+          prev.original_price != null &&
+          p.original_price < prev.original_price &&
+          p.price > prev.price &&
+          p.price < p.original_price
+        ) {
+          merged.price = p.price;
+          merged.original_price = p.original_price;
+          if (p.currency) merged.currency = p.currency;
+        }
+        if (
+          p.price_min != null &&
+          p.price_max != null &&
+          (prev.price_min == null || prev.price_max == null)
+        ) {
+          merged.price_min = p.price_min;
+          merged.price_max = p.price_max;
+          merged.price = p.price != null ? p.price : p.price_min;
+          if (p.currency) merged.currency = p.currency;
+        } else if (
+          p.price != null &&
+          (prev.price == null ||
+            (prev.price < 100 && p.price >= 100) ||
+            (p.price_min != null && prev.price_min == null))
+        ) {
+          merged.price = p.price;
+          if (p.currency) merged.currency = p.currency;
+          if (p.original_price != null) merged.original_price = p.original_price;
+          if (p.price_min != null) merged.price_min = p.price_min;
+          if (p.price_max != null) merged.price_max = p.price_max;
+        }
+        if (p.in_stock === false) merged.in_stock = false;
+
+        for (const k of Object.keys(merged)) {
+          if (merged[k] == null) delete merged[k];
+        }
+        byKey.set(key, merged);
+      }
+    }
+    products = [...byKey.values()].slice(0, MAX_PRODUCTS);
+    source =
+      fromLd.length && fromDom.length
+        ? "json_ld+dom_listing"
+        : fromLd.length
+          ? "json_ld_listing"
+          : fromDom.length
+            ? "dom_listing"
+            : "listing_empty";
   }
-  const products = [...byKey.values()].slice(0, MAX_PRODUCTS);
 
   const entity_name = resolveListingTitle(title, html, url);
 
@@ -982,15 +1278,6 @@ function extractListingContent({
     description: metaDescription || "",
   });
 
-  const source =
-    fromLd.length && fromDom.length
-      ? "json_ld+dom_listing"
-      : fromLd.length
-        ? "json_ld_listing"
-        : fromDom.length
-          ? "dom_listing"
-          : "listing_empty";
-
   return {
     content,
     entity_name,
@@ -1006,6 +1293,11 @@ module.exports = {
   extractListingFromJsonLd,
   extractListingFromDom,
   listingToMarkdown,
+  fetchShopifyCollectionProducts,
+  shopifyCollectionPath,
+  mapShopifyCollectionProduct,
+  isJunkListingName,
+  isRichShopifyCollectionProducts,
   GRID_SELECTORS,
   CARD_SELECTORS,
   MAX_PRODUCTS,

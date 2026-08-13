@@ -8,6 +8,7 @@ const {
   unionAttrs,
   termsFromProductAttrs,
   parseMoney,
+  isShopifyStorefront,
 } = require("./productVariants");
 const {
   isPdpRagCleanupEnabled,
@@ -177,12 +178,15 @@ function extractPriceFromOffer(offer) {
     const p = Number(offer.price);
     if (!Number.isNaN(p)) out.price = p;
   }
-  if (offer.lowPrice != null) {
-    const p = Number(offer.lowPrice);
+  // Schema.org AggregateOffer uses low/high; BigCommerce often uses min/max
+  const low = offer.lowPrice ?? offer.minPrice;
+  const high = offer.highPrice ?? offer.maxPrice;
+  if (low != null) {
+    const p = Number(low);
     if (!Number.isNaN(p)) out.price_min = p;
   }
-  if (offer.highPrice != null) {
-    const p = Number(offer.highPrice);
+  if (high != null) {
+    const p = Number(high);
     if (!Number.isNaN(p)) out.price_max = p;
   }
   if (offer.priceCurrency) out.currency = offer.priceCurrency;
@@ -786,33 +790,88 @@ function productToMarkdown({
 }
 
 /**
- * Reuse Shopify cents heuristic from variant path (integer >= 1000 → /100).
- * Applied to top-level price fields so Original price is not ₹99900.
+ * Normalize leftover Shopify integer-cent fields to major currency units.
+ * ONLY safe on Shopify storefronts — BigCommerce/Woo often use integer dollars
+ * ("4495" = $4,495). Pass enabled:true when isShopifyStorefront (or tests).
+ *
+ * - Single large integers (>= 1000) → /100
+ * - Mixed ranges like 899 + 1299 (all integer cents, at least one >= 1000) → /100 all
+ * - Keeps major-unit prices like 699 when original_price alone is cents (99900)
  */
-function normalizeShopifyCentsFields(attrs = {}) {
+function normalizeShopifyCentsFields(attrs = {}, { enabled = false } = {}) {
   const out = { ...attrs };
-  const looksCents = (v) =>
-    v != null && /^\d+$/.test(String(v).trim()) && Number(v) >= 1000;
+  if (!enabled) return out;
 
-  // Prefer evidence from variants when present
+  const isIntMoney = (v) =>
+    v != null && /^\d+$/.test(String(v).trim()) && Number(v) > 0;
+  const looksLargeCents = (v) => isIntMoney(v) && Number(v) >= 1000;
+
+  const topKeys = ["price", "original_price", "price_min", "price_max"];
   const sample =
     Array.isArray(out.variants) && out.variants[0]
       ? out.variants[0].price
       : out.price;
-  // If variant prices are already major units (~699) but original is 99900, fix original only
-  const originalLooksCents = looksCents(out.original_price);
+
+  // If variant/sale prices are already major units (~699) but original is 99900, fix original only
+  const originalLooksCents = looksLargeCents(out.original_price);
   const priceLooksMajor =
     out.price != null && Number(out.price) > 0 && Number(out.price) < 1000;
 
-  for (const key of ["price", "original_price", "price_min", "price_max"]) {
+  if (originalLooksCents && priceLooksMajor) {
+    out.original_price = parseMoney(out.original_price, { shopifyCents: true });
+  }
+
+  // Batch-convert when the set is clearly Ajax/theme cents (e.g. 899–1299),
+  // including values between 100–999 that the old >=1000 gate missed.
+  const batchCandidates = [];
+  for (const key of topKeys) {
     if (out[key] == null) continue;
+    // Skip original already handled above when price is major
     if (key === "original_price" && originalLooksCents && priceLooksMajor) {
-      out[key] = parseMoney(out[key], { shopifyCents: true });
       continue;
     }
-    if (looksCents(out[key]) && (looksCents(sample) || key === "original_price")) {
-      // Only force cents when value itself looks like cents
-      if (looksCents(out[key])) {
+    batchCandidates.push({ type: "top", key, value: out[key] });
+  }
+  if (Array.isArray(out.variants)) {
+    out.variants.forEach((v, i) => {
+      if (!v || typeof v !== "object") return;
+      if (v.price != null) {
+        batchCandidates.push({ type: "variant", index: i, key: "price", value: v.price });
+      }
+      if (v.original_price != null) {
+        batchCandidates.push({
+          type: "variant",
+          index: i,
+          key: "original_price",
+          value: v.original_price,
+        });
+      }
+    });
+  }
+
+  const intBatch = batchCandidates.filter((c) => isIntMoney(c.value));
+  const shouldBatchConvert =
+    intBatch.length > 0 &&
+    intBatch.every((c) => Number(c.value) >= 100) &&
+    intBatch.some((c) => Number(c.value) >= 1000) &&
+    // Don't smash a major-unit sale price that coexists with a cents original
+    !(priceLooksMajor && originalLooksCents);
+
+  if (shouldBatchConvert) {
+    for (const c of intBatch) {
+      const normalized = parseMoney(c.value, { shopifyCents: true });
+      if (normalized == null) continue;
+      if (c.type === "top") out[c.key] = normalized;
+      else if (out.variants?.[c.index]) out.variants[c.index][c.key] = normalized;
+    }
+  } else {
+    for (const key of topKeys) {
+      if (out[key] == null) continue;
+      if (key === "original_price" && originalLooksCents && priceLooksMajor) continue;
+      if (
+        looksLargeCents(out[key]) &&
+        (looksLargeCents(sample) || key === "original_price")
+      ) {
         const normalized = parseMoney(out[key], { shopifyCents: true });
         if (normalized != null) out[key] = normalized;
       }
@@ -832,7 +891,7 @@ function normalizeShopifyCentsFields(attrs = {}) {
 /**
  * Product extraction: JSON-LD/DOM attributes + always-appended cleaned page body.
  * FAQ / reviews / related stay out of primary (residual / secondary FAQ own them).
- * Variant cascade: HTML → .json → .js → JSON-LD/DOM.
+ * Variant cascade: .json → .js → HTML → JSON-LD/DOM.
  */
 async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
   const cleanupEnabled = isPdpRagCleanupEnabled();
@@ -861,9 +920,16 @@ async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
     source: fromLd?.source || fromDom?.source || "none",
   };
 
-  // Cents normalization always safe for Shopify-style integers (does not change
-  // already-normalized variant cascade prices).
-  merged.attributes = normalizeShopifyCentsFields(merged.attributes);
+  // Cents normalization ONLY on Shopify storefronts.
+  // BigCommerce integer dollars ("4495" = $4,495) must not be divided by 100.
+  const shopifyContext = isShopifyStorefront({
+    url,
+    html,
+    variantSource,
+  });
+  merged.attributes = normalizeShopifyCentsFields(merged.attributes, {
+    enabled: shopifyContext,
+  });
 
   const { markdown: rawBodyMarkdown, source: bodySource } =
     extractCleanProductBody(html, url, { preferTightBody: cleanupEnabled });
@@ -994,6 +1060,7 @@ module.exports = {
   extractProductFromJsonLd,
   extractProductFromDom,
   extractProductPricesFromDom,
+  extractPriceFromOffer,
   mergePriceAttributes,
   descriptionCoveredByBody,
   collectCanonicalProductAttrs,

@@ -115,6 +115,10 @@ async function classifyPageTypeLlm({
     `pageType must be one of: ${PAGE_TYPES.join(", ")}`,
     `entity_type must be one of: ${ENTITY_TYPES.join(", ")}`,
     "",
+    "For ecommerce:",
+    '- entity_type "product" = a single product detail page (PDP), even if related products appear.',
+    '- entity_type "listing" = a category/collection/search grid of many products (PLP).',
+    "",
     `URL: ${url || ""}`,
     `Title: ${title || ""}`,
     `Meta: ${String(metaDescription || "").slice(0, 240)}`,
@@ -122,7 +126,7 @@ async function classifyPageTypeLlm({
       ? `Schema.org types: ${schemaTypes.slice(0, 12).join(", ")}`
       : "Schema.org types: none",
     ruleGuess
-      ? `Rule guess: pageType=${ruleGuess.pageType}, entity_type=${ruleGuess.entity_type}, confidence=${ruleGuess.confidence}`
+      ? `Rule guess: pageType=${ruleGuess.pageType}, entity_type=${ruleGuess.entity_type}, confidence=${ruleGuess.confidence}, reason=${ruleGuess.reason || ""}`
       : "Rule guess: none",
     "",
     'Return JSON only: { "pageType": "product", "entity_type": "product", "confidence": 0.0, "reason": "short why", "entity_name": null }',

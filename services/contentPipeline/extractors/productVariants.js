@@ -44,6 +44,50 @@ function parseMoney(raw, { shopifyCents = false } = {}) {
   return n;
 }
 
+/**
+ * Shopify Ajax/theme JSON stores money as integer cents (899 → $8.99).
+ * .json storefront endpoint uses dollar strings ("8.99") — those must stay as-is.
+ * Returns true when raw values look like cents (no decimals, all integers ≥ 100).
+ */
+function shopifyRawPricesLookLikeCents(rawPrices = []) {
+  const prices = (rawPrices || []).filter((p) => p != null && p !== "");
+  if (!prices.length) return false;
+  // Dollar strings from /.json always include a decimal for fractional amounts
+  if (prices.some((p) => String(p).includes("."))) return false;
+  const nums = [];
+  for (const p of prices) {
+    const s = String(p).trim().replace(/,/g, "");
+    if (!/^\d+$/.test(s)) return false;
+    const n = Number(s);
+    if (!Number.isFinite(n) || n <= 0) return false;
+    nums.push(n);
+  }
+  // Align with parseMoney shopifyCents gate (n >= 100)
+  return nums.every((n) => n >= 100);
+}
+
+/**
+ * True when URL/HTML clearly belongs to a Shopify storefront.
+ * BigCommerce/Woo/etc. often use integer dollar amounts ("4495" = $4,495) —
+ * never treat those as Shopify cents.
+ */
+function isShopifyStorefront({ url = "", html = "", variantSource = "" } = {}) {
+  if (variantSource && /^shopify_/i.test(String(variantSource))) return true;
+  const hay = `${url || ""}\n${String(html || "").slice(0, 200000)}`;
+  if (
+    /cdn\.shopify\.com|myshopify\.com|shopifycloud\.com|\/cdn\/shop\//i.test(hay)
+  ) {
+    return true;
+  }
+  if (/#shopify-section-|Shopify\.theme|window\.Shopify\b|Shopify\.shop\b/i.test(hay)) {
+    return true;
+  }
+  if (/\/products\/[^/?#]+/i.test(url || "") && /shopify/i.test(hay)) {
+    return true;
+  }
+  return false;
+}
+
 function optionKind(name) {
   const n = normKey(name);
   if (/colou?r|colour|shade|finish/.test(n)) return "color";
@@ -607,10 +651,11 @@ function attrsFromShopifyProduct(product, { pricesInCents = false } = {}) {
 /**
  * Shopify product JSON embedded in PDP HTML.
  */
-function collectFromShopify(html) {
+function collectFromShopify(html, { url = "" } = {}) {
   if (!html) return emptyAttrs();
   const $ = cheerio.load(html);
   const candidates = [];
+  const shopifyPage = isShopifyStorefront({ url, html });
 
   $('script[type="application/json"], script[type="application/ld+json"]').each(
     (_, el) => {
@@ -636,19 +681,19 @@ function collectFromShopify(html) {
   let best = null;
   let bestScore = -1;
   for (const product of candidates) {
-    const attrs = attrsFromShopifyProduct(product, {
-      // HTML blobs mix formats; auto-cents for integer prices ≥ 1000
-      pricesInCents: false,
-    });
-    // Re-map with cents if prices look like cents
-    const samplePrice = product.variants?.[0]?.price;
+    const rawPrices = (product.variants || []).flatMap((v) =>
+      v ? [v.price, v.compare_at_price ?? v.compareAtPrice] : [],
+    );
+    // Only treat integers as cents on real Shopify storefronts.
+    // BigCommerce JSON-LD "4495" means $4,495 — never /100 there.
+    const productLooksShopify =
+      shopifyPage ||
+      /shopify/i.test(String(product.variants?.[0]?.inventory_management || ""));
     const useCents =
-      samplePrice != null &&
-      /^\d+$/.test(String(samplePrice).trim()) &&
-      Number(samplePrice) >= 1000;
-    const normalized = useCents
-      ? attrsFromShopifyProduct(product, { pricesInCents: true })
-      : attrs;
+      productLooksShopify && shopifyRawPricesLookLikeCents(rawPrices);
+    const normalized = attrsFromShopifyProduct(product, {
+      pricesInCents: useCents,
+    });
     const score = (normalized.variants || []).filter(
       (v) => v.price != null && Number(v.price) > 0,
     ).length;
@@ -857,10 +902,10 @@ function ldFillScalars(ldAttrs) {
 }
 
 /**
- * Cascade:
- *   HTML rich → DONE
- *   else .json rich → DONE
- *   else .js rich → DONE
+ * Cascade (prefer unambiguous dollar strings, then cents APIs, then HTML):
+ *   .json rich → DONE   (storefront dollars: "8.99")
+ *   else .js rich → DONE (Ajax cents: 899; pricesInCents=true)
+ *   else HTML rich → DONE (theme embed; cents heuristic)
  *   else JSON-LD + DOM
  *
  * @returns {Promise<{ attrs: object, source: string }>}
@@ -872,23 +917,17 @@ async function collectCanonicalProductAttrs({
 } = {}) {
   const ld = collectFromJsonLd(jsonLdBlocks);
   const dom = collectFromWooDom(html);
+  const fromHtml = collectFromShopify(html, { url });
+  const fill = () => [ldFillScalars(ld), ldFillScalars(dom)];
 
-  // 1) Embedded HTML
-  const fromHtml = collectFromShopify(html);
-  if (isRichVariantAttrs(fromHtml)) {
-    return {
-      attrs: unionAttrs(fromHtml, ldFillScalars(ld), ldFillScalars(dom)),
-      source: "shopify_html",
-    };
-  }
-
-  // 2–3) Shopify product endpoints (only /products/…)
+  // 1–2) Shopify product endpoints first (only /products/…)
+  // Prefer .json over .js — .json prices are dollars; .js are cents.
   const base = shopifyProductBaseUrl(url);
   if (base) {
     const fromJson = await fetchShopifyProductAttrs(base, "json");
     if (isRichVariantAttrs(fromJson)) {
       return {
-        attrs: unionAttrs(fromJson, ldFillScalars(ld), ldFillScalars(dom)),
+        attrs: unionAttrs(fromJson, ...fill()),
         source: "shopify_json",
       };
     }
@@ -896,10 +935,18 @@ async function collectCanonicalProductAttrs({
     const fromJs = await fetchShopifyProductAttrs(base, "js");
     if (isRichVariantAttrs(fromJs)) {
       return {
-        attrs: unionAttrs(fromJs, ldFillScalars(ld), ldFillScalars(dom)),
+        attrs: unionAttrs(fromJs, ...fill()),
         source: "shopify_js",
       };
     }
+  }
+
+  // 3) Embedded HTML (after network — avoids cents-as-dollars when .json works)
+  if (isRichVariantAttrs(fromHtml)) {
+    return {
+      attrs: unionAttrs(fromHtml, ...fill()),
+      source: "shopify_html",
+    };
   }
 
   // 4) JSON-LD + DOM (+ weak HTML shopify if any)
@@ -915,10 +962,11 @@ async function collectCanonicalProductAttrs({
 function collectCanonicalProductAttrsSync({
   html = "",
   jsonLdBlocks = [],
+  url = "",
 } = {}) {
   return unionAttrs(
     collectFromJsonLd(jsonLdBlocks),
-    collectFromShopify(html),
+    collectFromShopify(html, { url }),
     collectFromWooDom(html),
   );
 }
@@ -973,6 +1021,8 @@ module.exports = {
   attrsFromShopifyProduct,
   isRichVariantAttrs,
   shopifyProductBaseUrl,
+  shopifyRawPricesLookLikeCents,
+  isShopifyStorefront,
   termsFromProductAttrs,
   formatAttrContextLine,
   mergeStringLists,
