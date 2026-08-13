@@ -175,14 +175,24 @@ class PlanService {
       }
          // Get old plan to check if migration is needed
          const oldPlan = await this.getUserPlan(userId);
-
-         if(newPlan.order>oldPlan.order){
-          await Client.updateOne({ userId },{ $set: { upgradePlanStatus: { agentLimitExceeded: false,chatLimitExceeded:false,storageLimitExceeded:false,humanAgentLimitExceeded:false } } });
-         }
+         const clientBefore = await Client.findOne({ userId })
+           .select("upgradePlanStatus currentDataSize")
+           .lean();
+         const wasStorageLimitExceeded =
+           !!clientBefore?.upgradePlanStatus?.storageLimitExceeded;
 
       const customLimits = PlanService.buildCustomLimitsFromPlan(newPlan);
+      const newMaxStorage =
+        customLimits.maxStorage ?? newPlan.limits?.maxStorage ?? null;
+      const stillOverStorage =
+        newMaxStorage != null &&
+        (clientBefore?.currentDataSize || 0) > newMaxStorage;
 
-      const updatedClient = await Client.findOneAndUpdate(
+         if(newPlan.order>oldPlan.order){
+          await Client.updateOne({ userId },{ $set: { upgradePlanStatus: { agentLimitExceeded: false,chatLimitExceeded:false,storageLimitExceeded: stillOverStorage,humanAgentLimitExceeded:false } } });
+         }
+
+      await Client.findOneAndUpdate(
         { userId },
         {
           $set: {
@@ -208,12 +218,15 @@ class PlanService {
             });
           }
         }
-        // await this.migrateFreeUserData(userId);
-        // // Qdrant migration
-        // const sourceCollection = updatedClient.qdrantIndexName;
-        // const targetCollection = updatedClient.qdrantIndexNamePaid;
-        // const qdrantManager = new QdrantVectorStoreManager(sourceCollection);
-        // await qdrantManager.migrateCollection(sourceCollection, targetCollection);
+      }
+
+      if (wasStorageLimitExceeded && !stillOverStorage) {
+        try {
+          const { queueRetrainForStorageLimitFailures } = require("./storageLimitTraining");
+          await queueRetrainForStorageLimitFailures(userId);
+        } catch (retrainError) {
+          console.error("[upgradePlan] storage-limit retrain queue failed:", retrainError);
+        }
       }
       
       return true;

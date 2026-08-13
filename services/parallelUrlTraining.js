@@ -25,6 +25,9 @@ const {
   markUrlUnchanged,
   checkCanonicalDuplicate,
 } = require("./contentPipeline");
+const {
+  markUnfinishedUrlsForStorageLimit,
+} = require("./storageLimitTraining");
 
 const DEFAULT_SCRAPE_CONCURRENCY = Math.max(
   1,
@@ -164,7 +167,7 @@ async function upsertSkippedTrainingRow({
   if (existingRows.length > 0) {
     await TrainingModel.updateOne(
       { _id: existingRows[0]._id },
-      { $set: trainingUpdate },
+      { $set: trainingUpdate, $unset: { errorType: 1 } },
     );
     if (existingRows.length > 1) {
       await TrainingModel.deleteMany({
@@ -237,6 +240,10 @@ async function runParallelScrapeOverlapTrain(opts) {
   let navigationDocQueued = false;
   let stoppedForStorageLimit = false;
   let stoppedForDelete = false;
+  const settledUrls = new Set();
+  const markSettled = (url) => {
+    if (url) settledUrls.add(url);
+  };
   const deletedAgentStop = createDeletedAgentStop(
     agentId,
     "parallelUrlTraining",
@@ -332,6 +339,7 @@ async function runParallelScrapeOverlapTrain(opts) {
         `[parallelUrlTraining] train skipped unchanged url=${doc.originalUrl}`,
       );
       outcomeSummary.unchanged += 1;
+      markSettled(doc.originalUrl);
       await markUrlUnchanged(doc.originalUrl, userId, agentId, {
         contentHash: pageResult.contentHash,
         pageType: pageResult.page?.pageType || "generic",
@@ -382,6 +390,7 @@ async function runParallelScrapeOverlapTrain(opts) {
       });
       outcomeSummary.skipped += 1;
       recordSkipReason(outcomeSummary, skipReason);
+      markSettled(doc.originalUrl);
       await markUrlSkipped(
         doc.originalUrl,
         userId,
@@ -430,16 +439,22 @@ async function runParallelScrapeOverlapTrain(opts) {
       content: doc.content,
       dataSize: doc.dataSize,
       trainingStatus: status,
-      error: status === 2 ? trainError : null,
       "webPage.url": doc.originalUrl,
       chunkCount: result.chunkCountPerUrl?.[doc.originalUrl] || 0,
       lastEdit: Date.now(),
     };
 
+    markSettled(doc.originalUrl);
+
     if (existingRows.length > 0) {
       await TrainingModel.updateOne(
         { _id: existingRows[0]._id },
-        { $set: trainingUpdate },
+        status === 1
+          ? { $set: trainingUpdate, $unset: { error: 1, errorType: 1 } }
+          : {
+              $set: { ...trainingUpdate, error: trainError },
+              $unset: { errorType: 1 },
+            },
       );
       if (existingRows.length > 1) {
         await TrainingModel.deleteMany({
@@ -447,7 +462,11 @@ async function runParallelScrapeOverlapTrain(opts) {
         });
       }
     } else {
-      await TrainingModel.create(trainingUpdate);
+      await TrainingModel.create(
+        status === 1
+          ? trainingUpdate
+          : { ...trainingUpdate, error: trainError },
+      );
     }
 
     if (status === 1) {
@@ -489,8 +508,9 @@ async function runParallelScrapeOverlapTrain(opts) {
       await trainLimiter.acquire();
       let trainStarted = false;
       try {
-        if (stoppedForDelete) return;
+        if (stoppedForDelete || stoppedForStorageLimit) return;
         if (await shouldStopForDeletedAgent()) return;
+        if (stoppedForStorageLimit) return;
 
         trainStarted = true;
         console.log(
@@ -578,6 +598,12 @@ async function runParallelScrapeOverlapTrain(opts) {
           );
           return;
         }
+        if (stoppedForStorageLimit && !trainStarted) {
+          console.log(
+            `[parallelUrlTraining] train skipped storage-limit completed=${trainCompleted}/${trainQueued} url=${doc.originalUrl}`,
+          );
+          return;
+        }
         console.log(
           `[parallelUrlTraining] train finished completed=${trainCompleted}/${trainQueued} url=${doc.originalUrl}`,
         );
@@ -630,6 +656,7 @@ async function runParallelScrapeOverlapTrain(opts) {
         outcomeSummary.skipped += 1;
         recordSkipReason(outcomeSummary, reason);
         if (isNonContentPath(url)) {
+          markSettled(url);
           await markUrlSkipped(url, userId, agentId, reason);
           await upsertSkippedTrainingRow({
             TrainingModel,
@@ -639,6 +666,7 @@ async function runParallelScrapeOverlapTrain(opts) {
             reason,
           });
         } else {
+          markSettled(url);
           await markWebUrlScrapeFailed({
             url,
             userId,
@@ -682,6 +710,7 @@ async function runParallelScrapeOverlapTrain(opts) {
         if (stoppedForDelete || (await shouldStopForDeletedAgent({ force: true }))) {
           return;
         }
+        markSettled(url);
         const failedRow = await TrainingModel.findOneAndUpdate(
           { userId, agentId, type: 0, "webPage.url": url },
           {
@@ -697,6 +726,7 @@ async function runParallelScrapeOverlapTrain(opts) {
               chunkCount: 0,
               lastEdit: Date.now(),
             },
+            $unset: { errorType: 1 },
           },
           { upsert: true, new: true, setDefaultsOnInsert: true },
         );
@@ -762,6 +792,7 @@ async function runParallelScrapeOverlapTrain(opts) {
           );
           outcomeSummary.skipped += 1;
           recordSkipReason(outcomeSummary, skipReason);
+          markSettled(url);
           await markUrlSkipped(
             url,
             userId,
@@ -908,6 +939,7 @@ async function runParallelScrapeOverlapTrain(opts) {
       if (stoppedForDelete || (await shouldStopForDeletedAgent({ force: true }))) {
         return;
       }
+      markSettled(url);
       const failedRow = await TrainingModel.findOneAndUpdate(
         { userId, agentId, "webPage.url": url },
         {
@@ -920,6 +952,7 @@ async function runParallelScrapeOverlapTrain(opts) {
             error: error?.message,
             "webPage.url": url,
           },
+          $unset: { errorType: 1 },
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },
       );
@@ -950,6 +983,18 @@ async function runParallelScrapeOverlapTrain(opts) {
   });
 
   await Promise.all(trainPromises);
+
+  if (stoppedForStorageLimit && !stoppedForDelete) {
+    const unfinishedUrls = (urls || []).filter((url) => !settledUrls.has(url));
+    const marked = await markUnfinishedUrlsForStorageLimit({
+      TrainingModel,
+      userId,
+      agentId,
+      unfinishedUrls,
+    });
+    outcomeSummary.failed += marked;
+    recordSkipReason(outcomeSummary, "Storage limit exceeded");
+  }
 
   if (!stoppedForStorageLimit && !stoppedForDelete) {
     await emitScrapingProgress(totalUrlsCount, totalUrlsCount, true);
@@ -1014,8 +1059,15 @@ async function runParallelRetrainOverlap(opts) {
   let failCount = 0;
   let lastProgressEmitTime = 0;
   let stoppedForDelete = false;
+  let stoppedForStorageLimit = false;
+  const settledUrls = new Set();
+  const markSettled = (url) => {
+    if (url) settledUrls.add(url);
+  };
   const deletedAgentStop = createDeletedAgentStop(agentId, "parallelRetrain");
   const PROGRESS_EMIT_INTERVAL = 2000;
+  const PlanService = require("./PlanService");
+  const plan = await PlanService.getUserPlan(userId);
 
   async function shouldStopForDeletedAgent({ force = false } = {}) {
     if (stoppedForDelete) return true;
@@ -1044,6 +1096,8 @@ async function runParallelRetrainOverlap(opts) {
   }
 
   const markEntryFailed = async ({ entry, prevStatus, error }) => {
+    const url = entry?.webPage?.url;
+    markSettled(url);
     await TrainingModel.updateOne(
       { _id: entry._id },
       {
@@ -1052,11 +1106,24 @@ async function runParallelRetrainOverlap(opts) {
           error,
           lastEdit: new Date(),
         },
+        $unset: { errorType: 1 },
       },
     );
     await applyWebPagePagesAddedDelta(prevStatus, 2);
     failCount += 1;
   };
+
+  async function triggerRetrainStorageLimitStop() {
+    if (stoppedForStorageLimit) return;
+    stoppedForStorageLimit = true;
+    console.log(
+      "[parallelRetrain] storage limit exceeded — stopping remaining work",
+    );
+    await Client.updateOne(
+      { userId },
+      { $set: { "upgradePlanStatus.storageLimitExceeded": true } },
+    );
+  }
 
   const computeOverlapFraction = () => {
     const scrapeFrac = totalEntries > 0 ? scrapeCompleted / totalEntries : 1;
@@ -1096,6 +1163,7 @@ async function runParallelRetrainOverlap(opts) {
 
     if (skipped === "unchanged") {
       console.log(`[parallelRetrain] train skipped unchanged url=${item.url}`);
+      markSettled(item.url);
       await markUrlUnchanged(item.url, userId, agentId, {
         contentHash: pageResult.contentHash,
         pageType: pageResult.page?.pageType || "generic",
@@ -1111,6 +1179,7 @@ async function runParallelRetrainOverlap(opts) {
       console.log(
         `[parallelRetrain] train skipped low_quality url=${item.url} reason=${pageResult.skipReason || "below_threshold"}`,
       );
+      markSettled(item.url);
       await markUrlSkipped(
         item.url,
         userId,
@@ -1123,6 +1192,14 @@ async function runParallelRetrainOverlap(opts) {
           contentHash: pageResult.contentHash,
         },
       );
+      await upsertSkippedTrainingRow({
+        TrainingModel,
+        userId,
+        agentId,
+        url: item.url,
+        reason: `low_quality:${pageResult.skipReason || "below_threshold"}`,
+        title: item.scrapedDoc?.metadata?.title || item.url,
+      });
       try {
         await qdrantManager.deleteByFields({
           user_id: userId?.toString(),
@@ -1164,8 +1241,11 @@ async function runParallelRetrainOverlap(opts) {
           chunkCount: result.chunkCountPerUrl?.[item.url] || 0,
           "webPage.url": item.url,
         },
+        $unset: { error: 1, errorType: 1 },
       },
     );
+
+    markSettled(item.url);
 
     await markUrlProcessed(item.url, userId, agentId, {
       contentHash:
@@ -1197,8 +1277,9 @@ async function runParallelRetrainOverlap(opts) {
       await trainLimiter.acquire();
       let trainStarted = false;
       try {
-        if (stoppedForDelete) return;
+        if (stoppedForDelete || stoppedForStorageLimit) return;
         if (await shouldStopForDeletedAgent()) return;
+        if (stoppedForStorageLimit) return;
 
         trainStarted = true;
         console.log(
@@ -1271,6 +1352,12 @@ async function runParallelRetrainOverlap(opts) {
           );
           return;
         }
+        if (stoppedForStorageLimit && !trainStarted) {
+          console.log(
+            `[parallelRetrain] train skipped storage-limit completed=${trainCompleted}/${trainQueued} url=${item.url}`,
+          );
+          return;
+        }
         console.log(
           `[parallelRetrain] train finished completed=${trainCompleted}/${trainQueued} url=${item.url}`,
         );
@@ -1291,8 +1378,9 @@ async function runParallelRetrainOverlap(opts) {
     const prevStatus = entry.trainingStatus;
 
     try {
-      if (stoppedForDelete) return;
+      if (stoppedForDelete || stoppedForStorageLimit) return;
       if (await shouldStopForDeletedAgent()) return;
+      if (stoppedForStorageLimit) return;
       if (!isScrapableWebUrl(url) || isNonContentPath(url)) {
         console.log(`[parallelRetrain] Skipping non-content URL: ${url}`);
         await markEntryFailed({
@@ -1315,8 +1403,9 @@ async function runParallelRetrainOverlap(opts) {
         `[parallelRetrain] scrape done url=${url} html_bytes=${Buffer.byteLength(rawHtml || "", "utf8")}`,
       );
 
-      if (stoppedForDelete) return;
+      if (stoppedForDelete || stoppedForStorageLimit) return;
       if (await shouldStopForDeletedAgent()) return;
+      if (stoppedForStorageLimit) return;
 
       const processResult = await processWebPage(url, rawHtml, chromeCache, {
         userId,
@@ -1359,8 +1448,9 @@ async function runParallelRetrainOverlap(opts) {
       } = processResult;
 
       const itemOrSkip = await withSharedLock(async () => {
-        if (stoppedForDelete) return { skip: true };
+        if (stoppedForDelete || stoppedForStorageLimit) return { skip: true };
         if (await shouldStopForDeletedAgent()) return { skip: true };
+        if (stoppedForStorageLimit) return { skip: true };
 
         const canonCheck = await checkCanonicalDuplicate({
           userId,
@@ -1396,12 +1486,27 @@ async function runParallelRetrainOverlap(opts) {
             title: title || url,
             duplicateOf: canonCheck.duplicateOf || canonicalUrl || null,
           });
+          markSettled(url);
           return { skip: true };
         }
 
         const contentSize = Buffer.byteLength(content, "utf8");
         const oldDataSize = entry.dataSize || 0;
         const dataSizeDelta = contentSize - oldDataSize;
+
+        if (dataSizeDelta > 0) {
+          const clientDoc = await Client.findOne({ userId });
+          const currentDataSize = clientDoc?.currentDataSize || 0;
+          const maxStorage =
+            clientDoc?.customLimits?.isCustomLimits &&
+            clientDoc.customLimits?.maxStorage != null
+              ? clientDoc.customLimits.maxStorage
+              : plan.limits.maxStorage;
+          if (currentDataSize + dataSizeDelta > maxStorage) {
+            await triggerRetrainStorageLimitStop();
+            return { skip: true };
+          }
+        }
 
         return {
           skip: false,
@@ -1466,6 +1571,18 @@ async function runParallelRetrainOverlap(opts) {
 
   await Promise.all(trainPromises);
 
+  if (stoppedForStorageLimit && !stoppedForDelete) {
+    const unfinishedUrls = (validEntries || [])
+      .map((entry) => entry.webPage?.url)
+      .filter((url) => url && !settledUrls.has(url));
+    await markUnfinishedUrlsForStorageLimit({
+      TrainingModel,
+      userId,
+      agentId,
+      unfinishedUrls,
+    });
+  }
+
   if (!stoppedForDelete) {
     await emitScrapingProgress(totalEntries, totalEntries, false);
     if (trainQueued > 0) {
@@ -1479,7 +1596,7 @@ async function runParallelRetrainOverlap(opts) {
   }
 
   console.log(
-    `[parallelRetrain] summary entries=${totalEntries} success=${successCount} failed=${failCount} queued=${trainQueued} completed=${trainCompleted} deleted=${stoppedForDelete}`,
+    `[parallelRetrain] summary entries=${totalEntries} success=${successCount} failed=${failCount} queued=${trainQueued} completed=${trainCompleted} deleted=${stoppedForDelete} stopped=${stoppedForStorageLimit}`,
   );
 
   return {
@@ -1488,6 +1605,7 @@ async function runParallelRetrainOverlap(opts) {
     trainQueued,
     trainCompleted,
     stoppedForDelete,
+    stoppedForStorageLimit,
   };
 }
 
