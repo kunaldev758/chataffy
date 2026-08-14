@@ -217,13 +217,51 @@ const initializeClientEvents = (io, socket) => {
     });
   });
 
+  socket.on("get-training-list-ids", async (data = {}) => {
+    const payload = data || {};
+    const requestId = payload.requestId;
+    try {
+      if (!isValidAgentId(agentId)) {
+        socket.emit("get-training-list-ids-response", {
+          requestId,
+          success: false,
+          error: "Invalid or missing agent id",
+          data: { ids: [], total: 0, truncated: false },
+        });
+        return;
+      }
+      const { sourcetype, actionType, search } = payload;
+      const result = await ScrappingController.getScrapingHistoryIdsBySocket(
+        userId,
+        agentId,
+        sourcetype,
+        actionType,
+        search
+      );
+      socket.emit("get-training-list-ids-response", {
+        requestId,
+        success: result.success !== false,
+        error: result.error,
+        data: result.data || { ids: [], total: 0, truncated: false },
+      });
+    } catch (error) {
+      console.error("get-training-list-ids error:", error);
+      socket.emit("get-training-list-ids-response", {
+        requestId,
+        success: false,
+        error: error?.message || "Failed to load matching items",
+        data: { ids: [], total: 0, truncated: false },
+      });
+    }
+  });
+
   socket.on("continue-scrapping-button", async () => {
     if (!isValidAgentId(agentId)) return;
     const clientData = await Client.findOne({ userId });
     const agentData = await Agent.findOne({ _id: agentId });
     if (
       agentData?.pagesAdded?.success + agentData?.pagesAdded?.failed <
-        agentData?.pagesAdded?.total &&
+      agentData?.pagesAdded?.total &&
       clientData?.upgradePlanStatus?.storageLimitExceeded != true &&
       agentData?.dataTrainingStatus == 0
     ) {
@@ -628,13 +666,13 @@ const initializeClientEvents = (io, socket) => {
         return;
       }
 
-     if(status === "close" && conversation.visitorClosed === false){
-      try {
-        await transcriptEmailQueue.add("sendConversationTranscriptEmail", { conversation: conversation.toObject() });
-      } catch (mailError) {
-        console.error("queue transcript email error:", mailError.message);
+      if (status === "close" && conversation.visitorClosed === false) {
+        try {
+          await transcriptEmailQueue.add("sendConversationTranscriptEmail", { conversation: conversation.toObject() });
+        } catch (mailError) {
+          console.error("queue transcript email error:", mailError.message);
+        }
       }
-     }
 
       let visitorId = conversation?.visitor;
 
@@ -718,7 +756,7 @@ const initializeClientEvents = (io, socket) => {
     }
   });
 
-  socket.on("agent-deleted", async ({}, callback) => {
+  socket.on("agent-deleted", async ({ }, callback) => {
     try {
       io.to(userRoom).emit("agent-deleted-success");
     } catch (error) {
@@ -812,7 +850,7 @@ const initializeClientEvents = (io, socket) => {
   });
 
   ///////dashboard////////////
-  socket.on("fetch-dashboard-data", async ({ dateRange,agentId }, callback) => {
+  socket.on("fetch-dashboard-data", async ({ dateRange, agentId }, callback) => {
     try {
       const [data, analytics, plan, effectiveLimits] = await Promise.all([
         DashboardController.getDashboardDataForAgent(dateRange, socket.userId, agentId),
@@ -834,7 +872,7 @@ const initializeClientEvents = (io, socket) => {
       const [effectiveLimits] = await Promise.all([
         PlanService.getEffectiveLimits(socket.userId),
       ]);
-      callback?.({ success: true , effectiveLimits: effectiveLimits });
+      callback?.({ success: true, effectiveLimits: effectiveLimits });
     } catch (error) {
       console.error("Error fetching effective limits:", error);
       callback?.({ success: false, error: "Failed to fetch effective limits" });

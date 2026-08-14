@@ -844,6 +844,23 @@ new Worker(
         console.log(
           `[deleteTrainingData] Cleared ${urlDeleteResult.deletedCount || 0} Url pipeline row(s) for agent ${agentId}`,
         );
+
+        const urlsToRemove = new Set();
+        for (const url of deletedPageUrls) {
+          if (!url) continue;
+          urlsToRemove.add(url);
+          urlsToRemove.add(url.toLowerCase());
+          const trimmed = url.replace(/\/+$/, "");
+          urlsToRemove.add(trimmed);
+          urlsToRemove.add(trimmed + "/");
+          urlsToRemove.add(trimmed.toLowerCase());
+          urlsToRemove.add((trimmed + "/").toLowerCase());
+        }
+
+        await Agent.updateOne(
+          { _id: agentId },
+          { $pull: { onboardingExtractedUrls: { $in: Array.from(urlsToRemove) } } },
+        );
       }
 
       // Recompute counters from source-of-truth rows. This is idempotent on
