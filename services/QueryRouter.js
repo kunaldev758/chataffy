@@ -40,7 +40,11 @@ const {
 } = require("../utils/queryOnTopicDetection");
 
 const { userIntentPrompt } = require("../prompts/intent-detection-prompt.js");
-const { normalizeRecall, resolveRecallContract } = require("./conversationRecallService");
+const {
+  normalizeRecall,
+  parseRecallIntent,
+  resolveRecallContract,
+} = require("./conversationRecallService");
 
 const ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL || "gpt-4.1-nano";
 
@@ -521,12 +525,18 @@ function applyFollowUpAcceptanceOverride(
   });
 }
 
-function applyConversationRecallContract(result, question, chatMessages = []) {
+function applyConversationRecallContract(
+  result,
+  question,
+  chatMessages = [],
+  recallInventory = null,
+) {
   if (result?.route !== ROUTES.CONVERSATION_RECALL) return result;
 
   const resolved = resolveRecallContract(result.recall, {
     chatMessages,
     currentQuestion: question,
+    recallInventory,
   });
 
   if (!resolved.ok) {
@@ -658,7 +668,9 @@ function buildRouteResult({
     isIdentityQuestion,
     isBusinessQuestion,
     isTrulyOffTopic,
-    recall: normalizeRecall(recall),
+    recall: recall?.reference
+      ? parseRecallIntent(recall)
+      : normalizeRecall(recall),
     source,
   };
 }
@@ -888,7 +900,7 @@ function parseRouterJson(content, question = "") {
         ? parsed.rewrittenQuery.trim()
         : null;
 
-    const recall = normalizeRecall(parsed.recall);
+    const recall = parseRecallIntent(parsed.recall);
 
     const followUp = Boolean(parsed.followUp);
     const needsRewrite =
@@ -940,7 +952,7 @@ function parseRouterJson(content, question = "") {
     const isTrulyOffTopic =
       !isIdentityQuestion && Boolean(parsed.isTrulyOffTopic);
 
-    if (isIdentityQuestion) {
+    if (isIdentityQuestion && finalRoute !== ROUTES.CONVERSATION_RECALL) {
       finalRoute = ROUTES.SEMANTIC_RAG;
       subIntent = null;
     }
@@ -1015,6 +1027,7 @@ async function llmRoute(question, options = {}) {
     openaiClient = null,
     logOpenAIUsage = null,
     routerModel = null,
+    recallInventory = null,
   } = options;
 
   let modelName = routerModel;
@@ -1050,6 +1063,12 @@ async function llmRoute(question, options = {}) {
 
   if (chatHistorySnippet) {
     userContentParts.push(`Recent conversation:\n${chatHistorySnippet}`);
+  }
+
+  if (recallInventory) {
+    userContentParts.push(
+      `Chat inventory:\n- user_turns: ${Number(recallInventory.userTurnCount) || 0}\n- assistant_turns: ${Number(recallInventory.assistantTurnCount) || 0}`,
+    );
   }
 
   console.log("chat history snippet :", chatHistorySnippet);
@@ -1136,6 +1155,7 @@ async function routeQuery(question, options = {}) {
     openaiClient = null,
     logOpenAIUsage,
     routerModel = null,
+    recallInventory = null,
   } = options;
 
   const ruleOutcome = applyRuleEngine(question, {
@@ -1177,7 +1197,9 @@ async function routeQuery(question, options = {}) {
     openaiClient,
     logOpenAIUsage,
     routerModel,
+    recallInventory,
   });
+
 
   let result = applyFollowUpAcceptanceOverride(llmResult, question, {
     chatMessages,
@@ -1201,7 +1223,14 @@ async function routeQuery(question, options = {}) {
     );
   }
 
-  result = applyConversationRecallContract(result, question, chatMessages);
+  result = applyConversationRecallContract(
+    result,
+    question,
+    chatMessages,
+    recallInventory,
+  );
+
+  console.log("result check is applyConversationRecallContract",result);
 
   return result;
 }
@@ -1227,4 +1256,5 @@ module.exports = {
   applyFollowUpAcceptanceOverride,
   rewriteFollowUpFromIntentContext,
   rewriteFromConversationState,
+  applyConversationRecallContract,
 };

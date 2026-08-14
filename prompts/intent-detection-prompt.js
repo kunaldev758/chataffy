@@ -571,7 +571,7 @@ ROUTES:
 - LIVE_AGENT: asks for a human or representative.
 - ACCIDENTAL: genuinely meaningless/random input.
 - ACKNOWLEDGEMENT: pure gratitude or social acknowledgement with no request or contextual continuation.
-- CONVERSATION_RECALL: quote a past user question or assistant answer from THIS chat by first/last/nth index.
+- CONVERSATION_RECALL: quote a past user question or assistant answer from THIS chat.
 - HYBRID: explicit request for product lists, page/collection URLs, contact details, or social profiles.
 - SEMANTIC_RAG: all other meaningful business questions and contextual follow-ups. This is the default.
 
@@ -822,9 +822,11 @@ FINAL CHECKS:
 - A new user value updates constraints unless it distinguishes separate rawEntities.
 - For SEMANTIC_RAG/HYBRID, rewrittenQuery must always be present.
 - For ACKNOWLEDGEMENT, rewrittenQuery=null, followUp=false, needsRewrite=false, rewriteReason="NONE".
-- For CONVERSATION_RECALL, rewrittenQuery=null, followUp=false, needsRewrite=false, rewriteReason="NONE", recall must be filled; otherwise use SEMANTIC_RAG.
-- Reply/answer/response of/to my Nth question in THIS message → assistant_answer + paired + N; never user_question.
-- Follow-up asking for the response to a just-recalled user question → assistant_answer + paired; do not repeat user_question.
+- For CONVERSATION_RECALL, rewrittenQuery=null, followUp=false, needsRewrite=false, rewriteReason="NONE", recall must be filled with target + reference + paired; otherwise use SEMANTIC_RAG.
+- Recall reference.value is the ordinal (third→3, last/previous/prior→1 from end). Always set origin. origin="end" for last, previous, prior, Nth last, last Nth, and N ago. Never emit an absolute conversation index. Never treat previous as first.
+- "your answer/response to my Nth question" or "question and your response" → target=user_question, paired=true.
+- "what was your Nth answer?" (global assistant numbering) → target=assistant_answer, paired=false.
+- Follow-up asking for the response to a just-recalled user question → target=user_question, paired=true, reference.type="semantic".
 - If multiEntityMode is not null, rawEntities cannot be empty.
 - If rawEntities has 2+ separately requested products or categories, multiEntityMode must be "multi_ask", not null.
 

@@ -22,51 +22,63 @@ Set:
 - rewriteReason="NONE"
 - isBusinessQuestion=false
 - isTrulyOffTopic=false
-- recall={ "target": "user_question"|"assistant_answer", "indexType": "nth"|"first"|"last"|"paired", "index": number|null }
+- recall={
+    "target": "user_question"|"assistant_answer",
+    "paired": boolean,
+    "reference": {
+      "type": "position"|"relative"|"semantic",
+      "value": number|null,
+      "origin": "start"|"end"|null
+    }
+  }
 
-recall.target:
-- "user_question" — quote something THEY asked
-- "assistant_answer" — quote something YOU answered
+Do NOT emit an absolute conversation index. reference.value is the ordinal the user asked for (third → 3, last → 1 from the end). The application resolves it using Chat inventory.
 
-recall.indexType / index:
-- "first" → index=1
-- "nth" → 1-based index (third → 3)
-- "last" → index=null
-- "paired" → original assistant reply that FOLLOWED user question N
-  (not assistant answer #N globally, not the latest recap)
+reference:
+- Always set origin for type="position". Never emit value without origin.
+- "my Nth question" → type="position", value=N, origin="start"
+- "my last / previous / prior question" → type="position", value=1, origin="end"
+  (previous is NOT the first question)
+- "Nth last" / "last Nth" / "N questions ago" → type="position", value=N, origin="end"
+  ("third last" and "last third" are the same: value=3, origin="end")
+- Follow-up with no ordinal ("and your response to that") → type="semantic", value=null, origin=null
 
-SAME-TURN PAIRED (index is in THIS message):
-If they ask for the reply/answer/response of/to/for their Nth/first/last question:
-- target="assistant_answer"
-- indexType="paired"
-- index=N (first→1, second→2, last→null)
-- NEVER use user_question
-- NEVER use assistant_answer/nth (that is global AI #N, not the pair)
+target / paired:
+- Quote what THEY asked → target="user_question", paired=false
+- Quote YOUR answer TO THEIR Nth question, or the question AND your response
+  → target="user_question", paired=true
+- Quote YOUR Nth answer globally ("what was your third answer?")
+  → target="assistant_answer", paired=false
+Never use assistant_answer/nth for "your answer to my Nth question". That is paired on the user turn.
 
 Examples:
-- "what is the reply of my first question that i asked to you"
-  → assistant_answer / paired / 1
-- "what was your answer to my second question"
-  → assistant_answer / paired / 2
-- "what did you reply to my first question"
-  → assistant_answer / paired / 1
+- "what was my third question?"
+  → user_question, paired=false, position 3 from start
+- "what was my last question?"
+  → user_question, paired=false, position 1 from end
+- "what is my previous question with its response"
+  → user_question, paired=true, position 1 from end
+- "what was my previous question?"
+  → user_question, paired=false, position 1 from end
+- "what was my third last question?"
+  → user_question, paired=false, position 3 from end
+- "what was my last third question?"
+  → user_question, paired=false, position 3 from end
+- "give me the response to my third question"
+  → user_question, paired=true, position 3 from start
+- "what did you answer to my third last question?"
+  → user_question, paired=true, position 3 from end
+- "show me my third question and your response"
+  → user_question, paired=true, position 3 from start
+- "what was your third answer?"
+  → assistant_answer, paired=false, position 3 from start
+- "what did you say last?"
+  → assistant_answer, paired=false, position 1 from end
+- "give me the answer from three questions ago"
+  → user_question, paired=true, position 3 from end
 
-FOLLOW-UP PAIRED (index is NOT in this message):
-If the previous user turn recalled their Nth question AND this message asks for
-the response to that ("and what's the response you gave me for that",
-"what did you reply", "and your answer"):
-- target="assistant_answer"
-- indexType="paired"
-- index=the same N if you can read it from the previous user turn; otherwise null
-- NEVER repeat user_question for this follow-up
-
-If the previous turn was not a user-question recall, do not invent paired.
-Use SEMANTIC_RAG.
-
-Direct quote of the question or of a numbered assistant turn:
-- "what was my second question?" → user_question / nth / 2
-- "what was your second answer?" → assistant_answer / nth / 2
-- "what did you say last?" → assistant_answer / last
+Chat inventory (user_turns / assistant_turns) is the full conversation, not the recent snippet.
+If the requested ordinal is outside that inventory, set recall=null and use SEMANTIC_RAG.
 
 Do NOT use CONVERSATION_RECALL for:
 - catalog / list selection: "the second one", "the third product", "that option"

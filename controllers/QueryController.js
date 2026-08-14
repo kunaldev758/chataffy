@@ -106,7 +106,8 @@ const {
 } = require("../prompts/conversation-recall-prompt");
 const {
   fetchRecalledTurn,
-  buildRecallContext,
+  renderRecalledTurnHtml,
+  getRecallInventory,
 } = require("../services/conversationRecallService");
 
 // --- Configuration ---
@@ -789,37 +790,15 @@ class QuestionAnsweringSystem {
       recall: routing.recall,
       currentQuestion: question,
     });
-    const context = buildRecallContext(fetched);
 
     console.log(
-      `[QueryController] Conversation recall: target=${fetched.target} index=${fetched.requestedIndex} found=${fetched.found} total=${fetched.total}`,
+      `[QueryController] Conversation recall: target=${fetched.target} index=${fetched.requestedIndex} found=${fetched.found} total=${fetched.total} paired=${fetched.indexType === "paired"}`,
     );
 
-    const result = await this.generateAnswer(
-      question,
-      context,
-      "",
-      companyName,
-      websiteData,
-      {
-        userLanguage: routing.userLanguage,
-        forcePremium: false,
-        conversationRecall: true,
-        recallMeta: {
-          target: fetched.target,
-          indexType: fetched.indexType,
-          index: fetched.index ?? fetched.requestedIndex,
-          found: fetched.found,
-          total: fetched.total,
-        },
-      },
-    );
-
-    this.logAnswerUsage(userId, agentId, result, conversationId);
-
+    const answer = renderRecalledTurnHtml(fetched);
     return {
       success: true,
-      answer: result.answer,
+      answer,
       conversationId,
       isAgentRequest: false,
     };
@@ -2845,11 +2824,17 @@ ${answerInstructions}`;
         );
       }
 
+      const recallInventory = await getRecallInventory(
+        conversationId,
+        normalizedQuestion,
+      );
+
       // Intent classification FIRST (rules → LLM) + multi-entity mode enrichment
       const baseRouting = await routeQuery(normalizedQuestion, {
         chatMessages: chatSession,
         conversationState: ragState,
         websiteLanguage,
+        recallInventory,
         openaiClient: openai,
         logOpenAIUsage: ({ usage, modelName, type }) =>
           this.logOpenAIChatUsage({
