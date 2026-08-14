@@ -35,6 +35,102 @@ function finalizeDiscoveredUrls(urls, max = MAX_DISCOVERED_URLS) {
   }
   return cleaned;
 }
+
+function buildTrainingListQuery(userId, agentId, type, status, search) {
+  const query = { userId, agentId };
+  let filterType = null;
+  switch (type) {
+    case "Web Pages":
+      filterType = 0;
+      break;
+    case "Files":
+      filterType = 1;
+      break;
+    case "Doc/Snippets":
+      filterType = 2;
+      break;
+    case "FAQs":
+      filterType = 3;
+      break;
+    case "all":
+    default:
+      filterType = null;
+  }
+
+  if (filterType !== null) {
+    query.type = filterType;
+  }
+
+  const searchTerm =
+    typeof search === "string" && search.trim() ? search.trim() : null;
+  let searchOr = null;
+  if (searchTerm) {
+    const escaped = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const urlRegex = { "webPage.url": { $regex: escaped, $options: "i" } };
+    const fileRegex = [
+      { fileName: { $regex: escaped, $options: "i" } },
+      { originalFileName: { $regex: escaped, $options: "i" } },
+    ];
+    const textRegex = [
+      { title: { $regex: escaped, $options: "i" } },
+      { content: { $regex: escaped, $options: "i" } },
+    ];
+
+    if (filterType === 0) {
+      // Web pages: match keyword in URL only (not page title or scraped content).
+      searchOr = [urlRegex];
+    } else if (filterType === 1) {
+      searchOr = fileRegex;
+    } else if (filterType === 2 || filterType === 3) {
+      searchOr = textRegex;
+    } else {
+      searchOr = [
+        { type: 0, ...urlRegex },
+        { type: 1, fileName: { $regex: escaped, $options: "i" } },
+        { type: 1, originalFileName: { $regex: escaped, $options: "i" } },
+        { type: { $in: [2, 3] }, title: { $regex: escaped, $options: "i" } },
+        { type: { $in: [2, 3] }, content: { $regex: escaped, $options: "i" } },
+      ];
+    }
+  }
+
+  const completedOrLegacy = {
+    $or: [{ trainingStatus: 1 }, { trainingStatus: { $exists: false } }],
+  };
+
+  const allStatusesOrLegacy = {
+    $or: [
+      { trainingStatus: { $in: [0, 1, 2] } },
+      { trainingStatus: { $exists: false } },
+    ],
+  };
+
+  if (status !== null && status !== undefined && status !== "") {
+    if (status === "success") {
+      if (searchOr) {
+        query.$and = [completedOrLegacy, { $or: searchOr }];
+      } else {
+        query.$or = completedOrLegacy.$or;
+      }
+    } else if (status === "failed") {
+      query.trainingStatus = 2;
+      if (searchOr) {
+        query.$and = [{ trainingStatus: 2 }, { $or: searchOr }];
+      }
+    } else {
+      if (searchOr) {
+        query.$and = [allStatusesOrLegacy, { $or: searchOr }];
+      } else {
+        query.$or = allStatusesOrLegacy.$or;
+      }
+    }
+  } else if (searchOr) {
+    query.$or = searchOr;
+  }
+
+  return query;
+}
+
 const Agent = require("../models/Agent.js");
 const Widget = require("../models/Widget.js");
 const { findDuplicateWebsiteAgent } = require("../helpers/websiteDuplicateHelper.js");
@@ -1398,98 +1494,7 @@ async bulkInsertUrls(userId,agentId, urls) {
   async getScrapingHistoryBySocket(userId, agentId, skip, limit, type, status, search) {
     try {
       const TrainingModel = await PlanService.getTrainingModel(userId);
-
-      const query = { userId, agentId };
-      // Handle sourceType filter from frontend
-      let filterType = null;
-      switch (type) {
-        case "Web Pages":
-          filterType = 0;
-          break;
-        case "Files":
-          filterType = 1;
-          break;
-        case "Doc/Snippets":
-          filterType = 2;
-          break;
-        case "FAQs":
-          filterType = 3;
-          break;
-        case "all":
-        default:
-          filterType = null;
-      }
-
-      if (filterType !== null) {
-        query.type = filterType;
-      }
-
-      const searchTerm =
-        typeof search === "string" && search.trim() ? search.trim() : null;
-      let searchOr = null;
-      if (searchTerm) {
-        const escaped = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const urlRegex = { "webPage.url": { $regex: escaped, $options: "i" } };
-        const fileRegex = [
-          { fileName: { $regex: escaped, $options: "i" } },
-          { originalFileName: { $regex: escaped, $options: "i" } },
-        ];
-        const textRegex = [
-          { title: { $regex: escaped, $options: "i" } },
-          { content: { $regex: escaped, $options: "i" } },
-        ];
-
-        if (filterType === 0) {
-          // Web pages: match keyword in URL only (not page title or scraped content).
-          searchOr = [urlRegex];
-        } else if (filterType === 1) {
-          searchOr = fileRegex;
-        } else if (filterType === 2 || filterType === 3) {
-          searchOr = textRegex;
-        } else {
-          searchOr = [
-            { type: 0, ...urlRegex },
-            { type: 1, fileName: { $regex: escaped, $options: "i" } },
-            { type: 1, originalFileName: { $regex: escaped, $options: "i" } },
-            { type: { $in: [2, 3] }, title: { $regex: escaped, $options: "i" } },
-            { type: { $in: [2, 3] }, content: { $regex: escaped, $options: "i" } },
-          ];
-        }
-      }
-
-      const completedOrLegacy = {
-        $or: [{ trainingStatus: 1 }, { trainingStatus: { $exists: false } }],
-      };
-
-      const allStatusesOrLegacy = {
-        $or: [
-          { trainingStatus: { $in: [0, 1, 2] } },
-          { trainingStatus: { $exists: false } },
-        ],
-      };
-
-      if (status !== null && status !== undefined && status !== "") {
-        if (status === "success") {
-          if (searchOr) {
-            query.$and = [completedOrLegacy, { $or: searchOr }];
-          } else {
-            query.$or = completedOrLegacy.$or;
-          }
-        } else if (status === "failed") {
-          query.trainingStatus = 2;
-          if (searchOr) {
-            query.$and = [{ trainingStatus: 2 }, { $or: searchOr }];
-          }
-        } else {
-          if (searchOr) {
-            query.$and = [allStatusesOrLegacy, { $or: searchOr }];
-          } else {
-            query.$or = allStatusesOrLegacy.$or;
-          }
-        }
-      } else if (searchOr) {
-        query.$or = searchOr;
-      }
+      const query = buildTrainingListQuery(userId, agentId, type, status, search);
 
       const [entries, total] = await Promise.all([
         TrainingModel.find(query)
@@ -1514,6 +1519,42 @@ async bulkInsertUrls(userId,agentId, urls) {
       };
     } catch (error) {
       console.error("Error getting scraping history:", error);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+  async getScrapingHistoryIdsBySocket(userId, agentId, type, status, search, options = {}) {
+    try {
+      const TrainingModel = await PlanService.getTrainingModel(userId);
+      const query = buildTrainingListQuery(userId, agentId, type, status, search);
+      const maxIds = Number.isFinite(options.maxIds) ? options.maxIds : 5000;
+
+      const [entries, total] = await Promise.all([
+        TrainingModel.find(query)
+          .select({ _id: 1, type: 1, trainingStatus: 1 })
+          .sort({ createdAt: -1 })
+          .limit(maxIds)
+          .lean(),
+        TrainingModel.countDocuments(query),
+      ]);
+
+      return {
+        success: true,
+        data: {
+          ids: entries.map((entry) => ({
+            _id: entry._id.toString(),
+            type: entry.type,
+            trainingStatus: entry.trainingStatus,
+          })),
+          total,
+          truncated: total > entries.length,
+        },
+      };
+    } catch (error) {
+      console.error("Error getting scraping history ids:", error);
       return {
         success: false,
         error: error.message,

@@ -44,6 +44,12 @@ const trainingListFreeUsersSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+
+  errorType: {
+    type: String,
+    default: null,
+    index: true,
+  },
   
   dataSize: {
     type: Number,
@@ -67,7 +73,7 @@ const trainingListFreeUsersSchema = new mongoose.Schema({
 });
 
 // Indexes for better performance
-trainingListFreeUsersSchema.index({ userId: 1, trainingStatus: 1 });
+trainingListFreeUsersSchema.index({ userId: 1, agentId: 1, type: 1, trainingStatus: 1, errorType: 1 });
 trainingListFreeUsersSchema.index({ userId: 1, type: 1 });
 trainingListFreeUsersSchema.index({ createdAt: 1 });
 

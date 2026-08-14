@@ -650,6 +650,13 @@ new Worker(
       stoppedForStorageLimit =
         stoppedForStorageLimit || !!pipelineResult.stoppedForStorageLimit;
 
+      if (pipelineResult.stoppedForDelete) {
+        console.log(
+          `[urlProcessingQueue] agent ${agentId} deleted — aborting remaining job work`,
+        );
+        return;
+      }
+
       if (pipelineResult.anyTrainFailed) {
         await Agent.updateOne(
           { _id: agentId },
@@ -836,6 +843,23 @@ new Worker(
         });
         console.log(
           `[deleteTrainingData] Cleared ${urlDeleteResult.deletedCount || 0} Url pipeline row(s) for agent ${agentId}`,
+        );
+
+        const urlsToRemove = new Set();
+        for (const url of deletedPageUrls) {
+          if (!url) continue;
+          urlsToRemove.add(url);
+          urlsToRemove.add(url.toLowerCase());
+          const trimmed = url.replace(/\/+$/, "");
+          urlsToRemove.add(trimmed);
+          urlsToRemove.add(trimmed + "/");
+          urlsToRemove.add(trimmed.toLowerCase());
+          urlsToRemove.add((trimmed + "/").toLowerCase());
+        }
+
+        await Agent.updateOne(
+          { _id: agentId },
+          { $pull: { onboardingExtractedUrls: { $in: Array.from(urlsToRemove) } } },
         );
       }
 
@@ -1050,6 +1074,13 @@ new Worker(
 
       const successCount = retrainResult.successCount || 0;
       const failCount = retrainResult.failCount || 0;
+
+      if (retrainResult.stoppedForDelete) {
+        console.log(
+          `[retrainTrainingData] agent ${agentId} deleted — aborting remaining job work`,
+        );
+        return;
+      }
 
       await Agent.updateOne(
         { _id: agentId },

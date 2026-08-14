@@ -913,6 +913,8 @@ module.exports.setCustomLimits = async (req, res) => {
       return planVal != null ? Number(planVal) : null;
     };
 
+    const wasStorageLimitExceeded = !!client.upgradePlanStatus?.storageLimitExceeded;
+
     if (!isCustomLimits) {
       client.customLimits = {
         isCustomLimits: false,
@@ -932,9 +934,22 @@ module.exports.setCustomLimits = async (req, res) => {
       };
     }
 
-    if (client.customLimits.isCustomLimits) {
-      const userId = client.userId;
+    const userId = client.userId;
+    const effectiveMaxStorage = client.customLimits.isCustomLimits
+      ? client.customLimits.maxStorage
+      : plim.maxStorage != null
+        ? Number(plim.maxStorage)
+        : null;
+    const isStorageLimitExceeded =
+      effectiveMaxStorage != null &&
+      (client.currentDataSize || 0) > effectiveMaxStorage;
 
+    const upgradePlanStatus = {
+      ...(client.upgradePlanStatus.toObject?.() || client.upgradePlanStatus || {}),
+    };
+    upgradePlanStatus.storageLimitExceeded = isStorageLimitExceeded;
+
+    if (client.customLimits.isCustomLimits) {
       const [totalAiAgents, totalHumanAgents, visitorQueriesInCycle] = await Promise.all([
         Agent.countDocuments({ userId, isDeleted: { $ne: true } }),
         HumanAgent.countDocuments({ userId, isDeleted: false, isClient: false }),
@@ -942,30 +957,28 @@ module.exports.setCustomLimits = async (req, res) => {
       ]);
 
       const cl = client.customLimits;
-      const effectiveMaxAgents = cl.maxAgents;
-      const effectiveMaxHumanAgents = cl.maxHumanAgents;
-      const effectiveMaxQueries = cl.maxQueries;
-      const effectiveMaxStorage = cl.maxStorage;
-
-      const upgradePlanStatus = { ...client.upgradePlanStatus.toObject?.() || client.upgradePlanStatus };
-
-      if (effectiveMaxAgents != null) {
-        upgradePlanStatus.agentLimitExceeded = totalAiAgents > effectiveMaxAgents;
+      if (cl.maxAgents != null) {
+        upgradePlanStatus.agentLimitExceeded = totalAiAgents > cl.maxAgents;
       }
-      if (effectiveMaxHumanAgents != null) {
-        upgradePlanStatus.humanAgentLimitExceeded = totalHumanAgents > effectiveMaxHumanAgents;
+      if (cl.maxHumanAgents != null) {
+        upgradePlanStatus.humanAgentLimitExceeded = totalHumanAgents > cl.maxHumanAgents;
       }
-      if (effectiveMaxQueries != null) {
-        upgradePlanStatus.chatLimitExceeded = visitorQueriesInCycle > effectiveMaxQueries;
+      if (cl.maxQueries != null) {
+        upgradePlanStatus.chatLimitExceeded = visitorQueriesInCycle > cl.maxQueries;
       }
-      if (effectiveMaxStorage != null) {
-        upgradePlanStatus.storageLimitExceeded = client.currentDataSize > effectiveMaxStorage;
-      }
-
-      client.upgradePlanStatus = upgradePlanStatus;
     }
 
+    client.upgradePlanStatus = upgradePlanStatus;
     await client.save();
+
+    if (wasStorageLimitExceeded && !isStorageLimitExceeded) {
+      try {
+        const { queueRetrainForStorageLimitFailures } = require("../services/storageLimitTraining");
+        await queueRetrainForStorageLimitFailures(userId);
+      } catch (retrainError) {
+        console.error("[setCustomLimits] storage-limit retrain queue failed:", retrainError);
+      }
+    }
 
     res.status(200).json({
       success: true,

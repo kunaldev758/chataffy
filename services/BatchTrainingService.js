@@ -67,11 +67,15 @@ class BatchTrainingService {
         },
       );
 
-      console.log("Upsert result response", {
-        success: result.success,
-        totalChunks: result.totalChunks,
-        failedUrls: result.failedUrls,
-      });
+      if (result?.error === "Agent deleted") {
+        console.log("[batchTraining] skip upsert — agent deleted");
+      } else {
+        console.log("Upsert result response", {
+          success: result.success,
+          totalChunks: result.totalChunks,
+          failedUrls: result.failedUrls,
+        });
+      }
 
       const firstFailedUrl = (result.failedUrls || [])[0];
       const firstFailedError =

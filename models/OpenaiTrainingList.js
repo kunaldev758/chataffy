@@ -42,6 +42,12 @@ const trainingListSchema = new mongoose.Schema({
       type: String,
       default: null
     },
+
+    errorType: {
+      type: String,
+      default: null,
+      index: true,
+    },
     
     dataSize: {
       type: Number,
@@ -66,7 +72,7 @@ const trainingListSchema = new mongoose.Schema({
   // { timestamps: true }
 });
 
-trainingListSchema.index({ userId: 1, trainingStatus: 1 });
+trainingListSchema.index({ userId: 1, agentId: 1, type: 1, trainingStatus: 1, errorType: 1 });
 trainingListSchema.index({ userId: 1, type: 1 });
 trainingListSchema.index({ createdAt: 1 });
 
