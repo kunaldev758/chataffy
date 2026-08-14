@@ -11,6 +11,11 @@ const {
   isShopifyStorefront,
 } = require("./productVariants");
 const {
+  normalizeCurrencyToken,
+  formatMoneyAmount,
+  reconcileProductCurrency,
+} = require("./shopifyCurrency");
+const {
   isPdpRagCleanupEnabled,
   getPdpCleanBodyMinChars,
   getPdpVariantMarkdownLimit,
@@ -77,15 +82,23 @@ function parseAllPrices(text) {
   return nums;
 }
 
-function extractCurrencySymbol(text = "") {
-  const str = String(text || "").trim();
-  if (/₹|rs\.?|inr/i.test(str)) return "₹";
-  if (/€|eur/i.test(str)) return "€";
-  if (/£|gbp/i.test(str)) return "£";
-  if (/\$|usd|cad|aud/i.test(str)) return "$";
-  if (/¥|jpy|cny/i.test(str)) return "¥";
-  if (/₩|krw/i.test(str)) return "₩";
-  return "";
+function extractCurrencyPrices(text) {
+  const str = String(text || "");
+  const results = [];
+  const re =
+    /(?:([$€£¥₹₩]|Rs\.?|USD|EUR|GBP|INR)\s*)([\d,]+(?:\.\d+)?)|\b([\d,]+(?:\.\d+)?)\s*(USD|EUR|GBP|INR)\b/gi;
+  let match;
+  while ((match = re.exec(str)) !== null) {
+    const raw = match[2] || match[3];
+    const curTok = match[1] || match[4] || "";
+    const num = parsePrice(raw);
+    if (num == null || num <= 0) continue;
+    results.push({
+      amount: num,
+      currency: normalizeCurrencyToken(curTok),
+    });
+  }
+  return results;
 }
 
 const SALE_PRICE_SELECTORS = [
@@ -133,25 +146,6 @@ const PRICE_ROOT_SELECTORS = [
   ".price",
 ].join(", ");
 
-function extractCurrencyPrices(text) {
-  const str = String(text || "");
-  const results = [];
-  const re =
-    /(?:([$€£¥₹₩]|Rs\.?|USD|EUR|GBP|INR)\s*)([\d,]+(?:\.\d+)?)|\b([\d,]+(?:\.\d+)?)\s*(USD|EUR|GBP|INR)\b/gi;
-  let match;
-  while ((match = re.exec(str)) !== null) {
-    const raw = match[2] || match[3];
-    const curTok = match[1] || match[4] || "";
-    const num = parsePrice(raw);
-    if (num == null || num <= 0) continue;
-    results.push({
-      amount: num,
-      currency: extractCurrencySymbol(curTok || str) || "$",
-    });
-  }
-  return results;
-}
-
 function extractPriceRange(text) {
   const normalized = String(text || "").replace(/,/g, "");
   // Require a currency marker on the first amount so "1–3 business days" never matches
@@ -167,7 +161,7 @@ function extractPriceRange(text) {
   return {
     price_min: Math.min(min, max),
     price_max: Math.max(min, max),
-    currency: extractCurrencySymbol(rangeMatch[1] || text) || "$",
+    currency: normalizeCurrencyToken(rangeMatch[1]),
   };
 }
 
@@ -199,6 +193,7 @@ function extractPriceFromOffer(offer) {
  */
 function extractProductPricesFromDom(html) {
   const $ = cheerio.load(html || "");
+  $("localization-form, .localization-form, .currency-selector").remove();
   const $root = $(PRICE_ROOT_SELECTORS).first();
   const scope = $root.length ? $root : $("body");
   const attrs = {};
@@ -246,7 +241,7 @@ function extractProductPricesFromDom(html) {
     if (p != null) {
       // Don't let schema MRP overwrite a lower WooCommerce <ins> sale price
       if (attrs.price == null || p < attrs.price) attrs.price = p;
-      currency = extractCurrencySymbol(itempropPrice) || currency;
+      currency = normalizeCurrencyToken(itempropPrice) || currency;
     }
   }
 
@@ -378,8 +373,6 @@ function extractProductPricesFromDom(html) {
 
 function mergePriceAttributes(ldAttrs = {}, domAttrs = {}) {
   const merged = {};
-  if (ldAttrs.currency) merged.currency = ldAttrs.currency;
-  else if (domAttrs.currency) merged.currency = domAttrs.currency;
 
   // Prefer DOM selling price when it looks like a real discount vs LD/compare-at
   merged.price = domAttrs.price ?? ldAttrs.price ?? null;
@@ -441,22 +434,7 @@ function mergePriceAttributes(ldAttrs = {}, domAttrs = {}) {
 }
 
 function formatPriceValue(amount, currency) {
-  if (amount == null) return null;
-  let cur = currency ? String(currency).trim() : "";
-  const codeMap = {
-    INR: "₹",
-    USD: "$",
-    EUR: "€",
-    GBP: "£",
-    JPY: "¥",
-    CNY: "¥",
-    AUD: "$",
-    CAD: "$",
-  };
-  if (codeMap[cur.toUpperCase()]) cur = codeMap[cur.toUpperCase()];
-  if (/^[$€£₹¥₩]/i.test(cur)) return `${cur}${amount}`;
-  if (cur) return `${amount} ${cur}`;
-  return String(amount);
+  return formatMoneyAmount(amount, currency);
 }
 
 function normalizeAvailability(raw) {
@@ -794,13 +772,21 @@ function productToMarkdown({
  * ONLY safe on Shopify storefronts — BigCommerce/Woo often use integer dollars
  * ("4495" = $4,495). Pass enabled:true when isShopifyStorefront (or tests).
  *
+ * Skip when source already normalized at parse:
+ *   shopify_json → major units ("1799.00")
+ *   shopify_js   → cents divided once in fetchShopifyProductAttrs
+ *
  * - Single large integers (>= 1000) → /100
  * - Mixed ranges like 899 + 1299 (all integer cents, at least one >= 1000) → /100 all
  * - Keeps major-unit prices like 699 when original_price alone is cents (99900)
  */
-function normalizeShopifyCentsFields(attrs = {}, { enabled = false } = {}) {
+function normalizeShopifyCentsFields(
+  attrs = {},
+  { enabled = false, source = "" } = {},
+) {
   const out = { ...attrs };
   if (!enabled) return out;
+  if (source === "shopify_json" || source === "shopify_js") return out;
 
   const isIntMoney = (v) =>
     v != null && /^\d+$/.test(String(v).trim()) && Number(v) > 0;
@@ -929,7 +915,12 @@ async function extractProductContent({ url, html, jsonLdBlocks = [] }) {
   });
   merged.attributes = normalizeShopifyCentsFields(merged.attributes, {
     enabled: shopifyContext,
+    source: variantSource,
   });
+  merged.attributes = reconcileProductCurrency(html, merged.attributes, [
+    domPrices,
+    fromLd?.attributes,
+  ]);
 
   const { markdown: rawBodyMarkdown, source: bodySource } =
     extractCleanProductBody(html, url, { preferTightBody: cleanupEnabled });

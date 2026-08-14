@@ -288,6 +288,21 @@ test("normalizeShopifyCentsFields converts 899–1299 cent ranges to dollars", (
   assert.equal(attrs.variants[1].price, 12.99);
 });
 
+test("normalizeShopifyCentsFields skips shopify_json major units (Blue Tyga 1799)", () => {
+  const attrs = normalizeShopifyCentsFields(
+    {
+      price: 1799,
+      original_price: 2999,
+      currency: "INR",
+      variants: [{ sku: "OJE0005", price: 1799, original_price: 2999 }],
+    },
+    { enabled: true, source: "shopify_json" },
+  );
+  assert.equal(attrs.price, 1799);
+  assert.equal(attrs.original_price, 2999);
+  assert.equal(attrs.variants[0].price, 1799);
+});
+
 test("normalizeShopifyCentsFields is a no-op when disabled (BigCommerce integer dollars)", () => {
   const attrs = normalizeShopifyCentsFields({
     price: 4495,

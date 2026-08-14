@@ -4,6 +4,7 @@
  */
 
 const cheerio = require("cheerio");
+const { moneyAmountsMatch } = require("./shopifyCurrency");
 
 function asArray(value) {
   if (value == null) return [];
@@ -901,6 +902,20 @@ function ldFillScalars(ldAttrs) {
   };
 }
 
+function fillWithoutMismatchedCurrency(primary, fill) {
+  if (!fill) return {};
+  if (
+    fill.currency &&
+    primary &&
+    primary.price != null &&
+    (fill.price == null || !moneyAmountsMatch(primary.price, fill.price))
+  ) {
+    const { currency, ...rest } = fill;
+    return rest;
+  }
+  return fill;
+}
+
 /**
  * Cascade (prefer unambiguous dollar strings, then cents APIs, then HTML):
  *   .json rich → DONE   (storefront dollars: "8.99")
@@ -918,7 +933,10 @@ async function collectCanonicalProductAttrs({
   const ld = collectFromJsonLd(jsonLdBlocks);
   const dom = collectFromWooDom(html);
   const fromHtml = collectFromShopify(html, { url });
-  const fill = () => [ldFillScalars(ld), ldFillScalars(dom)];
+  const fillFor = (primary) => [
+    fillWithoutMismatchedCurrency(primary, ldFillScalars(ld)),
+    fillWithoutMismatchedCurrency(primary, ldFillScalars(dom)),
+  ];
 
   // 1–2) Shopify product endpoints first (only /products/…)
   // Prefer .json over .js — .json prices are dollars; .js are cents.
@@ -927,7 +945,7 @@ async function collectCanonicalProductAttrs({
     const fromJson = await fetchShopifyProductAttrs(base, "json");
     if (isRichVariantAttrs(fromJson)) {
       return {
-        attrs: unionAttrs(fromJson, ...fill()),
+        attrs: unionAttrs(fromJson, ...fillFor(fromJson)),
         source: "shopify_json",
       };
     }
@@ -935,7 +953,7 @@ async function collectCanonicalProductAttrs({
     const fromJs = await fetchShopifyProductAttrs(base, "js");
     if (isRichVariantAttrs(fromJs)) {
       return {
-        attrs: unionAttrs(fromJs, ...fill()),
+        attrs: unionAttrs(fromJs, ...fillFor(fromJs)),
         source: "shopify_js",
       };
     }
@@ -944,7 +962,7 @@ async function collectCanonicalProductAttrs({
   // 3) Embedded HTML (after network — avoids cents-as-dollars when .json works)
   if (isRichVariantAttrs(fromHtml)) {
     return {
-      attrs: unionAttrs(fromHtml, ...fill()),
+      attrs: unionAttrs(fromHtml, ...fillFor(fromHtml)),
       source: "shopify_html",
     };
   }

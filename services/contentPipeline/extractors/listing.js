@@ -4,6 +4,15 @@ const {
   stripInlineBufferImageContent,
   FACET_SIDEBAR_SELECTORS,
 } = require("../htmlCleanup");
+const {
+  parseShopifyCurrency,
+  shopifyRateIsUnity,
+  parseShopifyShopCurrency,
+  extractShopifyCurrencyActive,
+  moneyAmountsMatch,
+  normalizeCurrencyToken,
+  formatMoneyAmount,
+} = require("./shopifyCurrency");
 
 const MAX_PRODUCTS = 60;
 
@@ -234,17 +243,53 @@ function mapShopifyCollectionProduct(product, origin) {
 }
 
 
-// listing currency updater --> 
-function inferListingCurrencyFromHtml(html = "") {
-  const sample = String(html || "").slice(0, 80000);
-  // if (/₹|\bINR\b|Rs\.?/i.test(sample)) return "₹";
-  if (/\bINR\b|Rs\.?\s*[\d,]/i.test(sample)) return "₹";
-  // if('bicommerce/test/€')
-  if (/Shopify\.currency[\s\S]{0,120}"active"\s*:\s*"INR"/i.test(sample)) return "₹";
-  if (/€|\bEUR\b/i.test(sample)) return "€";
-  if (/£|\bGBP\b/i.test(sample)) return "£";
-  if (/\$|\bUSD\b/i.test(sample)) return "$";
-  return "";
+function listingAmountsMatch(a, b) {
+  return moneyAmountsMatch(a, b);
+}
+
+function currencySourceRank(src) {
+  if (src === "price_node") return 3;
+  if (src === "json_ld") return 2;
+  if (src === "shopify_active") return 1;
+  return 0;
+}
+
+/** Join JSON + DOM rows by /products/{handle}, ignoring query strings. */
+function listingProductMergeKey(url, name) {
+  const u = String(url || "");
+  const m = u.match(/\/products\/([^/?#]+)/i);
+  if (m) {
+    try {
+      return `h:${decodeURIComponent(m[1]).toLowerCase()}`;
+    } catch {
+      return `h:${m[1].toLowerCase()}`;
+    }
+  }
+  const n = cleanText(name || "").toLowerCase();
+  return n ? `n:${n}` : "";
+}
+
+function applyDomCurrencyToShopifyRow(prev, p, source) {
+  if (!p || !prev) return;
+  if (prev.price == null && p.price != null) prev.price = p.price;
+  if (
+    p.currency &&
+    listingAmountsMatch(p.price, prev.price) &&
+    currencySourceRank(source) >= currencySourceRank(prev.currencySource)
+  ) {
+    prev.currency = p.currency;
+    prev.currencySource = source;
+  }
+  if (prev.original_price == null && p.original_price != null) {
+    prev.original_price = p.original_price;
+  }
+  if (prev.in_stock == null && p.in_stock != null) prev.in_stock = p.in_stock;
+}
+
+function stripListingCurrencySource(products) {
+  for (const p of products || []) {
+    if (p && p.currencySource) delete p.currencySource;
+  }
 }
 
 /**
@@ -258,7 +303,6 @@ async function fetchShopifyCollectionProducts(pageUrl, { html = "" } = {}) {
 
   const axios = require("axios");
   const https = require("https");
-  const currency = inferListingCurrencyFromHtml(html);
   const limit = Math.min(50, MAX_PRODUCTS);
   const maxPages = Math.ceil(MAX_PRODUCTS / limit) + 1;
   const out = [];
@@ -326,7 +370,6 @@ async function fetchShopifyCollectionProducts(pageUrl, { html = "" } = {}) {
       for (const raw of batch) {
         const row = mapShopifyCollectionProduct(raw, path.origin);
         if (!row) continue;
-        if (currency && !row.currency) row.currency = currency;
         const key = (row.url || row.name || "").toLowerCase();
         if (!key || seen.has(key)) continue;
         seen.add(key);
@@ -365,20 +408,6 @@ function parsePrice(text) {
   return m ? Number(m[1]) : null;
 }
 
-function extractCurrencySymbol(text = "") {
-  const str = String(text || "").trim();
-  if (/₹|rs\.?|inr/i.test(str)) return "₹";
-  if (/€|eur/i.test(str)) return "€";
-  if (/£|gbp/i.test(str)) return "£";
-  if (/\$|usd|cad|aud/i.test(str)) return "$";
-  if (/¥|jpy|cny/i.test(str)) return "¥";
-  if (/₩|krw/i.test(str)) return "₩";
-  if (/₪|ils/i.test(str)) return "₪";
-  if (/฿|thb/i.test(str)) return "฿";
-  if (/₫|vnd/i.test(str)) return "₫";
-  if (/₱|php/i.test(str)) return "₱";
-  return "";
-}
 
 /**
  * Collect product entities from ItemList / ProductGroup / OfferCatalog JSON-LD.
@@ -428,8 +457,8 @@ function extractListingFromJsonLd(jsonLdBlocks = [], pageUrl = "") {
     const row = { name: name || null, url: url || null };
     if (price != null && !Number.isNaN(price)) {
       row.price = price;
-      const symbol = extractCurrencySymbol(offer?.priceCurrency || "");
-      if (symbol) row.currency = symbol;
+      const cur = normalizeCurrencyToken(offer?.priceCurrency || "");
+      if (cur) row.currency = cur;
     }
     if (
       price_min != null &&
@@ -441,8 +470,8 @@ function extractListingFromJsonLd(jsonLdBlocks = [], pageUrl = "") {
       row.price_min = price_min;
       row.price_max = price_max;
       if (row.price == null) row.price = price_min;
-      const symbol = extractCurrencySymbol(offer?.priceCurrency || "");
-      if (symbol) row.currency = symbol;
+      const cur = normalizeCurrencyToken(offer?.priceCurrency || "");
+      if (cur) row.currency = cur;
     }
 
     if (seen.has(key)) {
@@ -535,7 +564,7 @@ function extractCurrencyPrices(text) {
   const str = stripSaveAmounts(text);
   const results = [];
   const re =
-    /(?:([$€£¥₹₩]|Rs\.?|USD|EUR|GBP|INR)\s*)([\d,]+(?:\.\d+)?)|\b([\d,]+(?:\.\d+)?)\s*(USD|EUR|GBP|INR)\b/gi;
+    /(?:([$€£¥₹₩]|Rs\.?|USD|EUR|GBP|INR)\s*)([\d,]+(?:\.\d+)?)|\b([\d,]+(?:\.\d+)?)\s*([$€£¥₹]|USD|EUR|GBP|INR)\b/gi;
   let match;
   while ((match = re.exec(str)) !== null) {
     const raw = match[2] || match[3];
@@ -544,7 +573,7 @@ function extractCurrencyPrices(text) {
     if (num == null || num <= 0) continue;
     results.push({
       amount: num,
-      currency: extractCurrencySymbol(curTok || str) || "$",
+      currency: normalizeCurrencyToken(curTok),
       index: match.index,
     });
   }
@@ -564,15 +593,12 @@ function extractPriceRange(text) {
   return {
     price_min: Math.min(min, max),
     price_max: Math.max(min, max),
-    currency: extractCurrencySymbol(rangeMatch[1] || text) || "$",
+    currency: normalizeCurrencyToken(rangeMatch[1]),
   };
 }
 
 function formatListingPrice(amount, currency) {
-  if (amount == null) return null;
-  const cur = currency ? String(currency).trim() : "$";
-  if (/^[$€£₹¥₩₪฿₫₱]/i.test(cur)) return `${cur}${amount}`;
-  return `${amount} ${cur}`;
+  return formatMoneyAmount(amount, currency);
 }
 
 /**
@@ -631,7 +657,7 @@ function extractPriceFromCard($, $el) {
         if (n != null) {
           out.price = n;
           out.currency =
-            extractCurrencySymbol(saleHint[1] || "") || out.currency || "$";
+            normalizeCurrencyToken(saleHint[1] || "") || out.currency;
         }
       }
     }
@@ -648,7 +674,7 @@ function extractPriceFromCard($, $el) {
     const priced = extractCurrencyPrices(cleanText($ins.text()));
     if (priced.length) {
       out.price = priced[0].amount;
-      out.currency = priced[0].currency;
+      out.currency = priced[0].currency || out.currency;
     }
   }
   if ($del.length) {
@@ -667,7 +693,7 @@ function extractPriceFromCard($, $el) {
       if (n != null) {
         out.price = n;
         out.currency =
-          extractCurrencySymbol(currentHint[1] || "") || out.currency || "₹";
+          normalizeCurrencyToken(currentHint[1] || "") || out.currency;
       }
     }
   }
@@ -680,7 +706,7 @@ function extractPriceFromCard($, $el) {
       if (n != null) {
         out.original_price = n;
         out.currency =
-          extractCurrencySymbol(wasHint[1] || "") || out.currency || "₹";
+          normalizeCurrencyToken(wasHint[1] || "") || out.currency;
       }
     }
   }
@@ -701,25 +727,34 @@ function extractPriceFromCard($, $el) {
       ".price-section--withoutTax .price",
     ].join(", ");
 
+    let attrAmount = null;
     for (const el of $el.find(nowSelectors).toArray()) {
       const $node = $(el);
       const cls = `${$node.attr("class") || ""}`;
       if (/price--rrp|price--non-sale|non-sale-price|rrp-price/i.test(cls)) continue;
       if ($node.closest("del, s, strike").length) continue;
-      const text = cleanText(
+      const visible = cleanText($node.text());
+      const attr = cleanText(
         $node.attr("content") ||
           $node.attr("data-product-price-without-tax") ||
-          $node.text(),
+          $node.attr("data-product-price") ||
+          "",
       );
-      if (!text || !/\d/.test(text)) continue;
-      if (applyRange(text)) break;
-      const priced = extractCurrencyPrices(text);
+      if (visible && applyRange(visible)) break;
+      let priced = extractCurrencyPrices(visible);
+      if (!priced.length && attr) priced = extractCurrencyPrices(attr);
       if (priced.length) {
         out.price = priced[0].amount;
-        out.currency = priced[0].currency;
+        out.currency = priced[0].currency || out.currency;
         break;
       }
+      // Bare content/data amount: remember, but keep scanning for a $ / ₹ token
+      if (attrAmount == null && attr && /\d/.test(attr)) {
+        const n = parsePrice(attr);
+        if (n != null && n > 0) attrAmount = n;
+      }
     }
+    if (out.price == null && attrAmount != null) out.price = attrAmount;
   }
 
   // 2. Compare-at / Was price
@@ -760,14 +795,12 @@ function extractPriceFromCard($, $el) {
   if (out.price == null || out.price_min == null) {
     for (const el of $el.find(".price-section, [class*='price-section' i]").toArray()) {
       const text = cleanText($(el).text());
-      if (!/now\s*:/i.test(text) && !extractCurrencyPrices(text).length) continue;
+      const priced = extractCurrencyPrices(text);
+      if (!/now\s*:/i.test(text) && !priced.length) continue;
       if (out.price_min == null && applyRange(text)) continue;
-      if (out.price == null) {
-        const priced = extractCurrencyPrices(text);
-        if (priced.length) {
-          out.price = priced[0].amount;
-          out.currency = priced[0].currency;
-        }
+      if (out.price == null && priced.length) {
+        out.price = priced[0].amount;
+        out.currency = priced[0].currency || out.currency;
       }
     }
   }
@@ -805,7 +838,7 @@ function extractPriceFromCard($, $el) {
       }
     } else if (out.price == null && priced.length) {
       out.price = priced[0].amount;
-      out.currency = priced[0].currency;
+      out.currency = priced[0].currency || out.currency;
     }
   }
 
@@ -829,7 +862,14 @@ function extractPriceFromCard($, $el) {
     }
   }
 
-  if (!out.currency && out.price != null) out.currency = "$";
+  if (!out.currency) {
+    const $pc = $el.find("[itemprop='priceCurrency']").first();
+    if ($pc.length) {
+      out.currency = normalizeCurrencyToken(
+        $pc.attr("content") || $pc.text() || "",
+      );
+    }
+  }
   return out;
 }
 
@@ -1044,7 +1084,7 @@ function listingToMarkdown({ title, pageUrl, products, description }) {
         p.price != null &&
         p.original_price !== p.price
       ) {
-        const cur = p.currency || "$";
+        const cur = p.currency || "";
         // "Price" = current selling amount (what the bot should answer with)
         lines.push(`\nPrice:\n${formatListingPrice(p.price, cur)}`);
         lines.push(
@@ -1055,13 +1095,12 @@ function listingToMarkdown({ title, pageUrl, products, description }) {
         p.price_max != null &&
         p.price_min !== p.price_max
       ) {
-        const cur = p.currency || "$";
+        const cur = p.currency || "";
         lines.push(
           `\nPrice:\n${formatListingPrice(p.price_min, cur)} – ${formatListingPrice(p.price_max, cur)}`,
         );
       } else if (p.price != null) {
-        const cur = p.currency ? p.currency : "$";
-        lines.push(`\nPrice:\n${formatListingPrice(p.price, cur)}`);
+        lines.push(`\nPrice:\n${formatListingPrice(p.price, p.currency || "")}`);
       }
 
       if (p.brand) {
@@ -1145,27 +1184,76 @@ async function extractListingContent({
   let source = "listing_empty";
 
   if (isRichShopifyCollectionProducts(fromShopify)) {
-    // Prefer API catalog; optionally fill missing fields from LD/DOM by URL
     const byKey = new Map();
     for (const p of fromShopify) {
-      const key = (p.url || p.name || "").toLowerCase();
+      const key = listingProductMergeKey(p.url, p.name);
       if (!key || isJunkListingName(p.name)) continue;
       byKey.set(key, { ...p });
     }
-    for (const p of [...fromLd, ...fromDom]) {
-      if (!p) continue;
-      if (p.name && isJunkListingName(p.name)) continue;
-      const key = (p.url || p.name || "").toLowerCase();
-      if (!key || !byKey.has(key)) continue;
-      const prev = byKey.get(key);
-      if (prev.price == null && p.price != null) prev.price = p.price;
-      if (!prev.currency && p.currency) prev.currency = p.currency;
-      if (prev.original_price == null && p.original_price != null) {
-        prev.original_price = p.original_price;
+    const mergeSide = (items, source) => {
+      for (const p of items) {
+        if (!p) continue;
+        if (p.name && isJunkListingName(p.name)) continue;
+        const key = listingProductMergeKey(p.url, p.name);
+        if (key && byKey.has(key)) {
+          applyDomCurrencyToShopifyRow(byKey.get(key), p, source);
+          continue;
+        }
+        if (!p.currency || p.price == null) continue;
+        for (const row of byKey.values()) {
+          if (
+            listingAmountsMatch(p.price, row.price) &&
+            currencySourceRank(source) >= currencySourceRank(row.currencySource)
+          ) {
+            row.currency = p.currency;
+            row.currencySource = source;
+          }
+        }
       }
-      if (prev.in_stock == null && p.in_stock != null) prev.in_stock = p.in_stock;
+    };
+    mergeSide(fromLd, "json_ld");
+    mergeSide(fromDom, "price_node");
+
+    const { active, rate } = parseShopifyCurrency(html);
+    if (active && shopifyRateIsUnity(rate)) {
+      for (const row of byKey.values()) {
+        if (!row.currency) {
+          row.currency = active;
+          row.currencySource = "shopify_active";
+        }
+      }
+    } else if (rate != null && !shopifyRateIsUnity(rate)) {
+      const shopCur = parseShopifyShopCurrency(html);
+      if (shopCur) {
+        for (const row of byKey.values()) {
+          if (!row.currency) {
+            row.currency = shopCur;
+            row.currencySource = "shop_money_format";
+          }
+        }
+      }
     }
+
+    if (process.env.LISTING_CURRENCY_DEBUG) {
+      const sample = [...byKey.values()][0];
+      const domHit = fromDom.find((p) => p && p.currency);
+      console.warn("[listing-currency]", {
+        jsonPrice: sample && sample.price,
+        jsonCurrency: sample && sample.currency,
+        domPrice: domHit && domHit.price,
+        domCurrency: domHit && domHit.currency,
+        activeCurrency: active,
+        activeRate: rate,
+        amountsMatch: listingAmountsMatch(
+          domHit && domHit.price,
+          sample && sample.price,
+        ),
+        finalCurrency: sample && sample.currency,
+      });
+    }
+
     products = [...byKey.values()].slice(0, MAX_PRODUCTS);
+    stripListingCurrencySource(products);
     source =
       fromLd.length || fromDom.length
         ? "shopify_collection_json+dom_listing"
@@ -1296,6 +1384,7 @@ module.exports = {
   fetchShopifyCollectionProducts,
   shopifyCollectionPath,
   mapShopifyCollectionProduct,
+  extractShopifyCurrencyActive,
   isJunkListingName,
   isRichShopifyCollectionProducts,
   GRID_SELECTORS,
