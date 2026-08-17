@@ -554,9 +554,11 @@
 //   "isTrulyOffTopic": false
 // }`;
 
-function userIntentPrompt(websiteLanguage){
+const {
+  conversationRecallRouterInstructions,
+} = require("./conversation-recall-prompt");
 
-  
+function userIntentPrompt(websiteLanguage){
 
   const systemPrompt = `You are a multilingual query router and contextual query rewriter for a business-support chatbot.
 
@@ -569,15 +571,19 @@ ROUTES:
 - LIVE_AGENT: asks for a human or representative.
 - ACCIDENTAL: genuinely meaningless/random input.
 - ACKNOWLEDGEMENT: pure gratitude or social acknowledgement with no request or contextual continuation.
+- CONVERSATION_RECALL: quote a past user question or assistant answer from THIS chat.
 - HYBRID: explicit request for product lists, page/collection URLs, contact details, or social profiles.
 - SEMANTIC_RAG: all other meaningful business questions and contextual follow-ups. This is the default.
 
 CLASSIFICATION ORDER:
 1. Resolve the message using chat history and conversation state.
 2. Detect contextual follow-up.
-3. Check LIVE_AGENT, GREETING, and ACCIDENTAL.
-4. Use ACKNOWLEDGEMENT only when no meaningful intent remains.
-5. Choose HYBRID or SEMANTIC_RAG.
+3. Check CONVERSATION_RECALL (transcript quote only — not "the second one" / product picks).
+4. Check LIVE_AGENT, GREETING, and ACCIDENTAL.
+5. Use ACKNOWLEDGEMENT only when no meaningful intent remains.
+6. Choose HYBRID or SEMANTIC_RAG.
+
+${conversationRecallRouterInstructions()}
 
 CONTEXT-FIRST RULE:
 Never interpret a short, vague, incomplete, or unclear message in isolation when history is available.
@@ -673,7 +679,7 @@ Set isBusinessQuestion=true for products, services, availability, recommendation
 
 If isIdentityQuestion or isBusinessQuestion is true:
 - isTrulyOffTopic=false,
-- route must be SEMANTIC_RAG unless the request explicitly qualifies for HYBRID.
+- route must be SEMANTIC_RAG unless the request explicitly qualifies for HYBRID or CONVERSATION_RECALL.
 
 Set isTrulyOffTopic=true only for unrelated topics such as weather, sports, recipes, politics, jokes, or general knowledge.
 
@@ -816,6 +822,11 @@ FINAL CHECKS:
 - A new user value updates constraints unless it distinguishes separate rawEntities.
 - For SEMANTIC_RAG/HYBRID, rewrittenQuery must always be present.
 - For ACKNOWLEDGEMENT, rewrittenQuery=null, followUp=false, needsRewrite=false, rewriteReason="NONE".
+- For CONVERSATION_RECALL, rewrittenQuery=null, followUp=false, needsRewrite=false, rewriteReason="NONE", recall must be filled with target + reference + paired; otherwise use SEMANTIC_RAG.
+- Recall references come only from the current User message: first/earliest/original→type="first"; previous/last/prior→type="previous"; Nth→type="nth_from_start"; Nth-last/N-ago→type="nth_from_end". Never copy a history number or emit an absolute index.
+- If the current message names a question reference and asks for its answer/response, keep that reference and set target=user_question, paired=true; "it/that" means the named question.
+- "what was your Nth answer?" (global assistant numbering) → target=assistant_answer, paired=false.
+- Only a standalone follow-up with no first/previous/Nth reference ("what was your response to it?") uses target=user_question, paired=true, reference.type="last_recalled".
 - If multiEntityMode is not null, rawEntities cannot be empty.
 - If rawEntities has 2+ separately requested products or categories, multiEntityMode must be "multi_ask", not null.
 
@@ -826,6 +837,7 @@ Output exactly:
   "userLanguage": "en",
   "confidence": 0.95,
   "rewrittenQuery": "Do you ship to India?",
+  "recall": null,
   "lexicalTerms": ["shipping", "India", "international"],
   "constraints": [
     {

@@ -31,6 +31,7 @@ const SKIP_HYDE_INTENTS = new Set([
   "ACCIDENTAL",
   "ACKNOWLEDGEMENT",
   "LIVE_AGENT",
+  "CONVERSATION_RECALL",
   "greeting",
   "contact",
   "vague",
