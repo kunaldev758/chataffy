@@ -14,6 +14,7 @@
  */
 
 const ChatMessage = require("../models/ChatMessage");
+const Conversation = require("../models/Conversation");
 const { decode } = require("html-entities");
 
 const RECALL_TARGETS = {
@@ -77,7 +78,17 @@ function parseOrdinalToken(token) {
   return null;
 }
 
-const REFERENCE_TYPES = new Set(["position", "relative", "semantic"]);
+const REFERENCE_TYPES = new Set([
+  "first",
+  "previous",
+  "nth_from_start",
+  "nth_from_end",
+  "last_recalled",
+  // Backward-compatible contracts while older router responses age out.
+  "position",
+  "relative",
+  "semantic",
+]);
 const REFERENCE_ORIGINS = new Set(["start", "end"]);
 
 function parseAbsoluteOrdinal(value) {
@@ -117,12 +128,24 @@ function parseRecallReference(raw) {
     const type = String(ref.type || "position").toLowerCase().trim();
     if (!REFERENCE_TYPES.has(type)) return null;
 
+    if (type === "first" || type === "previous") {
+      return { type };
+    }
+
+    if (type === "last_recalled") {
+      return { type: "last_recalled" };
+    }
+
     if (type === "semantic") {
       return { type: "semantic", value: null, origin: null };
     }
 
-    const value = parseAbsoluteOrdinal(ref.value);
+    const value = parseAbsoluteOrdinal(ref.ordinal ?? ref.value);
     if (value == null) return null;
+
+    if (type === "nth_from_start" || type === "nth_from_end") {
+      return { type, ordinal: value };
+    }
 
     if (type === "relative") {
       return { type: "relative", value, origin: "end" };
@@ -168,28 +191,55 @@ function parseRecallReference(raw) {
  * as an already-absolute conversation index.
  */
 function resolveRecallReference(reference, total) {
-  if (!reference || reference.type === "semantic") return null;
+  if (
+    !reference ||
+    reference.type === "semantic" ||
+    reference.type === "last_recalled"
+  ) {
+    return null;
+  }
 
   const count = Number(total);
   if (!Number.isInteger(count) || count < 1) return null;
 
-  const n = parseAbsoluteOrdinal(reference.value);
+  if (reference.type === "first") return 1;
+  if (reference.type === "previous") return count;
+
+  const n = parseAbsoluteOrdinal(reference.ordinal ?? reference.value);
   if (n == null) return null;
 
   const fromEnd =
-    reference.type === "relative" || reference.origin === "end";
+    reference.type === "nth_from_end" ||
+    reference.type === "relative" ||
+    reference.origin === "end";
   const index = fromEnd ? count - n + 1 : n;
 
   if (!Number.isInteger(index) || index < 1 || index > count) return null;
   return index;
 }
 
-function toFetchRecall({ target, paired, index }) {
+function normalizeDisplayReference(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const type = String(raw.type || "").toLowerCase().trim();
+  if (type === "first" || type === "previous" || type === "last_recalled") {
+    return { type };
+  }
+  if (type === "nth_from_start" || type === "nth_from_end") {
+    const ordinal = parseAbsoluteOrdinal(raw.ordinal);
+    return ordinal == null ? null : { type, ordinal };
+  }
+  return null;
+}
+
+function toFetchRecall({ target, paired, index, reference = null }) {
+  const displayReference = normalizeDisplayReference(reference);
+  const display = displayReference ? { displayReference } : {};
   if (paired) {
     return {
       target: RECALL_TARGETS.ASSISTANT_ANSWER,
       indexType: "paired",
       index,
+      ...display,
     };
   }
   if (target === RECALL_TARGETS.ASSISTANT_ANSWER) {
@@ -197,12 +247,14 @@ function toFetchRecall({ target, paired, index }) {
       target: RECALL_TARGETS.ASSISTANT_ANSWER,
       indexType: index === 1 ? "first" : "nth",
       index,
+      ...display,
     };
   }
   return {
     target: RECALL_TARGETS.USER_QUESTION,
     indexType: index === 1 ? "first" : "nth",
     index,
+    ...display,
   };
 }
 
@@ -229,26 +281,28 @@ function normalizeRecall(raw) {
   }
 
   const indexType = String(raw.indexType || "").toLowerCase().trim();
+  const displayReference = normalizeDisplayReference(raw.displayReference);
+  const display = displayReference ? { displayReference } : {};
   const parsedIndex =
     raw.index === null || raw.index === undefined || raw.index === ""
       ? null
       : Number(raw.index);
 
   if (indexType === "first") {
-    return { target, indexType: "first", index: 1 };
+    return { target, indexType: "first", index: 1, ...display };
   }
   if (indexType === "last") {
-    return { target, indexType: "last", index: null };
+    return { target, indexType: "last", index: null, ...display };
   }
   if (indexType === "paired") {
     if (target !== RECALL_TARGETS.ASSISTANT_ANSWER) return null;
     if (parsedIndex === null) {
-      return { target, indexType: "paired", index: null };
+      return { target, indexType: "paired", index: null, ...display };
     }
     if (!Number.isInteger(parsedIndex) || parsedIndex < 1 || parsedIndex > 200) {
       return null;
     }
-    return { target, indexType: "paired", index: parsedIndex };
+    return { target, indexType: "paired", index: parsedIndex, ...display };
   }
   if (indexType === "nth" || indexType === "") {
     if (!Number.isInteger(parsedIndex) || parsedIndex < 1 || parsedIndex > 200) {
@@ -258,6 +312,7 @@ function normalizeRecall(raw) {
       target,
       indexType: parsedIndex === 1 ? "first" : "nth",
       index: parsedIndex,
+      ...display,
     };
   }
 
@@ -466,12 +521,37 @@ function resolveRecallContract(
     chatMessages = [],
     currentQuestion = "",
     recallInventory = null,
+    recallState = null,
   } = {},
 ) {
   const intent = parseRecallIntent(rawRecall);
   if (!intent) return { ok: false, recall: null };
 
   let index = null;
+  if (intent.reference.type === "last_recalled") {
+    index = parseAbsoluteOrdinal(recallState?.userQuestionIndex);
+    const anchorUserTurnCount = parseAbsoluteOrdinal(
+      recallState?.anchorUserTurnCount,
+    );
+    const currentUserTurnCount = Number(recallInventory?.userTurnCount) || 0;
+    if (
+      !intent.paired ||
+      index == null ||
+      anchorUserTurnCount !== currentUserTurnCount
+    ) {
+      return { ok: false, recall: null };
+    }
+    return {
+      ok: true,
+      recall: toFetchRecall({
+        target: RECALL_TARGETS.USER_QUESTION,
+        paired: true,
+        index,
+        reference: intent.reference,
+      }),
+    };
+  }
+
   if (intent.reference.type === "semantic") {
     const filled = fillPairedFromPreviousVisitor(chatMessages, currentQuestion);
     if (!filled || filled.index == null) return { ok: false, recall: null };
@@ -488,6 +568,7 @@ function resolveRecallContract(
       target: intent.target,
       paired: intent.paired,
       index,
+      reference: intent.reference,
     }),
   };
 }
@@ -556,6 +637,57 @@ async function getRecallInventory(conversationId, currentQuestion = "") {
   return buildRecallInventoryFromMessages(messages, currentQuestion);
 }
 
+function normalizeRecallState(raw) {
+  const userQuestionIndex = parseAbsoluteOrdinal(raw?.userQuestionIndex);
+  const anchorUserTurnCount = parseAbsoluteOrdinal(raw?.anchorUserTurnCount);
+  if (userQuestionIndex == null || anchorUserTurnCount == null) return null;
+  return {
+    userQuestionIndex,
+    anchorUserTurnCount,
+    updatedAt: raw?.updatedAt || null,
+  };
+}
+
+async function loadRecallState(conversationId) {
+  if (!conversationId) return null;
+  const conversation = await Conversation.findById(conversationId)
+    .select("recallState")
+    .lean();
+  return normalizeRecallState(conversation?.recallState);
+}
+
+async function saveRecallState(conversationId, fetched) {
+  if (!conversationId || !fetched?.found) return;
+  const isUserQuestion =
+    fetched.target === RECALL_TARGETS.USER_QUESTION ||
+    fetched.indexType === "paired";
+  const userQuestionIndex = parseAbsoluteOrdinal(
+    fetched.requestedIndex ?? fetched.index,
+  );
+  const totalBeforeCurrentRequest = Number(fetched.total);
+  if (
+    !isUserQuestion ||
+    userQuestionIndex == null ||
+    !Number.isInteger(totalBeforeCurrentRequest) ||
+    totalBeforeCurrentRequest < 0
+  ) {
+    return;
+  }
+
+  await Conversation.updateOne(
+    { _id: conversationId },
+    {
+      $set: {
+        recallState: {
+          userQuestionIndex,
+          anchorUserTurnCount: totalBeforeCurrentRequest + 1,
+          updatedAt: new Date(),
+        },
+      },
+    },
+  );
+}
+
 /**
  * Original AI reply that followed visitor question N.
  * Not assistant #N and not the latest recap ("Your second question was:").
@@ -564,6 +696,7 @@ async function fetchPairedAssistantReply({
   conversationId,
   index,
   currentQuestion = "",
+  displayReference = null,
 }) {
   const empty = {
     found: false,
@@ -574,6 +707,7 @@ async function fetchPairedAssistantReply({
     total: 0,
     text: null,
     questionText: null,
+    ...(displayReference ? { displayReference } : {}),
   };
 
   const messages = await ChatMessage.find({
@@ -630,6 +764,7 @@ async function fetchPairedAssistantReply({
     total: visitors.length,
     questionText: originalMessageBody(userTurn.message),
     text: originalMessageBody(reply.message),
+    ...(displayReference ? { displayReference } : {}),
   };
 }
 
@@ -659,6 +794,7 @@ async function fetchRecalledTurn({
       conversationId,
       index: normalized.index,
       currentQuestion,
+      displayReference: normalized.displayReference,
     });
   }
 
@@ -697,6 +833,9 @@ async function fetchRecalledTurn({
       requestedIndex,
       total,
       text: null,
+      ...(normalized.displayReference
+        ? { displayReference: normalized.displayReference }
+        : {}),
     };
   }
 
@@ -708,6 +847,9 @@ async function fetchRecalledTurn({
     requestedIndex,
     total,
     text: originalMessageBody(turns[requestedIndex - 1].message),
+    ...(normalized.displayReference
+      ? { displayReference: normalized.displayReference }
+      : {}),
   };
 }
 
@@ -735,13 +877,55 @@ function recallIndexLabel(fetched) {
   return n != null ? String(n) : "requested";
 }
 
+function ordinalNumberLabel(value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) return null;
+  const mod100 = n % 100;
+  const suffix =
+    mod100 >= 11 && mod100 <= 13
+      ? "th"
+      : n % 10 === 1
+        ? "st"
+        : n % 10 === 2
+          ? "nd"
+          : n % 10 === 3
+            ? "rd"
+            : "th";
+  return `${n}${suffix}`;
+}
+
+function recalledTurnHeading(fetched, role) {
+  const owner = role === "assistant" ? "My" : "Your";
+  const noun = role === "assistant" ? "answer" : "question";
+  const reference = fetched?.displayReference;
+
+  if (reference?.type === "first") return `${owner} first ${noun} was:`;
+  if (reference?.type === "previous") {
+    return `${owner} previous ${noun} was:`;
+  }
+  if (reference?.type === "last_recalled") {
+    return role === "assistant"
+      ? "The response you referred to was:"
+      : "The question you referred to was:";
+  }
+
+  const ordinal = ordinalNumberLabel(reference?.ordinal);
+  if (reference?.type === "nth_from_start" && ordinal) {
+    return `${owner} ${ordinal} ${noun} was:`;
+  }
+  if (reference?.type === "nth_from_end" && ordinal) {
+    return `${owner} ${ordinal}-last ${noun} was:`;
+  }
+
+  return `${owner} ${noun} #${recallIndexLabel(fetched)} was:`;
+}
+
 /**
  * Deterministic HTML for a recalled turn. Does not call an LLM, so the
  * original question/answer are not truncated or rewritten.
  */
 function renderRecalledTurnHtml(fetched) {
   const total = Number(fetched?.total) || 0;
-  const n = escapeRecallHtml(recallIndexLabel(fetched));
 
   if (!fetched?.found) {
     const kind =
@@ -756,14 +940,19 @@ function renderRecalledTurnHtml(fetched) {
   if (fetched.indexType === "paired") {
     const questionHtml = wrapRecalledBodyAsHtml(fetched.questionText);
     const answerHtml = wrapRecalledBodyAsHtml(fetched.text);
-    return `<p><strong>Your question #${n} was:</strong></p>${questionHtml}<p><strong>My response was:</strong></p>${answerHtml}`;
+    const heading = escapeRecallHtml(recalledTurnHeading(fetched, "user"));
+    return `<p><strong>${heading}</strong></p>${questionHtml}<p><strong>My response was:</strong></p>${answerHtml}`;
   }
 
   if (fetched.target === RECALL_TARGETS.ASSISTANT_ANSWER) {
-    return `<p><strong>My answer #${n} was:</strong></p>${wrapRecalledBodyAsHtml(fetched.text)}`;
+    const heading = escapeRecallHtml(
+      recalledTurnHeading(fetched, "assistant"),
+    );
+    return `<p><strong>${heading}</strong></p>${wrapRecalledBodyAsHtml(fetched.text)}`;
   }
 
-  return `<p><strong>Your question #${n} was:</strong></p>${wrapRecalledBodyAsHtml(fetched.text)}`;
+  const heading = escapeRecallHtml(recalledTurnHeading(fetched, "user"));
+  return `<p><strong>${heading}</strong></p>${wrapRecalledBodyAsHtml(fetched.text)}`;
 }
 
 function buildRecallContext(fetched) {
@@ -818,4 +1007,6 @@ module.exports = {
   resolveRecallContract,
   getRecallInventory,
   buildRecallInventoryFromMessages,
+  loadRecallState,
+  saveRecallState,
 };

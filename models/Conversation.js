@@ -68,6 +68,14 @@ const conversationSchema = new mongoose.Schema(
       },
       default: null,
     },
+    recallState: {
+      type: {
+        userQuestionIndex: { type: Number, default: null },
+        anchorUserTurnCount: { type: Number, default: null },
+        updatedAt: { type: Date, default: null },
+      },
+      default: null,
+    },
   },
   { timestamps: true }
 );

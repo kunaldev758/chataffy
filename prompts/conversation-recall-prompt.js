@@ -26,22 +26,22 @@ Set:
     "target": "user_question"|"assistant_answer",
     "paired": boolean,
     "reference": {
-      "type": "position"|"relative"|"semantic",
-      "value": number|null,
-      "origin": "start"|"end"|null
+      "type": "first"|"previous"|"nth_from_start"|"nth_from_end"|"last_recalled",
+      "ordinal": number|null
     }
   }
 
-Do NOT emit an absolute conversation index. reference.value is the ordinal the user asked for (third → 3, last → 1 from the end). The application resolves it using Chat inventory.
+Extract the reference ONLY from the current User message. Never copy a number
+from Recent conversation, Conversation state, Last recalled turn, or Chat inventory.
+Chat inventory only validates that the requested turn exists.
 
 reference:
-- Always set origin for type="position". Never emit value without origin.
-- "my Nth question" → type="position", value=N, origin="start"
-- "my last / previous / prior question" → type="position", value=1, origin="end"
-  (previous is NOT the first question)
-- "Nth last" / "last Nth" / "N questions ago" → type="position", value=N, origin="end"
-  ("third last" and "last third" are the same: value=3, origin="end")
-- Follow-up with no ordinal ("and your response to that") → type="semantic", value=null, origin=null
+- first / earliest / original → {"type":"first","ordinal":null}
+- previous / last / prior / latest → {"type":"previous","ordinal":null}
+- Nth question/answer → {"type":"nth_from_start","ordinal":N}
+- Nth-last / last Nth / N ago → {"type":"nth_from_end","ordinal":N}
+- response to it/that after a recalled user question
+  → {"type":"last_recalled","ordinal":null}
 
 target / paired:
 - Quote what THEY asked → target="user_question", paired=false
@@ -50,32 +50,32 @@ target / paired:
 - Quote YOUR Nth answer globally ("what was your third answer?")
   → target="assistant_answer", paired=false
 Never use assistant_answer/nth for "your answer to my Nth question". That is paired on the user turn.
+If the current message names a question reference AND asks for its response,
+paired=true and "it/that" means that same question. Keep the current reference.
+Use last_recalled only when the current message has no first/previous/Nth reference.
 
-Examples:
-- "what was my third question?"
-  → user_question, paired=false, position 3 from start
-- "what was my last question?"
-  → user_question, paired=false, position 1 from end
-- "what is my previous question with its response"
-  → user_question, paired=true, position 1 from end
-- "what was my previous question?"
-  → user_question, paired=false, position 1 from end
-- "what was my third last question?"
-  → user_question, paired=false, position 3 from end
-- "what was my last third question?"
-  → user_question, paired=false, position 3 from end
-- "give me the response to my third question"
-  → user_question, paired=true, position 3 from start
-- "what did you answer to my third last question?"
-  → user_question, paired=true, position 3 from end
-- "show me my third question and your response"
-  → user_question, paired=true, position 3 from start
-- "what was your third answer?"
-  → assistant_answer, paired=false, position 3 from start
-- "what did you say last?"
-  → assistant_answer, paired=false, position 1 from end
-- "give me the answer from three questions ago"
-  → user_question, paired=true, position 3 from end
+All visitor messages count as user questions, including earlier recall requests.
+"Previous question" means the immediately preceding visitor message; never skip
+a recall request to search for an earlier business question.
+
+Critical example:
+Recent Assistant: "Your question #4 was: give me 16 mm lashes"
+Current User: "what is my previous question and your response?"
+→ target=user_question, paired=true, reference={"type":"previous","ordinal":null}
+The #4 belongs to history and MUST NOT become the reference ordinal.
+
+"what was my first question and your response?" even when recent history
+contains "previous question"
+→ target=user_question, paired=true, reference={"type":"first","ordinal":null}
+
+"what was my second question and your response?"
+→ target=user_question, paired=true, reference={"type":"nth_from_start","ordinal":2}
+
+"what was my third-last question?"
+→ target=user_question, paired=false, reference={"type":"nth_from_end","ordinal":3}
+
+"what was your response to it?" with Last recalled turn present
+→ target=user_question, paired=true, reference={"type":"last_recalled","ordinal":null}
 
 Chat inventory (user_turns / assistant_turns) is the full conversation, not the recent snippet.
 If the requested ordinal is outside that inventory, set recall=null and use SEMANTIC_RAG.

@@ -530,6 +530,7 @@ function applyConversationRecallContract(
   question,
   chatMessages = [],
   recallInventory = null,
+  recallState = null,
 ) {
   if (result?.route !== ROUTES.CONVERSATION_RECALL) return result;
 
@@ -537,6 +538,7 @@ function applyConversationRecallContract(
     chatMessages,
     currentQuestion: question,
     recallInventory,
+    recallState,
   });
 
   if (!resolved.ok) {
@@ -1028,6 +1030,7 @@ async function llmRoute(question, options = {}) {
     logOpenAIUsage = null,
     routerModel = null,
     recallInventory = null,
+    recallState = null,
   } = options;
 
   let modelName = routerModel;
@@ -1068,6 +1071,12 @@ async function llmRoute(question, options = {}) {
   if (recallInventory) {
     userContentParts.push(
       `Chat inventory:\n- user_turns: ${Number(recallInventory.userTurnCount) || 0}\n- assistant_turns: ${Number(recallInventory.assistantTurnCount) || 0}`,
+    );
+  }
+
+  if (recallState?.userQuestionIndex) {
+    userContentParts.push(
+      `Last recalled turn:\n- user_question_index: ${recallState.userQuestionIndex}`,
     );
   }
 
@@ -1156,6 +1165,7 @@ async function routeQuery(question, options = {}) {
     logOpenAIUsage,
     routerModel = null,
     recallInventory = null,
+    recallState = null,
   } = options;
 
   const ruleOutcome = applyRuleEngine(question, {
@@ -1198,6 +1208,7 @@ async function routeQuery(question, options = {}) {
     logOpenAIUsage,
     routerModel,
     recallInventory,
+    recallState,
   });
 
 
@@ -1228,6 +1239,7 @@ async function routeQuery(question, options = {}) {
     question,
     chatMessages,
     recallInventory,
+    recallState,
   );
 
   console.log("result check is applyConversationRecallContract",result);

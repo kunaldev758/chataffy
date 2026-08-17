@@ -823,10 +823,10 @@ FINAL CHECKS:
 - For SEMANTIC_RAG/HYBRID, rewrittenQuery must always be present.
 - For ACKNOWLEDGEMENT, rewrittenQuery=null, followUp=false, needsRewrite=false, rewriteReason="NONE".
 - For CONVERSATION_RECALL, rewrittenQuery=null, followUp=false, needsRewrite=false, rewriteReason="NONE", recall must be filled with target + reference + paired; otherwise use SEMANTIC_RAG.
-- Recall reference.value is the ordinal (third→3, last/previous/prior→1 from end). Always set origin. origin="end" for last, previous, prior, Nth last, last Nth, and N ago. Never emit an absolute conversation index. Never treat previous as first.
-- "your answer/response to my Nth question" or "question and your response" → target=user_question, paired=true.
+- Recall references come only from the current User message: first/earliest/original→type="first"; previous/last/prior→type="previous"; Nth→type="nth_from_start"; Nth-last/N-ago→type="nth_from_end". Never copy a history number or emit an absolute index.
+- If the current message names a question reference and asks for its answer/response, keep that reference and set target=user_question, paired=true; "it/that" means the named question.
 - "what was your Nth answer?" (global assistant numbering) → target=assistant_answer, paired=false.
-- Follow-up asking for the response to a just-recalled user question → target=user_question, paired=true, reference.type="semantic".
+- Only a standalone follow-up with no first/previous/Nth reference ("what was your response to it?") uses target=user_question, paired=true, reference.type="last_recalled".
 - If multiEntityMode is not null, rawEntities cannot be empty.
 - If rawEntities has 2+ separately requested products or categories, multiEntityMode must be "multi_ask", not null.
 

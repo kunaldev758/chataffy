@@ -19,6 +19,125 @@ function positionRecall(value, origin, { paired = false, target = "user_question
   };
 }
 
+function symbolicRecall(type, ordinal, { paired = false, target = "user_question" } = {}) {
+  return {
+    target,
+    paired,
+    reference: { type, ordinal: ordinal ?? null },
+  };
+}
+
+test("symbolic first always resolves to question one, with optional pairing", () => {
+  const questionOnly = resolveRecallContract(symbolicRecall("first"), {
+    recallInventory: INVENTORY_8,
+  });
+  const withResponse = resolveRecallContract(
+    symbolicRecall("first", null, { paired: true }),
+    { recallInventory: INVENTORY_8 },
+  );
+
+  assert.deepEqual(questionOnly.recall, {
+    target: RECALL_TARGETS.USER_QUESTION,
+    indexType: "first",
+    index: 1,
+    displayReference: { type: "first" },
+  });
+  assert.deepEqual(withResponse.recall, {
+    target: RECALL_TARGETS.ASSISTANT_ANSWER,
+    indexType: "paired",
+    index: 1,
+    displayReference: { type: "first" },
+  });
+});
+
+test("symbolic previous always resolves to the immediately preceding user turn", () => {
+  const resolved = resolveRecallContract(
+    symbolicRecall("previous", null, { paired: true }),
+    { recallInventory: { userTurnCount: 4, assistantTurnCount: 4 } },
+  );
+  assert.deepEqual(resolved.recall, {
+    target: RECALL_TARGETS.ASSISTANT_ANSWER,
+    indexType: "paired",
+    index: 4,
+    displayReference: { type: "previous" },
+  });
+});
+
+test("symbolic nth references resolve from start and end", () => {
+  const fromStart = resolveRecallContract(
+    symbolicRecall("nth_from_start", 2),
+    { recallInventory: INVENTORY_8 },
+  );
+  const fromEnd = resolveRecallContract(
+    symbolicRecall("nth_from_end", 3),
+    { recallInventory: INVENTORY_8 },
+  );
+
+  assert.equal(fromStart.recall.index, 2);
+  assert.equal(fromEnd.recall.index, 6);
+});
+
+test("third and fifth questions resolve to their absolute positions", () => {
+  const third = resolveRecallContract(
+    symbolicRecall("nth_from_start", 3),
+    { recallInventory: INVENTORY_8 },
+  );
+  const fifth = resolveRecallContract(
+    symbolicRecall("nth_from_start", 5),
+    { recallInventory: INVENTORY_8 },
+  );
+
+  assert.equal(third.recall.index, 3);
+  assert.equal(fifth.recall.index, 5);
+});
+
+test("named sixth question with its response remains paired to question six", () => {
+  const resolved = resolveRecallContract(
+    symbolicRecall("nth_from_start", 6, { paired: true }),
+    { recallInventory: INVENTORY_8 },
+  );
+
+  assert.deepEqual(resolved.recall, {
+    target: RECALL_TARGETS.ASSISTANT_ANSWER,
+    indexType: "paired",
+    index: 6,
+    displayReference: { type: "nth_from_start", ordinal: 6 },
+  });
+});
+
+test("last_recalled pairs the stored user question with its original answer", () => {
+  const resolved = resolveRecallContract(
+    symbolicRecall("last_recalled", null, { paired: true }),
+    {
+      recallInventory: INVENTORY_8,
+      recallState: { userQuestionIndex: 2, anchorUserTurnCount: 8 },
+    },
+  );
+  assert.deepEqual(resolved.recall, {
+    target: RECALL_TARGETS.ASSISTANT_ANSWER,
+    indexType: "paired",
+    index: 2,
+    displayReference: { type: "last_recalled" },
+  });
+});
+
+test("last_recalled is rejected without a saved question or paired request", () => {
+  assert.equal(
+    resolveRecallContract(
+      symbolicRecall("last_recalled", null, { paired: true }),
+      { recallInventory: INVENTORY_8 },
+    ).ok,
+    false,
+  );
+  assert.equal(
+    resolveRecallContract(symbolicRecall("last_recalled"), {
+      recallInventory: INVENTORY_8,
+      recallState: { userQuestionIndex: 2, anchorUserTurnCount: 8 },
+    }).ok,
+    false,
+  );
+});
+
 test("position reference without origin is rejected so previous cannot become first", () => {
   assert.equal(
     parseRecallIntent({
@@ -174,6 +293,32 @@ test("buildRecallInventoryFromMessages excludes the current visitor turn", () =>
   assert.equal(inventory.assistantTurnCount, 2);
 });
 
+test("recall requests remain numbered as normal visitor questions", () => {
+  const messages = [
+    { sender_type: "visitor", message: "What is the capital of Japan?" },
+    { sender_type: "ai", message: "Tokyo." },
+    { sender_type: "visitor", message: "What is Japan's population?" },
+    { sender_type: "ai", message: "About 123 million." },
+    {
+      sender_type: "visitor",
+      message: "What was my second question and your response?",
+    },
+    { sender_type: "ai", message: "Your second question was..." },
+    {
+      sender_type: "visitor",
+      message: "What was my previous question and your response?",
+    },
+  ];
+  const inventory = buildRecallInventoryFromMessages(
+    messages,
+    "What was my previous question and your response?",
+  );
+  assert.deepEqual(inventory, {
+    userTurnCount: 3,
+    assistantTurnCount: 3,
+  });
+});
+
 test("renderRecalledTurnHtml quotes full question and full original answer for paired", () => {
   const html = renderRecalledTurnHtml({
     found: true,
@@ -190,6 +335,35 @@ test("renderRecalledTurnHtml quotes full question and full original answer for p
   assert.match(html, /My response was/);
   assert.match(html, /Classic 10mm/);
   assert.match(html, /prices and options/);
+});
+
+test("renderRecalledTurnHtml uses natural labels for symbolic references", () => {
+  const previous = renderRecalledTurnHtml({
+    found: true,
+    target: RECALL_TARGETS.USER_QUESTION,
+    indexType: "first",
+    index: 1,
+    requestedIndex: 1,
+    total: 1,
+    text: "give me 20 mm lashes",
+    displayReference: { type: "previous" },
+  });
+  const pairedFirst = renderRecalledTurnHtml({
+    found: true,
+    target: RECALL_TARGETS.ASSISTANT_ANSWER,
+    indexType: "paired",
+    index: 1,
+    requestedIndex: 1,
+    total: 3,
+    questionText: "give me 20 mm lashes",
+    text: "Here are the available options.",
+    displayReference: { type: "first" },
+  });
+
+  assert.match(previous, /Your previous question was/);
+  assert.doesNotMatch(previous, /question #1/);
+  assert.match(pairedFirst, /Your first question was/);
+  assert.match(pairedFirst, /My response was/);
 });
 
 test("renderRecalledTurnHtml does not invent a turn when missing", () => {

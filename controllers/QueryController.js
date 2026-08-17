@@ -108,6 +108,8 @@ const {
   fetchRecalledTurn,
   renderRecalledTurnHtml,
   getRecallInventory,
+  loadRecallState,
+  saveRecallState,
 } = require("../services/conversationRecallService");
 
 // --- Configuration ---
@@ -794,6 +796,8 @@ class QuestionAnsweringSystem {
     console.log(
       `[QueryController] Conversation recall: target=${fetched.target} index=${fetched.requestedIndex} found=${fetched.found} total=${fetched.total} paired=${fetched.indexType === "paired"}`,
     );
+
+    await saveRecallState(conversationId, fetched);
 
     const answer = renderRecalledTurnHtml(fetched);
     return {
@@ -2751,8 +2755,11 @@ ${answerInstructions}`;
 
     try {
       // 1. Get Chat History
-      const chatSession = await this.getChatHistory(conversationId);
-      const ragState = await loadRagState(conversationId);
+      const [chatSession, ragState, recallState] = await Promise.all([
+        this.getChatHistory(conversationId),
+        loadRagState(conversationId),
+        loadRecallState(conversationId),
+      ]);
       const stateTopics = topicsFromRagState(ragState);
       const getChatHistoryFormatted = (historyLimit = CHAT_HISTORY_LIMIT) =>
         this.formatChatHistory(chatSession, question, { historyLimit });
@@ -2828,6 +2835,10 @@ ${answerInstructions}`;
         conversationId,
         normalizedQuestion,
       );
+      const activeRecallState =
+        recallState?.anchorUserTurnCount === recallInventory.userTurnCount
+          ? recallState
+          : null;
 
       // Intent classification FIRST (rules → LLM) + multi-entity mode enrichment
       const baseRouting = await routeQuery(normalizedQuestion, {
@@ -2835,6 +2846,7 @@ ${answerInstructions}`;
         conversationState: ragState,
         websiteLanguage,
         recallInventory,
+        recallState: activeRecallState,
         openaiClient: openai,
         logOpenAIUsage: ({ usage, modelName, type }) =>
           this.logOpenAIChatUsage({
