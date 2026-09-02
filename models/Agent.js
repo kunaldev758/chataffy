@@ -55,6 +55,7 @@ const agentSchema = new mongoose.Schema({
   pagesAdded: {
     success: { type: Number, default: 0 },
     failed: { type: Number, default: 0 },
+    skipped: { type: Number, default: 0 },
     total: { type: Number, default: 0 },
   },
 

@@ -23,6 +23,11 @@ const { promisify } = require("util");
 
 const gunzip = promisify(zlib.gunzip);
 
+const {
+  skippedTrainingListClause,
+  failedTrainingListClause,
+} = require("../constants/trainingErrors");
+
 const MAX_DISCOVERED_URLS = 1500;
 
 function finalizeDiscoveredUrls(urls, max = MAX_DISCOVERED_URLS) {
@@ -113,9 +118,18 @@ function buildTrainingListQuery(userId, agentId, type, status, search) {
         query.$or = completedOrLegacy.$or;
       }
     } else if (status === "failed") {
-      query.trainingStatus = 2;
+      const failedClause = failedTrainingListClause();
       if (searchOr) {
-        query.$and = [{ trainingStatus: 2 }, { $or: searchOr }];
+        query.$and = [failedClause, { $or: searchOr }];
+      } else {
+        Object.assign(query, failedClause);
+      }
+    } else if (status === "skipped") {
+      const skippedClause = skippedTrainingListClause();
+      if (searchOr) {
+        query.$and = [skippedClause, { $or: searchOr }];
+      } else {
+        Object.assign(query, skippedClause);
       }
     } else {
       if (searchOr) {
@@ -1310,7 +1324,9 @@ async bulkInsertUrls(userId,agentId, urls) {
         if (status === "success") {
           query.$or = completedOrLegacy.$or;
         } else if (status === "failed") {
-          query.trainingStatus = 2;
+          Object.assign(query, failedTrainingListClause());
+        } else if (status === "skipped") {
+          Object.assign(query, skippedTrainingListClause());
         } else {
           query.$or = allStatusesOrLegacy.$or;
         }
@@ -1481,14 +1497,15 @@ async bulkInsertUrls(userId,agentId, urls) {
       $or: [{ trainingStatus: 1 }, { trainingStatus: { $exists: false } }],
     };
 
-    const [synced, failed, pending, total] = await Promise.all([
+    const [synced, failed, skipped, pending, total] = await Promise.all([
       TrainingModel.countDocuments({ ...base, ...completedClause }),
-      TrainingModel.countDocuments({ ...base, trainingStatus: 2 }),
+      TrainingModel.countDocuments({ ...base, ...failedTrainingListClause() }),
+      TrainingModel.countDocuments({ ...base, ...skippedTrainingListClause() }),
       TrainingModel.countDocuments({ ...base, trainingStatus: 0 }),
       countWebPageInventory(agentId),
     ]);
 
-    return { total, synced, failed, pending };
+    return { total, synced, failed, skipped, pending };
   }
 
   async getScrapingHistoryBySocket(userId, agentId, skip, limit, type, status, search) {
@@ -1534,7 +1551,7 @@ async bulkInsertUrls(userId,agentId, urls) {
 
       const [entries, total] = await Promise.all([
         TrainingModel.find(query)
-          .select({ _id: 1, type: 1, trainingStatus: 1 })
+          .select({ _id: 1, type: 1, trainingStatus: 1, error: 1, errorType: 1 })
           .sort({ createdAt: -1 })
           .limit(maxIds)
           .lean(),
@@ -1548,6 +1565,8 @@ async bulkInsertUrls(userId,agentId, urls) {
             _id: entry._id.toString(),
             type: entry.type,
             trainingStatus: entry.trainingStatus,
+            error: entry.error || null,
+            errorType: entry.errorType || null,
           })),
           total,
           truncated: total > entries.length,

@@ -5,6 +5,7 @@ const { detectWebsiteLanguage } = require("../../utils/websiteLanguage");
  * Does not mutate the DOM used for content extraction — load a fresh cheerio root.
  */
 function extractPageMetadata($, url) {
+  
   const title = $("title").text().trim() || url;
   const metaDescription =
     $('meta[name="description"]').attr("content")?.trim() || "";

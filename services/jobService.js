@@ -637,9 +637,9 @@ new Worker(
           };
           stoppedForStorageLimit = true;
 
-          appEvents.emit("userEvent", agentId, "training-event", {
-            agent: await Agent.findOne({ _id: agentId }),
-            client: await Client.findOne({ userId }),
+          appEvents.emit("userEvent", userId, agentId, "training-event", {
+            agent: await Agent.findOne({ _id: agentId }).lean(),
+            client: await Client.findOne({ userId }).lean(),
             message: storageLimitEmitMessage,
             scrapingProgress: storageLimitEmitProgress,
           });
@@ -687,9 +687,9 @@ new Worker(
       );
 
       if (stoppedForStorageLimit && storageLimitEmitProgress) {
-        appEvents.emit("userEvent", agentId, "training-event", {
-          agent: await Agent.findOne({ _id: agentId }),
-          client: await Client.findOne({ userId }),
+        appEvents.emit("userEvent", userId, agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }).lean(),
+          client: await Client.findOne({ userId }).lean(),
           message: storageLimitEmitMessage,
           scrapingProgress: storageLimitEmitProgress,
           trainingSummary: pipelineResult.trainingSummary || null,
@@ -1093,25 +1093,66 @@ new Worker(
         },
       );
 
-      const finalProgress = buildTrainingProgressPayload({
-        startTime: retrainStartTime,
-        phase: "training",
-        processed: totalEntries,
-        total: totalEntries,
-        trainingStep: "upserting",
-        trainingProcessed: totalEntries,
-        trainingTotal: totalEntries,
-        embeddingProgress: totalEntries,
-        embeddingTotal: totalEntries,
-        upsertProgress: totalEntries,
-        upsertTotal: totalEntries,
-        isProcessing: false,
-      });
+      if (retrainResult.stoppedForStorageLimit) {
+        const storageLimitElapsedTime = Math.floor(
+          (Date.now() - retrainStartTime.getTime()) / 1000,
+        );
+        const formatTimeForLimit = (seconds) => {
+          const hrs = Math.floor(seconds / 3600);
+          const mins = Math.floor((seconds % 3600) / 60);
+          const secs = seconds % 60;
+          return (
+            String(hrs).padStart(2, "0") +
+            ":" +
+            String(mins).padStart(2, "0") +
+            ":" +
+            String(secs).padStart(2, "0")
+          );
+        };
+        const storageLimitMessage =
+          "Storage limit exceeded. Scraping stopped. Upgrade your plan to continue.";
+        const storageLimitProgress = {
+          percentage:
+            totalEntries > 0
+              ? Math.round(((successCount + failCount) / totalEntries) * 100)
+              : 0,
+          processed: successCount + failCount,
+          total: totalEntries,
+          elapsedTime: formatTimeForLimit(storageLimitElapsedTime),
+          elapsedSeconds: storageLimitElapsedTime,
+          estimatedTimeRemaining: null,
+          estimatedSecondsRemaining: null,
+          isProcessing: false,
+          stoppedReason: "storage_limit_exceeded",
+        };
 
-      appEvents.emit("userEvent", agentId, "training-event", {
-        agent: await Agent.findOne({ _id: agentId }),
-        scrapingProgress: finalProgress,
-      });
+        appEvents.emit("userEvent", userId, agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }).lean(),
+          client: await Client.findOne({ userId }).lean(),
+          message: storageLimitMessage,
+          scrapingProgress: storageLimitProgress,
+        });
+      } else {
+        const finalProgress = buildTrainingProgressPayload({
+          startTime: retrainStartTime,
+          phase: "training",
+          processed: totalEntries,
+          total: totalEntries,
+          trainingStep: "upserting",
+          trainingProcessed: totalEntries,
+          trainingTotal: totalEntries,
+          embeddingProgress: totalEntries,
+          embeddingTotal: totalEntries,
+          upsertProgress: totalEntries,
+          upsertTotal: totalEntries,
+          isProcessing: false,
+        });
+        
+        appEvents.emit("userEvent", agentId, "training-event", {
+          agent: await Agent.findOne({ _id: agentId }),
+          scrapingProgress: finalProgress,
+        });
+      }
 
       console.log(
         `[retrainTrainingData] Completed: ${successCount} success, ${failCount} failed for user ${userId}`,

@@ -4,12 +4,17 @@
  * Total Web Pages is inventory-based (initial discovery + manual adds),
  * NOT TrainingModel row count.
  *
- * Synced/Failed are training outcomes only:
+ * Synced/Failed/Skipped are training outcomes only:
  *  - Synced = TrainingModel trainingStatus 1
- *  - Failed = TrainingModel trainingStatus 2
+ *  - Skipped = trainingStatus 2 with a skip reason
+ *  - Failed = remaining trainingStatus 2 rows
  */
 const Agent = require("../models/Agent");
 const Url = require("../models/Url");
+const {
+  skippedTrainingListClause,
+  failedTrainingListClause,
+} = require("../constants/trainingErrors");
 
 async function countWebPageInventory(agentId) {
   if (!agentId) return 0;
@@ -26,24 +31,25 @@ async function countWebPageInventory(agentId) {
 }
 
 /**
- * Recompute and write `agent.pagesAdded.{total,success,failed}`.
- * Keep TrainingModel only for success/failed (not total).
+ * Recompute and write `agent.pagesAdded.{total,success,failed,skipped}`.
+ * Keep TrainingModel only for success/failed/skipped (not total).
  */
 async function recomputeWebPageCounters(TrainingModel, userId, agentId) {
   if (!TrainingModel || !agentId) return null;
 
-  const [pagesSuccess, pagesFailed, pagesTotal] = await Promise.all([
+  const outcomeBase = { userId, agentId, type: 0 };
+  const [pagesSuccess, pagesFailed, pagesSkipped, pagesTotal] = await Promise.all([
     TrainingModel.countDocuments({
-      userId,
-      agentId,
-      type: 0,
+      ...outcomeBase,
       trainingStatus: 1,
     }),
     TrainingModel.countDocuments({
-      userId,
-      agentId,
-      type: 0,
-      trainingStatus: 2,
+      ...outcomeBase,
+      ...failedTrainingListClause(),
+    }),
+    TrainingModel.countDocuments({
+      ...outcomeBase,
+      ...skippedTrainingListClause(),
     }),
     countWebPageInventory(agentId),
   ]);
@@ -54,6 +60,7 @@ async function recomputeWebPageCounters(TrainingModel, userId, agentId) {
       $set: {
         "pagesAdded.success": pagesSuccess,
         "pagesAdded.failed": pagesFailed,
+        "pagesAdded.skipped": pagesSkipped,
         "pagesAdded.total": pagesTotal,
       },
     },
@@ -62,6 +69,7 @@ async function recomputeWebPageCounters(TrainingModel, userId, agentId) {
   return {
     success: pagesSuccess,
     failed: pagesFailed,
+    skipped: pagesSkipped,
     total: pagesTotal,
   };
 }

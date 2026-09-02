@@ -61,6 +61,109 @@ test("thin structured listing passes quality gate with preferEntityType=listing"
   assert.equal(result.minWords, STRUCTURED_LISTING_MIN_WORDS);
 });
 
+const enoughWords =
+  "Search engine marketing is paid advertising that puts ads in search results. " +
+  "Businesses bid on keywords so their offers show above organic listings. " +
+  "This article explains how SEM campaigns work and when to use them.";
+
+test("blog slug containing search-engine is not treated as a search utility URL", () => {
+  const wordCount = enoughWords.split(/\s+/).filter(Boolean).length;
+  assert.ok(wordCount >= DEFAULT_MIN_WORDS);
+
+  const result = checkQualityGates(
+    {
+      rawText: enoughWords,
+      pageTitle: "Search Engine Marketing (SEM) Explained",
+      url: "https://example.com/blog/search-engine-marketing-explained",
+      metrics: { wordCount },
+    },
+    { mode: "strict" },
+  );
+
+  assert.equal(result.pass, true);
+});
+
+test("actual /search utility URLs are still excluded", () => {
+  const wordCount = enoughWords.split(/\s+/).filter(Boolean).length;
+  const urls = [
+    "https://example.com/search",
+    "https://example.com/search/",
+    "https://example.com/search?q=printers",
+  ];
+
+  for (const url of urls) {
+    const result = checkQualityGates(
+      {
+        rawText: enoughWords,
+        pageTitle: "Search",
+        url,
+        metrics: { wordCount },
+      },
+      { mode: "strict" },
+    );
+
+    assert.equal(result.pass, false, url);
+    assert.match(result.reason, /Excluded utility or sitemap URL pattern/);
+  }
+});
+
+test("hyphenated content slugs are not treated as utility path segments", () => {
+  const wordCount = enoughWords.split(/\s+/).filter(Boolean).length;
+  assert.ok(wordCount >= DEFAULT_MIN_WORDS);
+
+  const urls = [
+    "https://example.com/order-fulfillment",
+    "https://example.com/blog/order-processing",
+    "https://example.com/services/order-fulfilment-software",
+    "https://example.com/search-engine-marketing",
+    "https://example.com/account-management",
+    "https://example.com/cart-abandonment-guide",
+  ];
+
+  for (const url of urls) {
+    const result = checkQualityGates(
+      {
+        rawText: enoughWords,
+        pageTitle: "Content page",
+        url,
+        metrics: { wordCount },
+      },
+      { mode: "strict" },
+    );
+
+    assert.equal(result.pass, true, url);
+  }
+});
+
+test("exact utility path segments are still excluded on any host", () => {
+  const wordCount = enoughWords.split(/\s+/).filter(Boolean).length;
+  const urls = [
+    "https://example.com/order",
+    "https://example.com/orders",
+    "https://shop.example.com/order/",
+    "https://example.com/en/orders/123",
+    "https://example.com/order?id=123",
+    "https://example.com/search",
+    "https://example.com/cart",
+    "https://example.com/sitemap.xml",
+  ];
+
+  for (const url of urls) {
+    const result = checkQualityGates(
+      {
+        rawText: enoughWords,
+        pageTitle: "Utility",
+        url,
+        metrics: { wordCount },
+      },
+      { mode: "strict" },
+    );
+
+    assert.equal(result.pass, false, url);
+    assert.match(result.reason, /Excluded utility or sitemap URL pattern/);
+  }
+});
+
 test("short non-listing page still fails at 30 words", () => {
   const text = "About us we sell things and do stuff here today yes.";
   const wordCount = text.split(/\s+/).filter(Boolean).length;

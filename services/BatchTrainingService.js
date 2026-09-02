@@ -42,7 +42,7 @@ class BatchTrainingService {
       options && typeof options === "object" && !Array.isArray(options)
         ? options
         : {};
-    const { onProgress, TrainingModel = null } = opts;
+    const { onProgress, TrainingModel = null, forceRetrain = false } = opts;
     try {
       if (!documents || documents.length === 0) {
         return {
@@ -64,6 +64,7 @@ class BatchTrainingService {
           TrainingModel,
           chunkSize: this.CHUNK_SIZE,
           chunkOverlap: this.CHUNK_OVERLAP,
+          forceRetrain,
         },
       );
 

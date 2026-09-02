@@ -25,6 +25,7 @@ const {
   markUrlUnchanged,
   checkCanonicalDuplicate,
 } = require("./contentPipeline");
+const { SKIPPED_ERROR_TYPE } = require("../constants/trainingErrors");
 const {
   markUnfinishedUrlsForStorageLimit,
 } = require("./storageLimitTraining");
@@ -49,6 +50,9 @@ function createDeletedAgentStop(agentId, logLabel = "parallelUrlTraining") {
   let lastCheckAt = 0;
   let pendingCheck = null;
 
+
+
+  
   async function refreshStoppedForDelete({ force = false } = {}) {
     if (stoppedForDelete) return true;
     if (!agentId) return false;
@@ -159,6 +163,7 @@ async function upsertSkippedTrainingRow({
     dataSize: 0,
     trainingStatus: 2,
     error,
+    errorType: SKIPPED_ERROR_TYPE,
     "webPage.url": url,
     chunkCount: 0,
     lastEdit: Date.now(),
@@ -167,7 +172,7 @@ async function upsertSkippedTrainingRow({
   if (existingRows.length > 0) {
     await TrainingModel.updateOne(
       { _id: existingRows[0]._id },
-      { $set: trainingUpdate, $unset: { errorType: 1 } },
+      { $set: trainingUpdate },
     );
     if (existingRows.length > 1) {
       await TrainingModel.deleteMany({
@@ -636,6 +641,13 @@ async function runParallelScrapeOverlapTrain(opts) {
         totalUrlsCount,
         scrapingStartTime,
       });
+    } else {
+      try {
+        const { emitClientPlanStatusUpdate } = require("../utils/clientSocketEvents");
+        await emitClientPlanStatusUpdate(userId, agentId);
+      } catch (emitError) {
+        console.error("[parallelUrlTraining] failed to notify client of storage limit:", emitError);
+      }
     }
   };
 
@@ -1123,6 +1135,12 @@ async function runParallelRetrainOverlap(opts) {
       { userId },
       { $set: { "upgradePlanStatus.storageLimitExceeded": true } },
     );
+    try {
+      const { emitClientPlanStatusUpdate } = require("../utils/clientSocketEvents");
+      await emitClientPlanStatusUpdate(userId, agentId);
+    } catch (emitError) {
+      console.error("[parallelRetrain] failed to notify client of storage limit:", emitError);
+    }
   }
 
   const computeOverlapFraction = () => {
@@ -1240,6 +1258,9 @@ async function runParallelRetrainOverlap(opts) {
           lastEdit: new Date(),
           chunkCount: result.chunkCountPerUrl?.[item.url] || 0,
           "webPage.url": item.url,
+          ...(item.scrapedDoc?.metadata?.title
+            ? { title: item.scrapedDoc.metadata.title }
+            : {}),
         },
         $unset: { error: 1, errorType: 1 },
       },
@@ -1299,6 +1320,7 @@ async function runParallelRetrainOverlap(opts) {
           qdrantIndexName,
           {
             TrainingModel,
+            forceRetrain: true,
             onProgress: async (progress) => {
               const local =
                 progress.trainingTotal > 0
@@ -1475,8 +1497,7 @@ async function runParallelRetrainOverlap(opts) {
           );
 
           // Keep retraining canonical duplicates consistent with initial training:
-          // they must create/update a TrainingModel row with trainingStatus=2
-          // so the UI shows them under "Failed".
+          // they must create/update a TrainingModel row so the UI shows them under "Skipped".
           await upsertSkippedTrainingRow({
             TrainingModel,
             userId,

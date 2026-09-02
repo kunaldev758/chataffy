@@ -980,6 +980,15 @@ module.exports.setCustomLimits = async (req, res) => {
       }
     }
 
+    if (wasStorageLimitExceeded !== isStorageLimitExceeded) {
+      try {
+        const { emitClientPlanStatusUpdate } = require("../utils/clientSocketEvents");
+        await emitClientPlanStatusUpdate(userId, null);
+      } catch (emitError) {
+        console.error("[setCustomLimits] failed to notify client of storage limit update:", emitError);
+      }
+    }
+
     res.status(200).json({
       success: true,
       message: client.customLimits.isCustomLimits

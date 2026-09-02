@@ -37,7 +37,7 @@ const trainingListFreeUsersSchema = new mongoose.Schema({
   trainingStatus: {
     type: Number,
     default: 1,
-    // 0:Processing 1: Trained, 2: Failed, 10: Plan Upgrade Required
+    // 0:Processing 1: Trained, 2: Failed (or Skipped when errorType is SKIPPED), 10: Plan Upgrade Required
   },
 
   error: {

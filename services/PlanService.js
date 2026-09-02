@@ -104,6 +104,12 @@ class PlanService {
         { userId },
         { $set: { "upgradePlanStatus.storageLimitExceeded" : true }  }
       );
+      try {
+        const { emitClientPlanStatusUpdate } = require("../utils/clientSocketEvents");
+        await emitClientPlanStatusUpdate(userId, agentId);
+      } catch (emitError) {
+        console.error("[checkDataSizeLimit] failed to notify client of storage limit:", emitError);
+      }
       return false;
     } else {
       await Client.updateOne(

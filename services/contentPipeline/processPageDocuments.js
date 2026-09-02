@@ -110,7 +110,7 @@ async function processPageDocuments(
 ) {
   // Optional: caller-supplied model (avoids dual-collection lookup).
   // Do not resolve plan via PlanService here — see webpageHasTrainingRow().
-  const { onProgress, TrainingModel = null } = options;
+  const { onProgress, TrainingModel = null, forceRetrain = false } = options;
 
   const chunkCountPerUrl = {};
   const resultsByUrl = {};
@@ -347,51 +347,58 @@ async function processPageDocuments(
       // Content-hash skip only when page is truly still trained (row still in
       // training list). After delete, Url.contentHash can remain while vectors
       // and the list row are gone — re-embed and recreate the row.
-      const existing = await Url.findOne({ url, userId, agentId })
-        .select("contentHash trainStatus")
-        .lean();
-
-      if (
-        existing?.contentHash &&
-        content_hash &&
-        existing.contentHash === content_hash
-      ) {
-        const hasTrainingEntry = await webpageHasTrainingRow(
-          userId,
-          agentId,
-          url,
-          TrainingModel,
+      // Explicit Retrain always re-embeds, even if the hash is unchanged.
+      if (forceRetrain) {
+        console.log(
+          `[contentPipeline] forceRetrain url=${url} — re-embedding even if content hash matches`,
         );
+      } else {
+        const existing = await Url.findOne({ url, userId, agentId })
+          .select("contentHash trainStatus")
+          .lean();
 
-        if (hasTrainingEntry) {
-          console.info("[url-training:unchanged]", {
+        if (
+          existing?.contentHash &&
+          content_hash &&
+          existing.contentHash === content_hash
+        ) {
+          const hasTrainingEntry = await webpageHasTrainingRow(
+            userId,
             agentId,
             url,
-            stage: "content_hash_check",
-            reason: "content_hash_match",
-            documentIndex: docIndex,
-          });
-          chunkCountPerUrl[url] = 0;
-          skippedUrls.push(url);
-          resultsByUrl[url] = {
-            success: true,
-            skipped: "unchanged",
-            skipReason: "content_hash_match",
-            qualityScore: page.quality_score,
-            contentHash: content_hash,
-            page,
-          };
-          await emitAggregateProgress({
-            docIndex,
-            localFraction: 1,
-            step: "chunking",
-          });
-          continue;
-        }
+            TrainingModel,
+          );
 
-        console.log(
-          `[contentPipeline] content hash match for ${url} but no training row — forcing retrain`,
-        );
+          if (hasTrainingEntry) {
+            console.info("[url-training:unchanged]", {
+              agentId,
+              url,
+              stage: "content_hash_check",
+              reason: "content_hash_match",
+              documentIndex: docIndex,
+            });
+            chunkCountPerUrl[url] = 0;
+            skippedUrls.push(url);
+            resultsByUrl[url] = {
+              success: true,
+              skipped: "unchanged",
+              skipReason: "content_hash_match",
+              qualityScore: page.quality_score,
+              contentHash: content_hash,
+              page,
+            };
+            await emitAggregateProgress({
+              docIndex,
+              localFraction: 1,
+              step: "chunking",
+            });
+            continue;
+          }
+
+          console.log(
+            `[contentPipeline] content hash match for ${url} but no training row — forcing retrain`,
+          );
+        }
       }
 
       const allChunks = ingested.chunks || [];

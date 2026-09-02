@@ -23,17 +23,47 @@ const SOFT_404_PATTERNS = [
   /under\s*maintenance/i,
 ];
 
-const EXCLUDED_URL_PATTERNS = [
-  /sitemap/i,
-  /\/cart/i,
-  /\/checkout/i,
-  /\/account/i,
-  /\/login/i,
-  /\/register/i,
-  /\/search/i,
-  /\/wishlist/i,
-  /\/order/i,
-];
+ /**
+ * Utility path segments skipped on any site.
+ * Match is exact segment only, so /order-fulfillment and /search-engine-marketing
+ * are not treated as /order or /search.
+ */
+const EXCLUDED_PATH_SEGMENTS = new Set([
+  "cart",
+  "checkout",
+  "account",
+  "login",
+  "register",
+  "search",
+  "wishlist",
+  "order",
+  "orders",
+]);
+
+function getUrlPathname(url) {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    const withoutHash = String(url).split("#")[0];
+    const withoutQuery = withoutHash.split("?")[0];
+    const schemeIdx = withoutQuery.indexOf("://");
+    if (schemeIdx === -1) return withoutQuery;
+    const afterHost = withoutQuery.slice(schemeIdx + 3);
+    const slash = afterHost.indexOf("/");
+    return slash === -1 ? "/" : afterHost.slice(slash);
+  }
+}
+
+function findExcludedPathSegment(url) {
+  const pathname = getUrlPathname(url);
+  const segments = pathname.split("/").filter(Boolean);
+  for (const raw of segments) {
+    const base = raw.replace(/\.[a-z0-9]+$/i, "").toLowerCase();
+    if (base.includes("sitemap")) return raw;
+    if (EXCLUDED_PATH_SEGMENTS.has(base)) return raw;
+  }
+  return null;
+}
 
 /** Default webpage body minimum (strict). */
 const DEFAULT_MIN_WORDS = 30;
@@ -115,16 +145,15 @@ function checkQualityGates(normalizedData, options = {}) {
     };
   }
 
-  // 0. Excluded URL pattern check (sitemaps, cart, utility pages)
+  // 0. Excluded URL path-segment check (sitemaps, cart, utility pages)
   if (url && !String(url).startsWith("local://")) {
-    for (const pattern of EXCLUDED_URL_PATTERNS) {
-      if (pattern.test(url)) {
-        return {
-          pass: false,
-          reason: `Excluded utility or sitemap URL pattern (${pattern.toString()})`,
-          metrics,
-        };
-      }
+    const excludedSegment = findExcludedPathSegment(url);
+    if (excludedSegment) {
+      return {
+        pass: false,
+        reason: `Excluded utility or sitemap URL pattern (/${excludedSegment})`,
+        metrics,
+      };
     }
   }
 
@@ -162,7 +191,8 @@ function checkQualityGates(normalizedData, options = {}) {
 module.exports = {
   checkQualityGates,
   SOFT_404_PATTERNS,
-  EXCLUDED_URL_PATTERNS,
+  EXCLUDED_PATH_SEGMENTS,
+  findExcludedPathSegment,
   DEFAULT_MIN_WORDS,
   STRUCTURED_LISTING_MIN_WORDS,
   hasStructuredListingProduct,
