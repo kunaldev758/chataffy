@@ -3,7 +3,16 @@ const { HttpsProxyAgent } = require("https-proxy-agent");
 const { HttpProxyAgent } = require("http-proxy-agent");
 const config = require("../config/scraper");
 const { extractProxyHost } = config;
-const { isHtmlContentType, mightBeSpaShell, looksLikeUnrenderedSpa } = require("../utils/webUrlUtils");
+const {
+  isHtmlContentType,
+  mightBeSpaShell,
+  looksLikeUnrenderedSpa,
+  looksLikeWafChallenge,
+  hasUsableScrapedHtml,
+  getHttpStatusFromError,
+  classifyHttpStatus,
+  isWafHttpStatus,
+} = require("../utils/webUrlUtils");
 const browserScraper = require("./BrowserScraperService");
 const cheerio = require("cheerio");
 
@@ -15,17 +24,9 @@ function formatProxyLabel(proxySelection, proxyUrl) {
 
 const BROWSER_HEADERS = {
   Accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
-  Connection: "keep-alive",
   "Upgrade-Insecure-Requests": "1",
-  "Sec-Fetch-Dest": "document",
-  "Sec-Fetch-Mode": "navigate",
-  "Sec-Fetch-Site": "none",
-  DNT: "1",
-  "Cache-Control": "no-cache, no-store, must-revalidate",
-  Pragma: "no-cache",
 };
 
 class SequentialRotation {
@@ -205,20 +206,34 @@ class WebScraper {
     };
   }
 
-  isBlockedError(err) {
+  /** Proxy is actually broken — not a site WAF 403. */
+  isProxyFailureError(err) {
+    const status = getHttpStatusFromError(err);
+    const kind = classifyHttpStatus(status);
+    if (kind === "proxy_auth" || kind === "proxy_or_gateway") return true;
     const msg = err?.message || "";
+    const code = err?.code || "";
     return (
-      msg.includes("407") ||
-      msg.includes("403") ||
-      msg.includes("429") ||
+      code === "ECONNREFUSED" ||
+      code === "ETIMEDOUT" ||
+      code === "ECONNRESET" ||
       msg.includes("ECONNREFUSED") ||
       msg.includes("ETIMEDOUT") ||
       msg.includes("ECONNRESET")
     );
   }
 
-  isRetryableHttpStatus(status) {
-    return status === 407 || status === 403 || status === 429 || status >= 400;
+  isWafError(err) {
+    if (isWafHttpStatus(getHttpStatusFromError(err))) return true;
+    const msg = err?.message || "";
+    return msg.includes("Likely blocked or rate limited");
+  }
+
+  shouldAcceptStatus(options, status) {
+    if (typeof options.validateStatus === "function") {
+      return options.validateStatus(status);
+    }
+    return status >= 200 && status < 300;
   }
 
   assertAcceptableResponse(response, url) {
@@ -280,27 +295,93 @@ class WebScraper {
   }
 
   /**
+   * Return a response the caller asked to accept (e.g. 404 sitemap miss),
+   * otherwise throw. Never treats 404 as a reason to rotate proxies.
+   */
+  settleFetchResponse(url, options, response, proxySelection, proxyLabel) {
+    const status = response.status;
+    const kind = classifyHttpStatus(status);
+
+    if (kind === "ok") {
+      if (proxySelection) this.rotationHandler.recordSuccess(proxySelection.proxyIndex);
+      console.log(
+        `[WebScraper] fetch OK | ${proxyLabel} | HTTP ${status} | ${url}`,
+      );
+      return { done: true, response };
+    }
+
+    if (kind === "not_found" || kind === "client_error") {
+      if (proxySelection) this.rotationHandler.recordSuccess(proxySelection.proxyIndex);
+      if (this.shouldAcceptStatus(options, status)) {
+        console.warn(
+          `[WebScraper] fetch ${kind} | ${proxyLabel} | HTTP ${status} | ${url}`,
+        );
+        return { done: true, response };
+      }
+      return {
+        done: false,
+        retry: false,
+        markBlocked: false,
+        error: new Error(`HTTP ${status} for ${url}`),
+      };
+    }
+
+    if (kind === "waf") {
+      console.warn(
+        `[WebScraper] fetch WAF | ${proxyLabel} | HTTP ${status} | ${url} (not marking proxy blocked)`,
+      );
+      if (this.shouldAcceptStatus(options, status)) {
+        return { done: true, response, waf: true };
+      }
+      return {
+        done: false,
+        retry: false,
+        markBlocked: false,
+        waf: true,
+        error: new Error(`HTTP ${status} for ${url}`),
+        response,
+      };
+    }
+
+    const markBlocked = kind === "proxy_auth" || kind === "proxy_or_gateway";
+    return {
+      done: false,
+      retry: true,
+      markBlocked,
+      error: new Error(`HTTP ${status} for ${url}`),
+    };
+  }
+
+  async fetchDirect(url, options = {}) {
+    const response = await this.performRequest(url, options, null, "discovery");
+    const settled = this.settleFetchResponse(
+      url,
+      options,
+      response,
+      null,
+      "direct (no proxy)",
+    );
+    if (settled.done) return settled.response;
+    throw settled.error;
+  }
+
+  /**
    * Discovery, sitemap, CSS, logo — direct by default (fast, parallel-safe).
    * Set options.useProxy=true or proxyTrainingOnly=false in SuperAdmin to proxy these too.
+   *
+   * 404/410: return immediately (proxy worked; resource missing).
+   * 403/429: do not burn the proxy pool — optional one-shot direct fallback.
    */
   async fetchUrl(url, options = {}) {
     const useProxy = this.shouldUseProxyForFetch(options);
 
     if (!useProxy) {
-      const response = await this.performRequest(
-        url,
-        options,
-        null,
-        "discovery",
-      );
-      if (this.isRetryableHttpStatus(response.status)) {
-        throw new Error(`HTTP ${response.status} for ${url}`);
-      }
-      return response;
+      return this.fetchDirect(url, options);
     }
 
     const maxRetries = options.maxRetries ?? config.maxRetries;
     let lastError = null;
+    let wafResponse = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const proxySelection = this.rotationHandler.getNextProxy(attempt > 0);
@@ -311,23 +392,36 @@ class WebScraper {
         const response = await this.withProxyLock(() =>
           this.performRequest(url, options, proxyUrl, "discovery"),
         );
-
-        if (this.isRetryableHttpStatus(response.status)) {
-          throw new Error(`HTTP ${response.status} for ${url}`);
-        }
-
-        this.rotationHandler.recordSuccess(proxySelection.proxyIndex);
-        console.log(
-          `[WebScraper] fetch OK | ${proxyLabel} | HTTP ${response.status} | ${url}`,
+        const settled = this.settleFetchResponse(
+          url,
+          options,
+          response,
+          proxySelection,
+          proxyLabel,
         );
-        return response;
+        if (settled.done) {
+          return settled.response;
+        }
+        lastError = settled.error;
+        if (settled.waf) {
+          wafResponse = settled.response || response;
+          this.rotationHandler.recordFailure(proxySelection.proxyIndex);
+          break;
+        }
+        this.rotationHandler.recordFailure(proxySelection.proxyIndex);
+        if (settled.markBlocked) {
+          this.rotationHandler.markProxyAsBlocked(proxySelection.proxyIndex);
+        }
+        if (!settled.retry || attempt === maxRetries) break;
+        await this.sleep(1000 * (attempt + 1));
       } catch (err) {
         lastError = err;
         console.warn(
           `[WebScraper] fetch FAIL | ${proxyLabel} | attempt ${attempt + 1}/${maxRetries + 1} | ${url} | ${err.message}`,
         );
         this.rotationHandler.recordFailure(proxySelection.proxyIndex);
-        if (this.isBlockedError(err)) {
+        if (this.isWafError(err)) break;
+        if (this.isProxyFailureError(err)) {
           this.rotationHandler.markProxyAsBlocked(proxySelection.proxyIndex);
         }
         if (attempt === maxRetries) break;
@@ -336,28 +430,47 @@ class WebScraper {
     }
 
     if (config.proxyFallbackDirect) {
-      console.log(`[WebScraper] fetch fallback direct (no proxy) | ${url}`);
-      const response = await this.performRequest(
-        url,
-        options,
-        null,
-        "discovery",
-      );
-      if (!this.isRetryableHttpStatus(response.status)) {
-        console.log(
-          `[WebScraper] fetch OK | direct (no proxy) | HTTP ${response.status} | ${url}`,
-        );
-        return response;
+      try {
+        console.log(`[WebScraper] fetch fallback direct (no proxy) | ${url}`);
+        return await this.fetchDirect(url, options);
+      } catch (directErr) {
+        lastError = directErr;
+        if (
+          wafResponse &&
+          this.shouldAcceptStatus(options, wafResponse.status)
+        ) {
+          return wafResponse;
+        }
       }
-      throw new Error(`HTTP ${response.status} for ${url}`);
+    }
+
+    if (wafResponse && this.shouldAcceptStatus(options, wafResponse.status)) {
+      return wafResponse;
     }
 
     throw lastError || new Error(`Failed to fetch ${url}`);
   }
 
-  // If the page is a SPA shell, rendering it with the browser
+  // If the page is a SPA shell or WAF interstitial, rendering it with the browser
   async maybeRenderSpaWithBrowser(result, url, options, proxyUrl, proxyLabel) {
-    if (!mightBeSpaShell(result.rawHtml)) return result;
+    const html = result?.rawHtml;
+    const wafHtml = looksLikeWafChallenge(html);
+
+    if (wafHtml) {
+      console.log(`[WebScraper] WAF challenge HTML, retrying with browser | ${url}`);
+      options.browserWafAttempted = true;
+      const rendered = await browserScraper.scrapeWebpage(url, {
+        userId: options.userId,
+        jobId: options.jobId,
+        timeout: Math.max(options.timeout || 0, 60000),
+      });
+      if (!hasUsableScrapedHtml(rendered?.rawHtml)) {
+        throw new Error("HTTP 403: Likely blocked or rate limited");
+      }
+      return rendered;
+    }
+
+    if (!mightBeSpaShell(html)) return result;
 
     const $ = cheerio.load(result.rawHtml);
     if (!looksLikeUnrenderedSpa($)) return result;
@@ -375,6 +488,51 @@ class WebScraper {
       console.warn(`[WebScraper] Browser fallback failed, keeping thin HTML | ${url} | ${browserErr.message}`);
       return result;
     }
+  }
+
+  async scrapeWithBrowserOnWaf(url, options, lastError) {
+    console.log(
+      `[WebScraper] Axios blocked (${lastError?.message || "WAF"}) — retrying with browser | ${url}`,
+    );
+    options.browserWafAttempted = true;
+
+    const attempts = [{ proxyUrl: null, proxyLabel: "direct (no proxy)" }];
+    if (config.proxyEnabled && this.rotationHandler) {
+      const selection = this.rotationHandler.getNextProxy(false);
+      attempts.push({
+        proxyUrl: selection.proxy,
+        proxyLabel: formatProxyLabel(selection, selection.proxy),
+      });
+    }
+
+    let lastBrowserErr = lastError;
+    for (const attempt of attempts) {
+      try {
+        const rendered = await browserScraper.scrapeWebpage(url, {
+          userId: options.userId,
+          jobId: options.jobId,
+          timeout: Math.max(options.timeout || 0, 60000),
+          proxyUrl: attempt.proxyUrl,
+          proxyLabel: attempt.proxyLabel,
+        });
+        if (hasUsableScrapedHtml(rendered?.rawHtml)) {
+          console.log(
+            `[WebScraper] Browser scrape OK | ${attempt.proxyLabel} | ${url}`,
+          );
+          return rendered;
+        }
+        lastBrowserErr = new Error("HTTP 403: Likely blocked or rate limited");
+        console.warn(
+          `[WebScraper] Browser still blocked | ${attempt.proxyLabel} | ${url}`,
+        );
+      } catch (err) {
+        lastBrowserErr = err;
+        console.warn(
+          `[WebScraper] Browser scrape failed | ${attempt.proxyLabel} | ${url} | ${err.message}`,
+        );
+      }
+    }
+    throw lastBrowserErr;
   }
 
   /**
@@ -445,8 +603,16 @@ class WebScraper {
     };
 
     if (!config.proxyEnabled) {
-      const result = await runScrape(null, null);
-      return this.maybeRenderSpaWithBrowser(result, url, options, null, null);
+      try {
+        const result = await runScrape(null, null);
+        return this.maybeRenderSpaWithBrowser(result, url, options, null, null);
+      } catch (err) {
+        lastError = err;
+        if (this.isWafError(err) && !options.browserWafAttempted) {
+          return this.scrapeWithBrowserOnWaf(url, options, err);
+        }
+        throw err;
+      }
     }
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -463,7 +629,8 @@ class WebScraper {
           `[WebScraper] scrape FAIL | ${proxyLabel} | attempt ${attempt + 1}/${maxRetries + 1} | ${url} | ${err.message}`,
         );
         this.rotationHandler.recordFailure(proxySelection.proxyIndex);
-        if (this.isBlockedError(err)) {
+        if (this.isWafError(err)) break;
+        if (this.isProxyFailureError(err)) {
           this.rotationHandler.markProxyAsBlocked(proxySelection.proxyIndex);
         }
         if (attempt === maxRetries) break;
@@ -478,6 +645,14 @@ class WebScraper {
         return await this.maybeRenderSpaWithBrowser(result, url, options, null, null);
       } catch (directErr) {
         lastError = directErr;
+      }
+    }
+
+    if (this.isWafError(lastError) && !options.browserWafAttempted) {
+      try {
+        return await this.scrapeWithBrowserOnWaf(url, options, lastError);
+      } catch (browserErr) {
+        lastError = browserErr;
       }
     }
 

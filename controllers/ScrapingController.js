@@ -17,6 +17,9 @@ const {
   isScrapableWebUrl,
   normalizeWebUrl,
   mightBeSpaShell,
+  isSameSiteUrl,
+  looksLikeWafChallenge,
+  isWafHttpStatus,
 } = require("../utils/webUrlUtils.js");
 const zlib = require("zlib");
 const { promisify } = require("util");
@@ -29,6 +32,34 @@ const {
 } = require("../constants/trainingErrors");
 
 const MAX_DISCOVERED_URLS = 1500;
+const ORIGIN_WAF_THRESHOLD = 2;
+
+function createDiscoveryState(siteOrigin) {
+  return {
+    siteOrigin,
+    consecutiveOrigin403: 0,
+    originWafBlocked: false,
+  };
+}
+
+function recordOriginFetchStatus(discoveryState, status, fetchUrl) {
+  if (!discoveryState?.siteOrigin || !Number.isInteger(status)) return;
+  if (fetchUrl && !isSameSiteUrl(fetchUrl, discoveryState.siteOrigin)) return;
+
+  if (isWafHttpStatus(status)) {
+    discoveryState.consecutiveOrigin403 += 1;
+    if (discoveryState.consecutiveOrigin403 >= ORIGIN_WAF_THRESHOLD) {
+      if (!discoveryState.originWafBlocked) {
+        console.warn(
+          `[discovery] Origin appears WAF-blocked (${discoveryState.siteOrigin}) after ${discoveryState.consecutiveOrigin403} 403/429s — skipping remaining sitemap guesses`,
+        );
+      }
+      discoveryState.originWafBlocked = true;
+    }
+  } else if (status === 200) {
+    discoveryState.consecutiveOrigin403 = 0;
+  }
+}
 
 function finalizeDiscoveredUrls(urls, max = MAX_DISCOVERED_URLS) {
   const originalCount = Array.isArray(urls) ? urls.length : 0;
@@ -231,10 +262,30 @@ async bulkInsertUrls(userId,agentId, urls) {
     return sameOrigin;
   }
 
+  async extractHomepageLinksWithBrowser(pageUrl, origin, userId) {
+    console.log(`[discovery] Rendering homepage with browser: ${pageUrl}`);
+    const rendered = await browserScraper.scrapeWebpage(pageUrl, {
+      timeout: 45000,
+      userId,
+    });
+    if (!rendered?.rawHtml) return [];
+    if (looksLikeWafChallenge(rendered.rawHtml)) {
+      console.warn(
+        `[discovery] Browser still showing a WAF challenge for ${pageUrl}`,
+      );
+    }
+    const sameOrigin = this.extractSameOriginLinks(rendered.rawHtml, origin);
+    if (sameOrigin.size > 0) {
+      console.log(
+        `[discovery] Found ${sameOrigin.size} same-origin links after browser render: ${pageUrl}`,
+      );
+    }
+    return finalizeDiscoveredUrls(Array.from(sameOrigin), 500);
+  }
+
   async extractUrlsFromSitemap(sitemapUrl, userId = null, options = {}) {
     const { visitedUrls = null, allowWebsiteDiscovery = true } = options;
     const visited = visitedUrls || new Set();
-    const childOptions = { visitedUrls: visited, allowWebsiteDiscovery: false };
 
     try {
       // Auto-add https:// prefix if protocol is missing
@@ -265,7 +316,6 @@ async bulkInsertUrls(userId,agentId, urls) {
       try {
         const parsed = new URL(sitemapUrl);
         origin = parsed.origin;
-        // isWebsiteUrl = !parsed.pathname.toLowerCase().endsWith(".xml");
         const pathname = parsed.pathname.toLowerCase();
 
         isWebsiteUrl =
@@ -275,24 +325,26 @@ async bulkInsertUrls(userId,agentId, urls) {
         // Not a valid URL; continue to existing logic which will handle and return []
       }
 
+      const discoveryState =
+        options.discoveryState || (origin ? createDiscoveryState(origin) : null);
+      const childOptions = {
+        visitedUrls: visited,
+        allowWebsiteDiscovery: false,
+        discoveryState,
+      };
+
       if (isWebsiteUrl && origin && allowWebsiteDiscovery) {
         console.log(`Website URL provided. Attempting discovery for: ${sitemapUrl}`);
 
         // 1) robots.txt -> look for Sitemap: entries
         try {
-          const robotsResponse = await webScraper.fetchUrl(`${origin}/robots.txt`, {
+          const robotsUrl = `${origin}/robots.txt`;
+          const robotsResponse = await webScraper.fetchUrl(robotsUrl, {
             timeout: 15000,
             validateStatus: (status) => status < 500,
           });
+          recordOriginFetchStatus(discoveryState, robotsResponse.status, robotsUrl);
           if (robotsResponse.status === 200 && typeof robotsResponse.data === "string") {
-            // const lines = robotsResponse.data.split(/\r?\n/);
-            // const sitemapLines = lines.filter((l) => /^\s*sitemap\s*:/i.test(l));
-            // const discoveredSitemaps = sitemapLines
-            //   .map((l) => l.split(" ")[1].trim()).filter(Boolean)
-              // .filter(Boolean)
-              // .map((v) => v.trim())
-              // .filter((v) => v.startsWith("http"));
-              
             const discoveredSitemaps = robotsResponse.data
             .split(/\r?\n/)
             .map(line => {
@@ -302,6 +354,12 @@ async bulkInsertUrls(userId,agentId, urls) {
             .filter(Boolean);
 
             for (const smUrl of discoveredSitemaps) {
+              if (!isSameSiteUrl(smUrl, origin)) {
+                console.log(
+                  `[discovery] Skipping third-party robots sitemap: ${smUrl}`,
+                );
+                continue;
+              }
               try {
                 const found = await this.extractUrlsFromSitemap(smUrl, userId, childOptions);
                 urls.push(...found);
@@ -319,15 +377,27 @@ async bulkInsertUrls(userId,agentId, urls) {
           console.warn(`robots.txt check failed for ${origin}: ${e.message}`);
         }
 
-        for (const path of commonSitemapPaths) {
-          if (urls.length >= MAX_DISCOVERED_URLS) break;
-          const candidate = `${origin}${path}`;
-          try {
-            const found = await this.extractUrlsFromSitemap(candidate, userId, childOptions);
-            urls.push(...found);
-          } catch (e) {
-            // ignore and try next
+        if (!discoveryState.originWafBlocked) {
+          for (const path of commonSitemapPaths) {
+            if (urls.length >= MAX_DISCOVERED_URLS) break;
+            if (discoveryState.originWafBlocked) {
+              console.warn(
+                `[discovery] Stopping sitemap guesses for ${origin} (WAF 403/429)`,
+              );
+              break;
+            }
+            const candidate = `${origin}${path}`;
+            try {
+              const found = await this.extractUrlsFromSitemap(candidate, userId, childOptions);
+              urls.push(...found);
+            } catch (e) {
+              // ignore and try next
+            }
           }
+        } else {
+          console.warn(
+            `[discovery] Skipping sitemap path guesses for ${origin} (already WAF-blocked)`,
+          );
         }
         if (urls.length > 0) {
           return finalizeDiscoveredUrls(urls);
@@ -335,56 +405,80 @@ async bulkInsertUrls(userId,agentId, urls) {
 
         // 3) Fallback: extract links from homepage HTML (same-origin, limited)
         try {
-          const htmlResponse = await webScraper.fetchUrl(sitemapUrl, {
-            timeout: 20000,
-            validateStatus: (status) => status < 500,
-          });
-          if (htmlResponse.status === 200 && typeof htmlResponse.data === "string") {
-            let sameOrigin = this.extractSameOriginLinks(htmlResponse.data, origin);
+          if (discoveryState.originWafBlocked) {
+            urls = await this.extractHomepageLinksWithBrowser(
+              sitemapUrl,
+              origin,
+              userId,
+            );
+            if (urls.length > 0) return urls;
+          } else {
+            const htmlResponse = await webScraper.fetchUrl(sitemapUrl, {
+              timeout: 20000,
+              validateStatus: (status) => status < 500,
+            });
+            recordOriginFetchStatus(
+              discoveryState,
+              htmlResponse.status,
+              sitemapUrl,
+            );
 
-            // No sitemap + a plain HTTP GET only returns the pre-render shell for SPAs
-            // (React/Vue/Angular/Next) — there are no real <a href> links in the raw
-            // HTML until client-side JS runs. Render the homepage with a real browser
-            // and re-extract links from the fully hydrated DOM instead.
-            const looksUnrendered =
-              mightBeSpaShell(htmlResponse.data) || sameOrigin.size === 0;
+            const homepageBlocked =
+              isWafHttpStatus(htmlResponse.status) ||
+              (typeof htmlResponse.data === "string" &&
+                looksLikeWafChallenge(htmlResponse.data));
 
-            if (looksUnrendered) {
-              console.log(
-                `No links found in raw homepage HTML (possible SPA), rendering with browser: ${sitemapUrl}`,
+            if (homepageBlocked) {
+              urls = await this.extractHomepageLinksWithBrowser(
+                sitemapUrl,
+                origin,
+                userId,
               );
-              try {
-                const rendered = await browserScraper.scrapeWebpage(sitemapUrl, {
-                  timeout: 20000,
-                  userId,
-                });
-                if (rendered?.rawHtml) {
-                  const renderedLinks = this.extractSameOriginLinks(rendered.rawHtml, origin);
-                  if (renderedLinks.size > 0) {
-                    console.log(
-                      `Found ${renderedLinks.size} same-origin links after browser render: ${sitemapUrl}`,
-                    );
-                    sameOrigin = renderedLinks;
-                  }
+              if (urls.length > 0) return urls;
+            } else if (
+              htmlResponse.status === 200 &&
+              typeof htmlResponse.data === "string"
+            ) {
+              let sameOrigin = this.extractSameOriginLinks(htmlResponse.data, origin);
+
+              const looksUnrendered =
+                mightBeSpaShell(htmlResponse.data) || sameOrigin.size === 0;
+
+              if (looksUnrendered) {
+                try {
+                  const browserUrls = await this.extractHomepageLinksWithBrowser(
+                    sitemapUrl,
+                    origin,
+                    userId,
+                  );
+                  if (browserUrls.length > 0) return browserUrls;
+                } catch (renderErr) {
+                  console.warn(
+                    `Browser render of homepage failed for ${sitemapUrl}: ${renderErr.message}`,
+                  );
                 }
-              } catch (renderErr) {
-                console.warn(
-                  `Browser render of homepage failed for ${sitemapUrl}: ${renderErr.message}`,
-                );
               }
-            }
 
-            urls = finalizeDiscoveredUrls(Array.from(sameOrigin), 500);
-
-            if (urls.length > 0) {
-              return urls;
+              urls = finalizeDiscoveredUrls(Array.from(sameOrigin), 500);
+              if (urls.length > 0) return urls;
             }
           }
         } catch (e) {
           console.warn(`Homepage fallback failed for ${sitemapUrl}: ${e.message}`);
+          try {
+            urls = await this.extractHomepageLinksWithBrowser(
+              sitemapUrl,
+              origin,
+              userId,
+            );
+            if (urls.length > 0) return urls;
+          } catch (renderErr) {
+            console.warn(
+              `Browser render of homepage failed for ${sitemapUrl}: ${renderErr.message}`,
+            );
+          }
         }
 
-        // If all discovery strategies failed, return empty
         console.warn(`No sitemap or links discovered for website URL: ${sitemapUrl}`);
         return [];
       }
@@ -398,11 +492,11 @@ async bulkInsertUrls(userId,agentId, urls) {
         responseType: isGzip ? "arraybuffer" : "text",
         validateStatus: (status) => status < 500,
       });
-  
-      // Handle non-200 status codes
+      recordOriginFetchStatus(discoveryState, response.status, sitemapUrl);
+
       if (response.status === 404) {
         console.warn(`Sitemap not found (404): ${sitemapUrl}`);
-        return []; // Return empty array instead of throwing error
+        return [];
       }
       
       if (response.status !== 200) {

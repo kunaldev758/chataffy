@@ -1,14 +1,15 @@
 const { chromium } = require("playwright");
 const config = require("../config/scraper");
+const { looksLikeWafChallenge, hasUsableScrapedHtml } = require("../utils/webUrlUtils");
 
 const MAX_CONCURRENT_PAGES = parseInt(process.env.BROWSER_SCRAPE_CONCURRENCY || "2", 10);
 const MAX_PER_USER = parseInt(process.env.BROWSER_SCRAPE_PER_USER || "1", 10);
 const MAX_PER_JOB = parseInt(process.env.BROWSER_SCRAPE_PER_JOB || "1", 10);
-const NAV_TIMEOUT_MS = 30000;
+const NAV_TIMEOUT_MS = 45000;
+const WAF_WAIT_MS = parseInt(process.env.BROWSER_SCRAPE_WAF_WAIT_MS || "25000", 10);
 // Best-effort only — many SPAs keep a connection open forever (polling/websockets/analytics)
 // and never truly go idle
 const NETWORK_IDLE_TIMEOUT_MS = parseInt(process.env.BROWSER_SCRAPE_NETWORKIDLE_TIMEOUT_MS || "5000", 10);
-
 
 function toPlaywrightProxy(proxyUrl) {
   if (!proxyUrl) return undefined;
@@ -71,15 +72,28 @@ class BrowserScraper {
     if (this._browser && this._browser.isConnected()) return this._browser;
     if (this._launching) return this._launching;
 
-    this._launching = chromium.launch({
+    const launchOptions = {
       headless: true,
-      args: ["--disable-blink-features=AutomationControlled"],
-    }).then((browser) => {
-      this._browser = browser;
-      this._launching = null;
-      browser.on("disconnected", () => { this._browser = null; });
-      return browser;
-    });
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+      ],
+    };
+
+    this._launching = chromium
+      .launch({ ...launchOptions, channel: "chrome" })
+      .catch(() => chromium.launch(launchOptions))
+      .then((browser) => {
+        this._browser = browser;
+        this._launching = null;
+        browser.on("disconnected", () => { this._browser = null; });
+        return browser;
+      })
+      .catch((err) => {
+        this._launching = null;
+        throw err;
+      });
 
     return this._launching;
   }
@@ -163,31 +177,52 @@ class BrowserScraper {
       const playwrightProxy = toPlaywrightProxy(options.proxyUrl);
       context = await browser.newContext({
         userAgent: config.userAgent,
+        locale: "en-US",
         viewport: { width: 1280, height: 800 },
+        extraHTTPHeaders: {
+          "Accept-Language": "en-US,en;q=0.9",
+        },
         ...(playwrightProxy ? { proxy: playwrightProxy } : {}),
       });
 
       const page = await context.newPage();
-      // Block heavy assets you don't need for text scraping — big speed win
-      await page.route("**/*", (route) => {
-        const type = route.request().resourceType();
-        if (["image", "font", "media"].includes(type)) return route.abort();
-        route.continue();
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+        window.chrome = { runtime: {} };
+        Object.defineProperty(navigator, "languages", {
+          get: () => ["en-US", "en"],
+        });
+        Object.defineProperty(navigator, "plugins", {
+          get: () => [1, 2, 3, 4, 5],
+        });
       });
 
+      const navTimeout = Math.max(options.timeout || NAV_TIMEOUT_MS, NAV_TIMEOUT_MS);
       const response = await page.goto(url, {
         waitUntil: "domcontentloaded",
-        timeout: options.timeout || NAV_TIMEOUT_MS,
+        timeout: navTimeout,
       });
 
       await page
         .waitForLoadState("networkidle", { timeout: NETWORK_IDLE_TIMEOUT_MS })
         .catch(() => {});
-      // Give React a moment to finish any post-load rendering/hydration
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(800);
 
-      const rawHtml = await page.content();
-      const statusCode = response ? response.status() : 200;
+      let rawHtml = await page.content();
+      if (looksLikeWafChallenge(rawHtml) && !hasUsableScrapedHtml(rawHtml)) {
+        console.log(`[BrowserScraper] WAF challenge detected, waiting | ${url}`);
+        const deadline = Date.now() + WAF_WAIT_MS;
+        while (Date.now() < deadline) {
+          await page.waitForTimeout(1500);
+          rawHtml = await page.content();
+          if (!looksLikeWafChallenge(rawHtml) || hasUsableScrapedHtml(rawHtml)) {
+            console.log(`[BrowserScraper] WAF challenge cleared | ${url}`);
+            break;
+          }
+        }
+      }
+
+      let statusCode = response ? response.status() : 200;
 
       if (statusCode === 407) {
         throw new Error(
@@ -198,6 +233,9 @@ class BrowserScraper {
         throw new Error(
           `Browser render returned empty HTML (HTTP ${statusCode}) for ${url}`,
         );
+      }
+      if (hasUsableScrapedHtml(rawHtml) && (statusCode === 403 || statusCode === 429 || statusCode === 503)) {
+        statusCode = 200;
       }
 
       return {

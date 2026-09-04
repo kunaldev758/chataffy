@@ -303,6 +303,91 @@ function looksLikeUnrenderedSpa($) {
   return hasRoot && !hasMeaningfulMarkup && text.length < 150;
 }
 
+function hostnameWithoutWww(hostname) {
+  return String(hostname || "")
+    .toLowerCase()
+    .replace(/^www\./, "");
+}
+
+/** Same registrable host, ignoring www. Used to drop McAfee/Trustwave/etc. robots sitemaps. */
+function isSameSiteUrl(candidateUrl, originUrl) {
+  if (!candidateUrl || !originUrl) return false;
+  try {
+    const candidate = new URL(candidateUrl);
+    const origin =
+      originUrl instanceof URL ? originUrl : new URL(String(originUrl));
+    if (!["http:", "https:"].includes(candidate.protocol)) return false;
+    return (
+      hostnameWithoutWww(candidate.hostname) ===
+      hostnameWithoutWww(origin.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+const WAF_TITLE_RE =
+  /just a moment|attention required|checking your browser|enable javascript and cookies to continue|ddos protection by|please wait while we (?:check|verify)/i;
+
+function htmlTitle(html) {
+  const match = String(html || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return match ? match[1].replace(/\s+/g, " ").trim() : "";
+}
+
+function visiblePageText(html) {
+  const withoutNoise = String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `${htmlTitle(html)} ${withoutNoise}`.trim();
+}
+
+function looksLikeWafChallenge(html) {
+  if (!html || typeof html !== "string") return false;
+  const title = htmlTitle(html);
+  if (WAF_TITLE_RE.test(title)) return true;
+  const visible = visiblePageText(html);
+  if (visible.length > 800) return false;
+  return WAF_TITLE_RE.test(visible);
+}
+
+/** Real page content (not a short WAF interstitial) that training can use. */
+function hasUsableScrapedHtml(html) {
+  if (!html || typeof html !== "string") return false;
+  const text = visiblePageText(html);
+  const linkCount = (html.match(/<a\s/gi) || []).length;
+  if (text.length >= 400 && linkCount >= 5) return true;
+  if (looksLikeWafChallenge(html)) return false;
+  return text.length >= 200 || linkCount >= 5;
+}
+
+function getHttpStatusFromError(err) {
+  const nested = err?.response?.status;
+  if (Number.isInteger(nested)) return nested;
+  const msg = err?.message || "";
+  const match = msg.match(/HTTP (\d{3})/);
+  return match ? Number(match[1]) : null;
+}
+
+function classifyHttpStatus(status) {
+  if (!Number.isInteger(status)) return "other";
+  if (status >= 200 && status < 300) return "ok";
+  if (status === 404 || status === 410) return "not_found";
+  if (status === 403 || status === 429) return "waf";
+  if (status === 407) return "proxy_auth";
+  if (status === 502 || status === 503 || status === 504) return "proxy_or_gateway";
+  if (status >= 500) return "server_error";
+  if (status >= 400) return "client_error";
+  return "other";
+}
+
+function isWafHttpStatus(status) {
+  return classifyHttpStatus(status) === "waf";
+}
+
 module.exports = {
   NON_HTML_EXTENSIONS,
   TRACKING_QUERY_PARAMS,
@@ -316,4 +401,10 @@ module.exports = {
   isHtmlContentType,
   mightBeSpaShell,
   looksLikeUnrenderedSpa,
+  isSameSiteUrl,
+  looksLikeWafChallenge,
+  hasUsableScrapedHtml,
+  getHttpStatusFromError,
+  classifyHttpStatus,
+  isWafHttpStatus,
 };
