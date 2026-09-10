@@ -5,6 +5,8 @@
 const Client = require("../models/Client");
 const Agent = require("../models/Agent");
 const WebsiteData = require("../models/WebsiteData");
+const Url = require("../models/Url");
+const { sortUrlsForTraining, scoreUrlForTraining } = require("../utils/urlTrainingPriority");
 const {
   ConcurrencyLimiter,
   createAsyncLock,
@@ -32,13 +34,54 @@ const {
 
 const DEFAULT_SCRAPE_CONCURRENCY = Math.max(
   1,
-  parseInt(process.env.TRAINING_SCRAPE_CONCURRENCY || "8", 10) || 8,
+  parseInt(process.env.TRAINING_SCRAPE_CONCURRENCY || "16", 10) || 16,
 );
 const DEFAULT_EMBED_CONCURRENCY = Math.max(
   1,
-  parseInt(process.env.TRAINING_EMBED_CONCURRENCY || "3", 10) || 3,
+  parseInt(process.env.TRAINING_EMBED_CONCURRENCY || "6", 10) || 6,
 );
 const AGENT_DELETE_CHECK_INTERVAL_MS = 2000;
+
+function httpCacheSkipEnabled() {
+  const raw = String(process.env.TRAINING_HTTP_CACHE_SKIP || "true").toLowerCase();
+  return raw !== "false" && raw !== "0" && raw !== "no";
+}
+
+function canSkipUnchangedHttp(cacheRow) {
+  return Boolean(
+    cacheRow &&
+      cacheRow.trainStatus === 1 &&
+      (cacheRow.etag || cacheRow.lastModified),
+  );
+}
+
+async function loadUrlHttpCache(urls, userId, agentId) {
+  if (!httpCacheSkipEnabled() || !Array.isArray(urls) || !urls.length) {
+    return new Map();
+  }
+  const rows = await Url.find({ userId, agentId, url: { $in: urls } })
+    .select("url etag lastModified trainStatus")
+    .lean();
+  return new Map((rows || []).map((row) => [row.url, row]));
+}
+
+function scrapeOptionsForUrl(url, { userId, jobId, cacheRow, forceFull = false } = {}) {
+  const options = {
+    maxRetries: 2,
+    userId,
+    jobId,
+  };
+  if (
+    !forceFull &&
+    httpCacheSkipEnabled() &&
+    canSkipUnchangedHttp(cacheRow)
+  ) {
+    if (cacheRow.etag) options.etag = cacheRow.etag;
+    if (cacheRow.lastModified) options.lastModified = cacheRow.lastModified;
+    options.allowNotModified = true;
+  }
+  return options;
+}
 
 /**
  * In-memory abort flag for website/agent delete mid-training.
@@ -233,6 +276,9 @@ async function runParallelScrapeOverlapTrain(opts) {
     onStorageLimit,
   } = opts;
 
+  const orderedUrls = sortUrlsForTraining(urls);
+  const urlHttpCache = await loadUrlHttpCache(orderedUrls, userId, agentId);
+
   const chromeCache = {};
   const seenCanonicalKeys = new Set();
   const withSharedLock = createAsyncLock();
@@ -276,7 +322,7 @@ async function runParallelScrapeOverlapTrain(opts) {
   const outcomeSummary = createTrainingOutcomeSummary(totalUrlsCount);
 
   console.log(
-    `[parallelUrlTraining] scrape=${scrapeConcurrency} embed=${embedConcurrency} urls=${totalUrlsCount}`,
+    `[parallelUrlTraining] scrape=${scrapeConcurrency} embed=${embedConcurrency} urls=${totalUrlsCount} httpCache=${httpCacheSkipEnabled()}`,
   );
 
   const summarizeDoc = (doc) =>
@@ -351,6 +397,8 @@ async function runParallelScrapeOverlapTrain(opts) {
         canonicalUrl: doc.metadata?.canonicalUrl || null,
         language: doc.metadata?.language || "en",
         qualityScore: pageResult.qualityScore,
+        etag: doc.metadata?.etag || null,
+        lastModified: doc.metadata?.lastModified || null,
       });
       return;
     }
@@ -487,6 +535,8 @@ async function runParallelScrapeOverlapTrain(opts) {
         canonicalUrl: doc.metadata?.canonicalUrl || null,
         language: doc.metadata?.language || "en",
         qualityScore: pageResult?.qualityScore,
+        etag: doc.metadata?.etag || null,
+        lastModified: doc.metadata?.lastModified || null,
       });
     } else {
       anyTrainFailed = true;
@@ -651,7 +701,7 @@ async function runParallelScrapeOverlapTrain(opts) {
     }
   };
 
-  await mapWithConcurrency(urls, scrapeConcurrency, async (url) => {
+  await mapWithConcurrency(orderedUrls, scrapeConcurrency, async (url) => {
     try {
       if (stoppedForStorageLimit || stoppedForDelete) {
         return;
@@ -691,11 +741,40 @@ async function runParallelScrapeOverlapTrain(opts) {
       }
 
       console.log(`[parallelUrlTraining] scrape start url=${url}`);
-      const { rawHtml: sourceCode } = await webScraper.scrapeWebpage(url, {
-        maxRetries: 2,
-        userId,
-        jobId,
-      });
+      const cacheRow = urlHttpCache.get(url);
+      let scrapeResult = await webScraper.scrapeWebpage(
+        url,
+        scrapeOptionsForUrl(url, { userId, jobId, cacheRow }),
+      );
+
+      if (scrapeResult?.notModified) {
+        if (canSkipUnchangedHttp(cacheRow)) {
+          console.log(
+            `[parallelUrlTraining] scrape skipped not-modified url=${url}`,
+          );
+          outcomeSummary.unchanged += 1;
+          markSettled(url);
+          await markUrlUnchanged(url, userId, agentId, {
+            etag: scrapeResult.etag || cacheRow.etag || null,
+            lastModified:
+              scrapeResult.lastModified || cacheRow.lastModified || null,
+          });
+          return;
+        }
+        scrapeResult = await webScraper.scrapeWebpage(
+          url,
+          scrapeOptionsForUrl(url, {
+            userId,
+            jobId,
+            cacheRow,
+            forceFull: true,
+          }),
+        );
+      }
+
+      const sourceCode = scrapeResult?.rawHtml;
+      const httpEtag = scrapeResult?.etag || null;
+      const httpLastModified = scrapeResult?.lastModified || null;
       console.log(
         `[parallelUrlTraining] scrape done url=${url} html_bytes=${Buffer.byteLength(sourceCode || "", "utf8")}`,
       );
@@ -930,6 +1009,8 @@ async function runParallelScrapeOverlapTrain(opts) {
               product_id: product_id || null,
               sections: Array.isArray(sections) ? sections : undefined,
               type: "webpage",
+              etag: httpEtag,
+              lastModified: httpLastModified,
             },
             originalUrl: url,
           },
@@ -1057,6 +1138,18 @@ async function runParallelRetrainOverlap(opts) {
     embedConcurrency = DEFAULT_EMBED_CONCURRENCY,
     totalEntries,
   } = opts;
+
+  const orderedEntries = [...(validEntries || [])].sort((a, b) => {
+    const scoreDiff =
+      scoreUrlForTraining(b?.webPage?.url) - scoreUrlForTraining(a?.webPage?.url);
+    if (scoreDiff !== 0) return scoreDiff;
+    return String(a?.webPage?.url || "").localeCompare(String(b?.webPage?.url || ""));
+  });
+  const urlHttpCache = await loadUrlHttpCache(
+    orderedEntries.map((entry) => entry?.webPage?.url).filter(Boolean),
+    userId,
+    agentId,
+  );
 
   const chromeCache = {};
   const retrainCanonicalKeys = new Set();
@@ -1188,6 +1281,8 @@ async function runParallelRetrainOverlap(opts) {
         canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
         language: item.scrapedDoc?.metadata?.language || "en",
         qualityScore: pageResult.qualityScore,
+        etag: item.scrapedDoc?.metadata?.etag || null,
+        lastModified: item.scrapedDoc?.metadata?.lastModified || null,
       });
       successCount += 1;
       return;
@@ -1275,6 +1370,8 @@ async function runParallelRetrainOverlap(opts) {
       canonicalUrl: item.scrapedDoc?.metadata?.canonicalUrl || null,
       language: item.scrapedDoc?.metadata?.language || "en",
       qualityScore: pageResult?.qualityScore,
+      etag: item.scrapedDoc?.metadata?.etag || null,
+      lastModified: item.scrapedDoc?.metadata?.lastModified || null,
     });
 
     await applyWebPagePagesAddedDelta(item.prevStatus, 1);
@@ -1395,7 +1492,7 @@ async function runParallelRetrainOverlap(opts) {
     trainPromises.push(trainPromise);
   };
 
-  await mapWithConcurrency(validEntries, scrapeConcurrency, async (entry) => {
+  await mapWithConcurrency(orderedEntries, scrapeConcurrency, async (entry) => {
     const url = entry.webPage.url;
     const prevStatus = entry.trainingStatus;
 
@@ -1416,11 +1513,38 @@ async function runParallelRetrainOverlap(opts) {
       }
 
       console.log(`[parallelRetrain] scrape start url=${url}`);
-      const { rawHtml } = await webScraper.scrapeWebpage(url, {
-        maxRetries: 2,
-        userId,
-        jobId,
-      });
+      const cacheRow = urlHttpCache.get(url);
+      let scrapeResult = await webScraper.scrapeWebpage(
+        url,
+        scrapeOptionsForUrl(url, { userId, jobId, cacheRow }),
+      );
+
+      if (scrapeResult?.notModified) {
+        if (canSkipUnchangedHttp(cacheRow) || prevStatus === 1) {
+          console.log(`[parallelRetrain] scrape skipped not-modified url=${url}`);
+          markSettled(url);
+          await markUrlUnchanged(url, userId, agentId, {
+            etag: scrapeResult.etag || cacheRow?.etag || null,
+            lastModified:
+              scrapeResult.lastModified || cacheRow?.lastModified || null,
+          });
+          successCount += 1;
+          return;
+        }
+        scrapeResult = await webScraper.scrapeWebpage(
+          url,
+          scrapeOptionsForUrl(url, {
+            userId,
+            jobId,
+            cacheRow,
+            forceFull: true,
+          }),
+        );
+      }
+
+      const rawHtml = scrapeResult?.rawHtml;
+      const httpEtag = scrapeResult?.etag || null;
+      const httpLastModified = scrapeResult?.lastModified || null;
       console.log(
         `[parallelRetrain] scrape done url=${url} html_bytes=${Buffer.byteLength(rawHtml || "", "utf8")}`,
       );
@@ -1563,6 +1687,8 @@ async function runParallelRetrainOverlap(opts) {
                 product_id: product_id || null,
                 sections: Array.isArray(sections) ? sections : undefined,
                 type: "webpage",
+                etag: httpEtag,
+                lastModified: httpLastModified,
               },
               originalUrl: url,
             },

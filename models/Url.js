@@ -51,6 +51,15 @@ const urlSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    /** HTTP cache validators so retrains can skip unchanged pages (304). */
+    etag: {
+      type: String,
+      default: null,
+    },
+    lastModified: {
+      type: String,
+      default: null,
+    },
     lastCrawledAt: {
       type: Date,
       default: null,

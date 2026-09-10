@@ -2,9 +2,9 @@ const { chromium } = require("playwright");
 const config = require("../config/scraper");
 const { looksLikeWafChallenge, hasUsableScrapedHtml } = require("../utils/webUrlUtils");
 
-const MAX_CONCURRENT_PAGES = parseInt(process.env.BROWSER_SCRAPE_CONCURRENCY || "2", 10);
-const MAX_PER_USER = parseInt(process.env.BROWSER_SCRAPE_PER_USER || "1", 10);
-const MAX_PER_JOB = parseInt(process.env.BROWSER_SCRAPE_PER_JOB || "1", 10);
+const MAX_CONCURRENT_PAGES = parseInt(process.env.BROWSER_SCRAPE_CONCURRENCY || "3", 10);
+const MAX_PER_USER = parseInt(process.env.BROWSER_SCRAPE_PER_USER || "2", 10);
+const MAX_PER_JOB = parseInt(process.env.BROWSER_SCRAPE_PER_JOB || "2", 10);
 const NAV_TIMEOUT_MS = 45000;
 const WAF_WAIT_MS = parseInt(process.env.BROWSER_SCRAPE_WAF_WAIT_MS || "25000", 10);
 // Best-effort only — many SPAs keep a connection open forever (polling/websockets/analytics)
@@ -242,6 +242,9 @@ class BrowserScraper {
         rawHtml,
         statusCode,
         contentType: "text/html",
+        notModified: false,
+        etag: null,
+        lastModified: null,
         proxy_used: options.proxyLabel || null,
         response_time: Date.now() - startTime,
         renderedWithBrowser: true,

@@ -83,6 +83,12 @@ const NON_CONTENT_PATH_PATTERNS = [
   /^\/wp-login\.php$/i,
   /^\/cart\.php$/i,
   /^\/checkout\.php$/i,
+  /^\/tagged(\/|$)/i,
+  /^\/tags?(\/|$)/i,
+  /^\/product-tag(\/|$)/i,
+  /^\/author(\/|$)/i,
+  /^\/authors(\/|$)/i,
+  /\/page\/\d+\/?$/i,
 ];
 
 function getPathExtension(pathname) {

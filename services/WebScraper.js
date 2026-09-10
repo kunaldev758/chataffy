@@ -115,13 +115,23 @@ class SequentialRotation {
   }
 }
 
+function cacheHeadersFromResponse(response) {
+  const headers = response?.headers || {};
+  const etag = headers.etag || headers.ETag || null;
+  const lastModified =
+    headers["last-modified"] || headers["Last-Modified"] || null;
+  return {
+    etag: etag ? String(etag) : null,
+    lastModified: lastModified ? String(lastModified) : null,
+  };
+}
+
 class WebScraper {
   constructor() {
     this._agentCache = new Map();
-    this._lastTrainingRequestAt = 0;
-    this._lastDiscoveryRequestAt = 0;
-    /** Lock only proxy rotation + proxied training requests (not direct discovery) */
-    this._proxyLock = Promise.resolve();
+    /** Per-proxy (or "direct") last-request timestamps so parallel scrapes are not serialized. */
+    this._lastTrainingRequestAt = new Map();
+    this._lastDiscoveryRequestAt = new Map();
     this.reloadConfig();
   }
 
@@ -137,38 +147,22 @@ class WebScraper {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  async withProxyLock(fn) {
-    const prev = this._proxyLock;
-    let release;
-    this._proxyLock = new Promise((resolve) => {
-      release = resolve;
-    });
-    await prev;
-    try {
-      return await fn();
-    } finally {
-      release();
-    }
-  }
-
-  async throttle(kind = "training") {
+  async throttle(kind = "training", key = "direct") {
     const delayMs =
       kind === "discovery" ? config.discoveryDelayMs : config.requestDelayMs;
     if (!delayMs) return;
 
-    const lastAt =
+    const bucket =
       kind === "discovery"
         ? this._lastDiscoveryRequestAt
         : this._lastTrainingRequestAt;
+    const slot = key || "direct";
+    const lastAt = bucket.get(slot) || 0;
     const elapsed = Date.now() - lastAt;
     if (elapsed < delayMs) {
       await this.sleep(delayMs - elapsed);
     }
-    if (kind === "discovery") {
-      this._lastDiscoveryRequestAt = Date.now();
-    } else {
-      this._lastTrainingRequestAt = Date.now();
-    }
+    bucket.set(slot, Date.now());
   }
 
   getCachedAgents(proxyUrl) {
@@ -194,6 +188,12 @@ class WebScraper {
       ...(options.useBrowserHeaders !== false ? BROWSER_HEADERS : {}),
       ...options.headers,
     };
+    if (options.etag) {
+      headers["If-None-Match"] = options.etag;
+    }
+    if (options.lastModified) {
+      headers["If-Modified-Since"] = options.lastModified;
+    }
 
     return {
       timeout,
@@ -253,9 +253,17 @@ class WebScraper {
   }
 
   async performRequest(url, options = {}, proxyUrl = null, throttleKind = "training") {
-    await this.throttle(throttleKind);
+    await this.throttle(throttleKind, proxyUrl || "direct");
     const requestConfig = this.buildRequestConfig(url, options, proxyUrl);
     let response = await axios.get(url, requestConfig);
+
+    if (
+      response.status === 304 &&
+      options.allowNotModified &&
+      options.responseType !== "arraybuffer"
+    ) {
+      return response;
+    }
 
     if (response.status === 304 && options.responseType !== "arraybuffer") {
       const cacheBustUrl = url.includes("?")
@@ -389,8 +397,11 @@ class WebScraper {
       const proxyLabel = formatProxyLabel(proxySelection, proxyUrl);
 
       try {
-        const response = await this.withProxyLock(() =>
-          this.performRequest(url, options, proxyUrl, "discovery"),
+        const response = await this.performRequest(
+          url,
+          options,
+          proxyUrl,
+          "discovery",
         );
         const settled = this.settleFetchResponse(
           url,
@@ -453,6 +464,8 @@ class WebScraper {
 
   // If the page is a SPA shell or WAF interstitial, rendering it with the browser
   async maybeRenderSpaWithBrowser(result, url, options, proxyUrl, proxyLabel) {
+    if (result?.notModified) return result;
+
     const html = result?.rawHtml;
     const wafHtml = looksLikeWafChallenge(html);
 
@@ -546,23 +559,47 @@ class WebScraper {
     const runScrape = async (proxyUrl, proxySelection) => {
       const startTime = Date.now();
       const proxyLabel = formatProxyLabel(proxySelection, proxyUrl);
+      const allowNotModified = Boolean(
+        options.allowNotModified || options.etag || options.lastModified,
+      );
 
-      const doRequest = () =>
-        this.performRequest(
-          url,
-          {
-            timeout,
-            maxContentLength: config.maxContentLength,
-            validateStatus: (status) => status < 500,
-            useBrowserHeaders: true,
-          },
-          proxyUrl,
-          "training",
+      const response = await this.performRequest(
+        url,
+        {
+          timeout,
+          maxContentLength: config.maxContentLength,
+          validateStatus: (status) => status < 500,
+          useBrowserHeaders: true,
+          etag: options.etag,
+          lastModified: options.lastModified,
+          allowNotModified,
+        },
+        proxyUrl,
+        "training",
+      );
+
+      const cacheHeaders = cacheHeadersFromResponse(response);
+
+      if (response.status === 304 && allowNotModified) {
+        const responseTime = Date.now() - startTime;
+        if (proxySelection) {
+          this.rotationHandler.recordSuccess(proxySelection.proxyIndex);
+        }
+        console.log(
+          `[WebScraper] scrape not modified | ${proxyLabel} | ${responseTime}ms | HTTP 304 | ${url}`,
         );
-
-      const response = proxyUrl
-        ? await this.withProxyLock(doRequest)
-        : await doRequest();
+        return {
+          rawHtml: "",
+          statusCode: 304,
+          contentType: response.headers?.["content-type"] || "",
+          notModified: true,
+          etag: cacheHeaders.etag || options.etag || null,
+          lastModified: cacheHeaders.lastModified || options.lastModified || null,
+          proxy_used: proxySelection ? proxySelection.proxyIndex + 1 : null,
+          proxy_ip: extractProxyHost(proxyUrl),
+          response_time: responseTime,
+        };
+      }
 
       this.assertAcceptableResponse(response, url);
 
@@ -596,6 +633,9 @@ class WebScraper {
         rawHtml: response.data,
         statusCode: response.status,
         contentType,
+        notModified: false,
+        etag: cacheHeaders.etag,
+        lastModified: cacheHeaders.lastModified,
         proxy_used: proxySelection ? proxySelection.proxyIndex + 1 : null,
         proxy_ip: extractProxyHost(proxyUrl),
         response_time: responseTime,

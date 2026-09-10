@@ -21,6 +21,7 @@ const {
   looksLikeWafChallenge,
   isWafHttpStatus,
 } = require("../utils/webUrlUtils.js");
+const { sortUrlsForTraining } = require("../utils/urlTrainingPriority.js");
 const zlib = require("zlib");
 const { promisify } = require("util");
 
@@ -63,10 +64,10 @@ function recordOriginFetchStatus(discoveryState, status, fetchUrl) {
 
 function finalizeDiscoveredUrls(urls, max = MAX_DISCOVERED_URLS) {
   const originalCount = Array.isArray(urls) ? urls.length : 0;
-  const cleaned = filterAndDedupeWebUrls(urls).slice(0, max);
+  const cleaned = sortUrlsForTraining(filterAndDedupeWebUrls(urls)).slice(0, max);
   if (originalCount !== cleaned.length) {
     console.log(
-      `Cleaned URLs: ${originalCount} -> ${cleaned.length} (removed invalid, non-HTML, non-content, tracking dupes, or duplicates)`,
+      `Cleaned URLs: ${originalCount} -> ${cleaned.length} (removed invalid, non-HTML, non-content, tracking dupes, or duplicates; ranked by training priority)`,
     );
   }
   return cleaned;
@@ -1060,16 +1061,18 @@ async bulkInsertUrls(userId,agentId, urls) {
       }
 
       let rejectedUrlCount = 0;
-      urls = filterAndDedupeWebUrls(urls, {
-        onReject: (diagnostic) => {
-          rejectedUrlCount += 1;
-          console.warn("[url-training:rejected]", {
-            agentId,
-            stage: "pre_queue_filter",
-            ...diagnostic,
-          });
-        },
-      });
+      urls = sortUrlsForTraining(
+        filterAndDedupeWebUrls(urls, {
+          onReject: (diagnostic) => {
+            rejectedUrlCount += 1;
+            console.warn("[url-training:rejected]", {
+              agentId,
+              stage: "pre_queue_filter",
+              ...diagnostic,
+            });
+          },
+        }),
+      );
 
       console.info("[url-training:filtered]", {
         agentId,
@@ -1271,12 +1274,14 @@ async bulkInsertUrls(userId,agentId, urls) {
           : agent?.qdrantIndexNamePaid;
       const plan = await PlanService.getUserPlan(userId);
 
-      const remainingUrls = filterAndDedupeWebUrls(
-        await Url.distinct("url", {
-        userId: userId,
-        agentId: agentId,
-        trainStatus: 0,
-        }),
+      const remainingUrls = sortUrlsForTraining(
+        filterAndDedupeWebUrls(
+          await Url.distinct("url", {
+            userId: userId,
+            agentId: agentId,
+            trainStatus: 0,
+          }),
+        ),
       );
       if (remainingUrls.length <= 0) {
         await Agent.updateOne({ _id: agentId }, { $set: { dataTrainingStatus: 0 } });
