@@ -201,9 +201,8 @@ const sendContactUsEmail = async ({
   service,
   website,
 }) => {
-  const appName = process.env.APP_NAME || "Chataffy";
   const mailOptions = {
-    from: `${appName} <${process.env.SMTP_FROM}>`,
+    from: `Chataffy-Support <${process.env.SMTP_FROM}>`,
     replyTo: email,
     to: supportEmail || process.env.SUPPORT_EMAIL || process.env.SMTP_FROM,
     subject: "Contact Us",
