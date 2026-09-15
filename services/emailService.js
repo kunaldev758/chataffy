@@ -202,7 +202,7 @@ const sendContactUsEmail = async ({
   website,
 }) => {
   const mailOptions = {
-    from: `Chataffy-Support <${process.env.SMTP_FROM}>`,
+    from: `Chataffy <${process.env.SMTP_FROM}>`,
     replyTo: email,
     to: supportEmail || process.env.SUPPORT_EMAIL || process.env.SMTP_FROM,
     subject: "Contact Us",
