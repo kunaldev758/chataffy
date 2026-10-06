@@ -2447,19 +2447,8 @@ ${answerInstructions}`;
         );
       }
 
-      if (userId) {
-        try {
-          await this.qdrantClient.createPayloadIndex(collectionName, {
-            field_name: "user_id",
-            field_schema: "keyword",
-          });
-        } catch (e) {
-          // Ignore if index already exists
-          if (!e.message.includes("already exists")) {
-            throw e;
-          }
-        }
-      }
+      // user_id payload index is created once in QdrantService.ensurePayloadIndexes.
+      // Creating it on every query hits Qdrant Cloud with 500s and fails the answer.
 
       // First try with user_id filter (tenant isolation). No hard size filters.
       let searchResult = [];
