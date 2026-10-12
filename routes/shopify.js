@@ -356,6 +356,10 @@ router.get("/auth/callback", async (req, res) => {
       err.response?.data || err.message || err,
     );
     return res
+     .json({
+      status: false,
+      message: res.message
+     })
       .status(500)
       .json({ status: false, message: "Shopify installation failed" });
   }
