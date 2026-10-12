@@ -45,8 +45,18 @@ function normalizeShopDomain(shop) {
   return value.endsWith(".myshopify.com") ? value : null;
 }
 
-function shopAdminAppUrl(shopDomain) {
-  return `https://${shopDomain}/admin/apps/${encodeURIComponent(SHOPIFY_CLIENT_ID)}`;
+function shopAdminAppUrl(shopDomain, host) {
+  const storeHandle = shopDomain.replace(/\.myshopify\.com$/, "");
+  const resolvedHost =
+    host ||
+    Buffer.from(`admin.shopify.com/store/${storeHandle}`, "utf8")
+      .toString("base64")
+      .replace(/=+$/g, "");
+  const params = new URLSearchParams({
+    shop: shopDomain,
+    host: String(resolvedHost),
+  });
+  return `https://admin.shopify.com/store/${encodeURIComponent(storeHandle)}/apps/${encodeURIComponent(SHOPIFY_CLIENT_ID)}?${params.toString()}`;
 }
 
 /**
@@ -474,7 +484,7 @@ router.get("/auth/callback", async (req, res) => {
     });
 
     res.clearCookie("shopify_oauth_state", { path: "/" });
-    return res.redirect(shopAdminAppUrl(shopDomain));
+    return res.redirect(shopAdminAppUrl(shopDomain, req.query.host));
   } catch (err) {
     console.error(
       "[Shopify] Install error:",
