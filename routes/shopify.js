@@ -11,6 +11,7 @@ const {
 } = require("../services/CommerceMerchantProvisionService");
 const PlanService = require("../services/PlanService");
 const { getAuthCookieOptions } = require("../helpers/helper");
+const { encryptToken, decryptToken } = require("../helpers/tokenCrypto");
 const { sendWelcomeEmail } = require("../services/emailService");
 const UserSession = require("../models/userSession");
 
@@ -191,7 +192,7 @@ async function getValidShopifyAccessToken(store) {
     expiresAt &&
     expiresAt - Date.now() > ACCESS_TOKEN_REFRESH_BUFFER_MS
   ) {
-    return store.accessToken;
+    return decryptToken(store.accessToken);
   }
   if (!store.refreshToken) {
     throw new Error("No Shopify refresh token stored; merchant must reopen the app");
@@ -203,7 +204,7 @@ async function getValidShopifyAccessToken(store) {
       client_id: SHOPIFY_CLIENT_ID,
       client_secret: SHOPIFY_API_SECRET,
       grant_type: "refresh_token",
-      refresh_token: store.refreshToken,
+      refresh_token: decryptToken(store.refreshToken),
     },
     { headers: { "Content-Type": "application/json", Accept: "application/json" } },
   );
@@ -212,8 +213,8 @@ async function getValidShopifyAccessToken(store) {
     { storeHash: store.storeHash, platform: "shopify" },
     {
       $set: {
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
+        accessToken: encryptToken(tokens.accessToken),
+        refreshToken: encryptToken(tokens.refreshToken),
         accessTokenExpiresAt: tokens.accessTokenExpiresAt,
         refreshTokenExpiresAt: tokens.refreshTokenExpiresAt,
       },
@@ -318,8 +319,8 @@ async function upsertInstalledShopifyStore({
         platform: "shopify",
         userId: resolvedUserId,
         clientId: newClient?._id || resolvedClient?._id,
-        accessToken,
-        refreshToken,
+        accessToken: encryptToken(accessToken),
+        refreshToken: encryptToken(refreshToken),
         accessTokenExpiresAt,
         refreshTokenExpiresAt,
         email,
