@@ -30,6 +30,18 @@ const storeSchema = new mongoose.Schema({
         type: String,
         default: null,
     },
+    refreshToken: {
+        type: String,
+        default: null,
+    },
+    accessTokenExpiresAt: {
+        type: Date,
+        default: null,
+    },
+    refreshTokenExpiresAt: {
+        type: Date,
+        default: null,
+    },
     email: {
         type: String,
         required: true,

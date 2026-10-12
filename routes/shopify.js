@@ -31,6 +31,8 @@ const TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE =
   "urn:ietf:params:oauth:token-type:id_token";
 const TOKEN_EXCHANGE_OFFLINE_TOKEN_TYPE =
   "urn:shopify:params:oauth:token-type:offline-access-token";
+const ACCESS_TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
+const refreshInflight = new Map();
 
 function isShopifyConfigured() {
   return Boolean(SHOPIFY_CLIENT_ID && SHOPIFY_API_SECRET);
@@ -133,27 +135,144 @@ async function findOrReuseUserSession(user, platform, req) {
   return token;
 }
 
-/**
- * Official token exchange: swap a valid session token (id_token) for an
- * offline access token. Shopify returns 400 if the session token is invalid.
- */
-async function exchangeSessionTokenForAccessToken(shopDomain, sessionToken) {
-  const { data } = await axios.post(
-    `https://${shopDomain}/admin/oauth/access_token`,
-    {
-      client_id: SHOPIFY_CLIENT_ID,
-      client_secret: SHOPIFY_API_SECRET,
-      grant_type: TOKEN_EXCHANGE_GRANT_TYPE,
-      requested_token_type: TOKEN_EXCHANGE_OFFLINE_TOKEN_TYPE,
-      subject_token: sessionToken,
-      subject_token_type: TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE,
-    },
-    { headers: { "Content-Type": "application/json", Accept: "application/json" } },
-  );
+function expiresAtFromSeconds(seconds) {
+  const value = Number(seconds);
+  return value > 0 ? new Date(Date.now() + value * 1000) : null;
+}
+
+function parseShopifyTokenResponse(data) {
+  if (!data?.access_token) {
+    const err = new Error("Shopify token response missing access_token");
+    err.response = { data };
+    throw err;
+  }
   return {
     accessToken: data.access_token,
-    scope: data.scope || SHOPIFY_SCOPES,
+    scope: data.scope || null,
+    refreshToken: data.refresh_token || null,
+    accessTokenExpiresAt: expiresAtFromSeconds(data.expires_in),
+    refreshTokenExpiresAt: expiresAtFromSeconds(data.refresh_token_expires_in),
   };
+}
+
+function tokenNeedsRefresh(store) {
+  if (!store?.accessToken || !store.refreshToken || !store.accessTokenExpiresAt) {
+    return false;
+  }
+  return (
+    new Date(store.accessTokenExpiresAt).getTime() - Date.now() <=
+    ACCESS_TOKEN_REFRESH_SKEW_MS
+  );
+}
+
+async function postShopifyToken(shopDomain, params) {
+  const { data } = await axios.post(
+    `https://${shopDomain}/admin/oauth/access_token`,
+    new URLSearchParams(params).toString(),
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+    },
+  );
+  return parseShopifyTokenResponse(data);
+}
+
+/**
+ * Swap a session token for an expiring offline access token.
+ * New public apps reject non-expiring tokens on the Admin API, so expiring=1
+ * is required. Shopify returns 400 when the session token is invalid.
+ * https://shopify.dev/docs/apps/build/authentication-authorization/implement-token-exchange
+ */
+async function exchangeSessionTokenForAccessToken(shopDomain, sessionToken) {
+  return postShopifyToken(shopDomain, {
+    client_id: SHOPIFY_CLIENT_ID,
+    client_secret: SHOPIFY_API_SECRET,
+    grant_type: TOKEN_EXCHANGE_GRANT_TYPE,
+    subject_token: sessionToken,
+    subject_token_type: TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE,
+    requested_token_type: TOKEN_EXCHANGE_OFFLINE_TOKEN_TYPE,
+    expiring: "1",
+  });
+}
+
+async function exchangeAuthorizationCode(shopDomain, code) {
+  return postShopifyToken(shopDomain, {
+    client_id: SHOPIFY_CLIENT_ID,
+    client_secret: SHOPIFY_API_SECRET,
+    code,
+    expiring: "1",
+  });
+}
+
+async function refreshOfflineAccessToken(shopDomain, refreshToken) {
+  return postShopifyToken(shopDomain, {
+    grant_type: "refresh_token",
+    client_id: SHOPIFY_CLIENT_ID,
+    client_secret: SHOPIFY_API_SECRET,
+    refresh_token: refreshToken,
+  });
+}
+
+async function saveShopifyToken(shopDomain, token, existingScope) {
+  const $set = {
+    accessToken: token.accessToken,
+    scope: token.scope || existingScope || SHOPIFY_SCOPES,
+    accessTokenExpiresAt: token.accessTokenExpiresAt,
+  };
+  if (token.refreshToken) {
+    $set.refreshToken = token.refreshToken;
+    $set.refreshTokenExpiresAt = token.refreshTokenExpiresAt;
+  }
+  return Store.findOneAndUpdate(
+    { storeHash: shopDomain, platform: "shopify" },
+    { $set },
+    { new: true },
+  ).lean();
+}
+
+async function ensureFreshShopifyAccessToken(store) {
+  if (!tokenNeedsRefresh(store)) return store;
+  const shopDomain = store.storeHash;
+  const existing = refreshInflight.get(shopDomain);
+  if (existing) return existing;
+
+  const job = (async () => {
+    const current = await Store.findOne({
+      storeHash: shopDomain,
+      platform: "shopify",
+    }).lean();
+    if (!current || !tokenNeedsRefresh(current)) return current || store;
+    const token = await refreshOfflineAccessToken(
+      shopDomain,
+      current.refreshToken,
+    );
+    return (
+      (await saveShopifyToken(shopDomain, token, current.scope)) || current
+    );
+  })().finally(() => {
+    refreshInflight.delete(shopDomain);
+  });
+
+  refreshInflight.set(shopDomain, job);
+  return job;
+}
+
+async function installFromSessionToken(shopDomain, sessionToken) {
+  const token = await exchangeSessionTokenForAccessToken(
+    shopDomain,
+    sessionToken,
+  );
+  await registerAppUninstalledWebhook(shopDomain, token.accessToken);
+  return upsertInstalledShopifyStore({
+    shopDomain,
+    accessToken: token.accessToken,
+    scope: token.scope || SHOPIFY_SCOPES,
+    refreshToken: token.refreshToken,
+    accessTokenExpiresAt: token.accessTokenExpiresAt,
+    refreshTokenExpiresAt: token.refreshTokenExpiresAt,
+  });
 }
 
 async function fetchShopRecord(shopDomain, accessToken) {
@@ -195,7 +314,14 @@ async function registerAppUninstalledWebhook(shopDomain, accessToken) {
  * Resolve/create the merchant user and upsert the Store record after an
  * access token is obtained (via token exchange or authorization code grant).
  */
-async function upsertInstalledShopifyStore({ shopDomain, accessToken, scope }) {
+async function upsertInstalledShopifyStore({
+  shopDomain,
+  accessToken,
+  scope,
+  refreshToken = null,
+  accessTokenExpiresAt = null,
+  refreshTokenExpiresAt = null,
+}) {
   const shopRecord = await fetchShopRecord(shopDomain, accessToken);
   const emailFallback = `shop-${crypto
     .createHash("sha256")
@@ -246,6 +372,9 @@ async function upsertInstalledShopifyStore({ shopDomain, accessToken, scope }) {
         userId: resolvedUserId,
         clientId: newClient?._id || resolvedClient?._id,
         accessToken,
+        refreshToken,
+        accessTokenExpiresAt,
+        refreshTokenExpiresAt,
         email,
         name: displayName,
         scope,
@@ -274,10 +403,9 @@ async function upsertInstalledShopifyStore({ shopDomain, accessToken, scope }) {
 }
 
 /**
- * Authorization code grant — kept as the fallback flow for cases where no
- * session token is available (e.g. legacy install links). With Shopify
- * managed installation configured (scopes in the app config, no legacy
- * install flow), merchants normally never hit this route.
+ * Authorization code grant — fallback when no session token is available.
+ * The code is exchanged for an expiring offline token (expiring=1). With
+ * Shopify managed installation, merchants normally never hit this route.
  * https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens/authorization-code-grant
  */
 router.get("/auth/install", (req, res) => {
@@ -333,20 +461,17 @@ router.get("/auth/callback", async (req, res) => {
   }
 
   try {
-    const { data: tokenData } = await axios.post(
-      `https://${shopDomain}/admin/oauth/access_token`,
-      {
-        client_id: SHOPIFY_CLIENT_ID,
-        client_secret: SHOPIFY_API_SECRET,
-        code,
-      },
-      { headers: { "Content-Type": "application/json" } },
-    );
-    const accessToken = tokenData.access_token;
-    const scope = tokenData.scope || SHOPIFY_SCOPES;
+    const token = await exchangeAuthorizationCode(shopDomain, code);
 
-    await registerAppUninstalledWebhook(shopDomain, accessToken);
-    await upsertInstalledShopifyStore({ shopDomain, accessToken, scope });
+    await registerAppUninstalledWebhook(shopDomain, token.accessToken);
+    await upsertInstalledShopifyStore({
+      shopDomain,
+      accessToken: token.accessToken,
+      scope: token.scope || SHOPIFY_SCOPES,
+      refreshToken: token.refreshToken,
+      accessTokenExpiresAt: token.accessTokenExpiresAt,
+      refreshTokenExpiresAt: token.refreshTokenExpiresAt,
+    });
 
     res.clearCookie("shopify_oauth_state", { path: "/" });
     return res.redirect(shopAdminAppUrl(shopDomain));
@@ -417,19 +542,38 @@ router.get("/auth/load", async (req, res) => {
 
     if (needsAccessToken && hasValidSessionToken) {
       try {
-        const { accessToken, scope } =
-          await exchangeSessionTokenForAccessToken(shopDomain, idToken);
-        await registerAppUninstalledWebhook(shopDomain, accessToken);
-        store = await upsertInstalledShopifyStore({
-          shopDomain,
-          accessToken,
-          scope,
-        });
+        store = await installFromSessionToken(shopDomain, idToken);
       } catch (exchangeErr) {
         console.error(
           "[Shopify] Token exchange failed:",
           exchangeErr.response?.data || exchangeErr.message,
         );
+        if (exchangeErr.response?.status === 400) {
+          res.set("X-Shopify-Retry-Invalid-Session-Request", "1");
+          return res.status(401).json({
+            status: false,
+            message: "Invalid or expired Shopify session token.",
+          });
+        }
+      }
+    } else if (store && tokenNeedsRefresh(store)) {
+      try {
+        store = await ensureFreshShopifyAccessToken(store);
+      } catch (refreshErr) {
+        console.error(
+          "[Shopify] Token refresh failed:",
+          refreshErr.response?.data || refreshErr.message,
+        );
+        if (hasValidSessionToken) {
+          try {
+            store = await installFromSessionToken(shopDomain, idToken);
+          } catch (exchangeErr) {
+            console.error(
+              "[Shopify] Token exchange after refresh failed:",
+              exchangeErr.response?.data || exchangeErr.message,
+            );
+          }
+        }
       }
     }
 
@@ -537,6 +681,9 @@ router.post("/webhooks/app-uninstalled", async (req, res) => {
         status: "uninstalled",
         lastUninstalledAt: new Date(),
         accessToken: null,
+        refreshToken: null,
+        accessTokenExpiresAt: null,
+        refreshTokenExpiresAt: null,
       },
     );
     return res.status(200).send("OK");
