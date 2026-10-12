@@ -31,6 +31,8 @@ const TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE =
   "urn:ietf:params:oauth:token-type:id_token";
 const TOKEN_EXCHANGE_OFFLINE_TOKEN_TYPE =
   "urn:shopify:params:oauth:token-type:offline-access-token";
+// Refresh the access token slightly before it actually expires.
+const ACCESS_TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
 function isShopifyConfigured() {
   return Boolean(SHOPIFY_CLIENT_ID && SHOPIFY_API_SECRET);
@@ -134,8 +136,29 @@ async function findOrReuseUserSession(user, platform, req) {
 }
 
 /**
+ * Normalize Shopify's access token response (expiring offline token) into the
+ * fields stored on the Store record.
+ * https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens/offline-access-tokens
+ */
+function parseTokenResponse(data) {
+  const now = Date.now();
+  return {
+    accessToken: data.access_token,
+    scope: data.scope || SHOPIFY_SCOPES,
+    refreshToken: data.refresh_token || null,
+    accessTokenExpiresAt: data.expires_in
+      ? new Date(now + data.expires_in * 1000)
+      : null,
+    refreshTokenExpiresAt: data.refresh_token_expires_in
+      ? new Date(now + data.refresh_token_expires_in * 1000)
+      : null,
+  };
+}
+
+/**
  * Official token exchange: swap a valid session token (id_token) for an
- * offline access token. Shopify returns 400 if the session token is invalid.
+ * expiring offline access token. Shopify returns 400 if the session token is
+ * invalid.
  */
 async function exchangeSessionTokenForAccessToken(shopDomain, sessionToken) {
   const { data } = await axios.post(
@@ -147,13 +170,56 @@ async function exchangeSessionTokenForAccessToken(shopDomain, sessionToken) {
       requested_token_type: TOKEN_EXCHANGE_OFFLINE_TOKEN_TYPE,
       subject_token: sessionToken,
       subject_token_type: TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE,
+      expiring: 1,
     },
     { headers: { "Content-Type": "application/json", Accept: "application/json" } },
   );
-  return {
-    accessToken: data.access_token,
-    scope: data.scope || SHOPIFY_SCOPES,
-  };
+  return parseTokenResponse(data);
+}
+
+/**
+ * Return a usable Admin API access token for a Shopify store, refreshing it
+ * with the stored refresh token when it has expired (or is about to). Shopify
+ * rotates the refresh token on every refresh, so both are persisted.
+ */
+async function getValidShopifyAccessToken(store) {
+  const expiresAt = store.accessTokenExpiresAt
+    ? new Date(store.accessTokenExpiresAt).getTime()
+    : null;
+  if (
+    store.accessToken &&
+    expiresAt &&
+    expiresAt - Date.now() > ACCESS_TOKEN_REFRESH_BUFFER_MS
+  ) {
+    return store.accessToken;
+  }
+  if (!store.refreshToken) {
+    throw new Error("No Shopify refresh token stored; merchant must reopen the app");
+  }
+
+  const { data } = await axios.post(
+    `https://${store.storeHash}/admin/oauth/access_token`,
+    {
+      client_id: SHOPIFY_CLIENT_ID,
+      client_secret: SHOPIFY_API_SECRET,
+      grant_type: "refresh_token",
+      refresh_token: store.refreshToken,
+    },
+    { headers: { "Content-Type": "application/json", Accept: "application/json" } },
+  );
+  const tokens = parseTokenResponse(data);
+  await Store.updateOne(
+    { storeHash: store.storeHash, platform: "shopify" },
+    {
+      $set: {
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+        refreshTokenExpiresAt: tokens.refreshTokenExpiresAt,
+      },
+    },
+  );
+  return tokens.accessToken;
 }
 
 async function fetchShopRecord(shopDomain, accessToken) {
@@ -195,7 +261,14 @@ async function registerAppUninstalledWebhook(shopDomain, accessToken) {
  * Resolve/create the merchant user and upsert the Store record after an
  * access token is obtained (via token exchange or authorization code grant).
  */
-async function upsertInstalledShopifyStore({ shopDomain, accessToken, scope }) {
+async function upsertInstalledShopifyStore({
+  shopDomain,
+  accessToken,
+  scope,
+  refreshToken,
+  accessTokenExpiresAt,
+  refreshTokenExpiresAt,
+}) {
   const shopRecord = await fetchShopRecord(shopDomain, accessToken);
   const emailFallback = `shop-${crypto
     .createHash("sha256")
@@ -246,6 +319,9 @@ async function upsertInstalledShopifyStore({ shopDomain, accessToken, scope }) {
         userId: resolvedUserId,
         clientId: newClient?._id || resolvedClient?._id,
         accessToken,
+        refreshToken,
+        accessTokenExpiresAt,
+        refreshTokenExpiresAt,
         email,
         name: displayName,
         scope,
@@ -339,14 +415,14 @@ router.get("/auth/callback", async (req, res) => {
         client_id: SHOPIFY_CLIENT_ID,
         client_secret: SHOPIFY_API_SECRET,
         code,
+        expiring: 1,
       },
       { headers: { "Content-Type": "application/json" } },
     );
-    const accessToken = tokenData.access_token;
-    const scope = tokenData.scope || SHOPIFY_SCOPES;
+    const tokens = parseTokenResponse(tokenData);
 
-    await registerAppUninstalledWebhook(shopDomain, accessToken);
-    await upsertInstalledShopifyStore({ shopDomain, accessToken, scope });
+    await registerAppUninstalledWebhook(shopDomain, tokens.accessToken);
+    await upsertInstalledShopifyStore({ shopDomain, ...tokens });
 
     res.clearCookie("shopify_oauth_state", { path: "/" });
     return res.redirect(shopAdminAppUrl(shopDomain));
@@ -412,19 +488,22 @@ router.get("/auth/load", async (req, res) => {
       platform: "shopify",
     }).lean();
 
+    // A stored token without a refresh token is a legacy non-expiring token,
+    // which the Admin API no longer accepts — exchange for an expiring one.
     const needsAccessToken =
-      !store || store.status === "uninstalled" || !store.accessToken;
+      !store ||
+      store.status === "uninstalled" ||
+      !store.accessToken ||
+      !store.refreshToken;
 
     if (needsAccessToken && hasValidSessionToken) {
       try {
-        const { accessToken, scope } =
-          await exchangeSessionTokenForAccessToken(shopDomain, idToken);
-        await registerAppUninstalledWebhook(shopDomain, accessToken);
-        store = await upsertInstalledShopifyStore({
+        const tokens = await exchangeSessionTokenForAccessToken(
           shopDomain,
-          accessToken,
-          scope,
-        });
+          idToken,
+        );
+        await registerAppUninstalledWebhook(shopDomain, tokens.accessToken);
+        store = await upsertInstalledShopifyStore({ shopDomain, ...tokens });
       } catch (exchangeErr) {
         console.error(
           "[Shopify] Token exchange failed:",
@@ -537,6 +616,9 @@ router.post("/webhooks/app-uninstalled", async (req, res) => {
         status: "uninstalled",
         lastUninstalledAt: new Date(),
         accessToken: null,
+        refreshToken: null,
+        accessTokenExpiresAt: null,
+        refreshTokenExpiresAt: null,
       },
     );
     return res.status(200).send("OK");
@@ -547,3 +629,4 @@ router.post("/webhooks/app-uninstalled", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.getValidShopifyAccessToken = getValidShopifyAccessToken;
