@@ -339,9 +339,17 @@ router.get("/auth/callback", async (req, res) => {
         client_id: SHOPIFY_CLIENT_ID,
         client_secret: SHOPIFY_API_SECRET,
         code,
+        expiring: "1",
       },
       { headers: { "Content-Type": "application/json" } },
     );
+    console.log("tokenData", tokenData);
+    const {
+      access_token,
+      refresh_token,
+      expires_in,
+      refresh_token_expires_in,
+    } = tokenData;
     const accessToken = tokenData.access_token;
     const scope = tokenData.scope || SHOPIFY_SCOPES;
 
