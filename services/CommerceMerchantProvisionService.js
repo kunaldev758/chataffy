@@ -72,6 +72,82 @@ async function provisionNewMerchantUser({ email, name, provider }) {
   return { newUser, newClient };
 }
 
+/**
+ * Idempotent: guarantees the merchant's "client" HumanAgent (isClient: true)
+ * exists for the given user. Safe to call on every install / load, so it also
+ * repairs accounts whose first provisioning failed part-way.
+ */
+async function ensureMerchantHumanAgent({ userId, email }) {
+  if (!userId) return null;
+
+  const agents = await Agent.find({ userId, isDeleted: { $ne: true } })
+    .select("_id agentName website_name onboardingWebsiteUrl")
+    .lean();
+  const agentIds = agents.map((a) => a._id);
+
+  const existing = await HumanAgent.findOne({ userId, isClient: true });
+  if (existing) {
+    const assigned = new Set((existing.assignedAgents || []).map(String));
+    const missing = agentIds.filter((id) => !assigned.has(String(id)));
+    let dirty = false;
+    if (missing.length) {
+      existing.assignedAgents = [...(existing.assignedAgents || []), ...missing];
+      dirty = true;
+    }
+    if (existing.status !== "approved") {
+      existing.status = "approved";
+      dirty = true;
+    }
+    if (existing.isDeleted) {
+      existing.isDeleted = false;
+      dirty = true;
+    }
+    if (dirty) await existing.save();
+    return existing;
+  }
+
+  const resolvedEmail = (
+    email ||
+    (await User.findById(userId).select("email").lean())?.email ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
+  if (!resolvedEmail) {
+    console.error("[ensureMerchantHumanAgent] No email for user", String(userId));
+    return null;
+  }
+
+  const hashedPassword = await bcrypt.hash(
+    crypto.randomBytes(16).toString("hex"),
+    10,
+  );
+  try {
+    const humanAgent = new HumanAgent({
+      name: commonHelper.clientHumanAgentNameFromAgent(agents[0]),
+      email: resolvedEmail,
+      password: hashedPassword,
+      userId,
+      status: "approved",
+      isClient: true,
+      avatar: "",
+      assignedAgents: agentIds,
+    });
+    await humanAgent.save();
+    console.log("[ensureMerchantHumanAgent] Created human agent for", resolvedEmail);
+    return humanAgent;
+  } catch (err) {
+    // E11000 = a HumanAgent with this email already exists under another userId.
+    console.error(
+      "[ensureMerchantHumanAgent] Failed to create human agent:",
+      err.code,
+      err.message,
+    );
+    return null;
+  }
+}
+
 module.exports = {
   provisionNewMerchantUser,
+  ensureMerchantHumanAgent,
 };

@@ -5,7 +5,10 @@ const Store = require("../models/Store");
 const User = require("../models/User");
 const Client = require("../models/Client");
 const Agent = require("../models/Agent");
-const { provisionNewMerchantUser } = require("../services/CommerceMerchantProvisionService");
+const {
+  provisionNewMerchantUser,
+  ensureMerchantHumanAgent,
+} = require("../services/CommerceMerchantProvisionService");
 const PlanService = require("../services/PlanService");
 const { getAuthCookieOptions } = require("../helpers/helper");
 const { sendWelcomeEmail } = require("../services/emailService");
@@ -142,6 +145,13 @@ router.get("/auth/callback", async (req, res) => {
     if (!resolvedUserId)
       throw new Error("Could not resolve user for store install");
 
+    // Self-heal: make sure the merchant's human agent exists even for
+    // existing users / previously half-provisioned installs.
+    await ensureMerchantHumanAgent({
+      userId: resolvedUserId,
+      email: user?.email,
+    });
+
     const storeUrl = await fetchBigcommerceStoreUrl(storeHash, access_token);
     const storeName = user?.name || user?.email || store?.name || `store-${storeHash}`;
 
@@ -221,6 +231,11 @@ router.get("/auth/load", async (req, res) => {
         .select("_id agentName isActive")
         .lean(),
     ]);
+
+    // Repair stores installed before this fix (no human agent in DB).
+    ensureMerchantHumanAgent({ userId: store.userId, email: userData?.email }).catch(
+      (e) => console.error("[BigCommerce] ensureMerchantHumanAgent failed:", e.message),
+    );
 
     let bigcommerceStoreUrl = store.storeUrl || '';
     if (!bigcommerceStoreUrl) {
