@@ -47,27 +47,27 @@ async function provisionNewMerchantUser({ email, name, provider }) {
 
   await PlanService.seedCustomLimitsForNewClient(newUser._id);
 
-  const widgetPromise = newWidget.save();
-
-  const agentPassword = crypto.randomBytes(16).toString("hex");
-  const hashedPassword = await bcrypt.hash(agentPassword, 10);
-  const humanAgent = new HumanAgent({
-    name: commonHelper.clientHumanAgentNameFromAgent(agent),
-    email,
-    password: hashedPassword,
-    userId: newUser._id,
-    status: "approved",
-    isClient: true,
-    avatar: "",
-    assignedAgents: [agent._id],
-  });
-  const humanAgentPromise = humanAgent.save();
-
   await Promise.all([
-    widgetPromise,
-    humanAgentPromise,
+    newWidget.save(),
     saveChatTranscriptSettings(newUser._id, [email], [email], [email]),
   ]);
+
+  // Handles orphan/duplicate emails; a failure here must not abort the install
+  // (install/load routes call ensureClientHumanAgent again).
+  try {
+    const clientHumanAgent = await ensureClientHumanAgent({
+      userId: newUser._id,
+      email,
+    });
+    if (!clientHumanAgent) {
+      console.error(
+        "[provisionNewMerchantUser] client HumanAgent was not created for",
+        email,
+      );
+    }
+  } catch (e) {
+    console.error("[provisionNewMerchantUser] client HumanAgent failed:", e);
+  }
 
   return { newUser, newClient };
 }
@@ -101,18 +101,30 @@ async function ensureClientHumanAgent({ userId, email }) {
   // HumanAgent.email is globally unique: reuse the record if it is this user's own
   const sameEmail = await HumanAgent.findOne({ email: normalizedEmail });
   if (sameEmail) {
-    if (String(sameEmail.userId) !== String(userId)) {
-      console.error(
-        "[ensureClientHumanAgent] email already used by another user:",
+    const isOwnRecord = String(sameEmail.userId) === String(userId);
+    if (!isOwnRecord) {
+      // An orphan (its User was deleted) keeps the unique email forever and makes
+      // every new install for that email fail. Adopt it instead of giving up.
+      const ownerStillExists = await User.exists({ _id: sameEmail.userId });
+      if (ownerStillExists) {
+        console.error(
+          "[ensureClientHumanAgent] email already used by another existing user:",
+          normalizedEmail,
+        );
+        return null;
+      }
+      console.warn(
+        "[ensureClientHumanAgent] adopting orphan HumanAgent for",
         normalizedEmail,
       );
-      return null;
+      sameEmail.userId = userId;
+      sameEmail.assignedAgents = agentIds;
     }
     sameEmail.isClient = true;
     sameEmail.status = "approved";
     sameEmail.isDeleted = false;
     await sameEmail.save();
-    if (agentIds.length) {
+    if (isOwnRecord && agentIds.length) {
       await HumanAgent.updateOne(
         { _id: sameEmail._id },
         { $addToSet: { assignedAgents: { $each: agentIds } } },
