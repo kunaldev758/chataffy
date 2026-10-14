@@ -8,6 +8,7 @@ const Client = require("../models/Client");
 const Agent = require("../models/Agent");
 const {
   provisionNewMerchantUser,
+  ensureClientHumanAgent,
 } = require("../services/CommerceMerchantProvisionService");
 const PlanService = require("../services/PlanService");
 const { getAuthCookieOptions } = require("../helpers/helper");
@@ -311,6 +312,14 @@ async function upsertInstalledShopifyStore({
     throw new Error("Could not resolve user for Shopify install");
   }
 
+  // Existing users skip provisioning; make sure the client Admin HumanAgent exists.
+  await ensureClientHumanAgent({
+    userId: resolvedUserId,
+    email: newUser?.email || existingUser?.email || email,
+  }).catch((e) =>
+    console.error("[Shopify] ensureClientHumanAgent failed:", e),
+  );
+
   const store = await Store.findOneAndUpdate(
     { storeHash: shopDomain },
     {
@@ -531,6 +540,14 @@ router.get("/auth/load", async (req, res) => {
         .status(403)
         .json({ status: false, message: "User not found" });
     }
+
+    // Heal stores whose owner never got a client Admin HumanAgent.
+    await ensureClientHumanAgent({
+      userId: userData._id,
+      email: userData.email,
+    }).catch((e) =>
+      console.error("[Shopify] ensureClientHumanAgent failed:", e),
+    );
 
     if (req.io) {
       setImmediate(() =>

@@ -72,6 +72,77 @@ async function provisionNewMerchantUser({ email, name, provider }) {
   return { newUser, newClient };
 }
 
+/**
+ * Idempotent: guarantees the merchant (User) has a client "Admin" HumanAgent
+ * (isClient: true). provisionNewMerchantUser only runs for brand-new users, so
+ * existing users (same owner email across several stores, partially provisioned
+ * users, older accounts) would otherwise never get one.
+ */
+async function ensureClientHumanAgent({ userId, email }) {
+  if (!userId || !email) return null;
+
+  const normalizedEmail = String(email).trim().toLowerCase();
+  const agents = await Agent.find({ userId, isDeleted: { $ne: true } }).select(
+    "_id agentName website_name onboardingWebsiteUrl",
+  );
+  const agentIds = agents.map((a) => a._id);
+
+  const existing = await HumanAgent.findOne({ userId, isClient: true });
+  if (existing) {
+    if (agentIds.length) {
+      await HumanAgent.updateOne(
+        { _id: existing._id },
+        { $addToSet: { assignedAgents: { $each: agentIds } } },
+      );
+    }
+    return existing;
+  }
+
+  // HumanAgent.email is globally unique: reuse the record if it is this user's own
+  const sameEmail = await HumanAgent.findOne({ email: normalizedEmail });
+  if (sameEmail) {
+    if (String(sameEmail.userId) !== String(userId)) {
+      console.error(
+        "[ensureClientHumanAgent] email already used by another user:",
+        normalizedEmail,
+      );
+      return null;
+    }
+    sameEmail.isClient = true;
+    sameEmail.status = "approved";
+    sameEmail.isDeleted = false;
+    await sameEmail.save();
+    if (agentIds.length) {
+      await HumanAgent.updateOne(
+        { _id: sameEmail._id },
+        { $addToSet: { assignedAgents: { $each: agentIds } } },
+      );
+    }
+    return sameEmail;
+  }
+
+  const password = await bcrypt.hash(crypto.randomBytes(16).toString("hex"), 10);
+  try {
+    return await HumanAgent.create({
+      name: commonHelper.clientHumanAgentNameFromAgent(agents[0]),
+      email: normalizedEmail,
+      password,
+      userId,
+      status: "approved",
+      isClient: true,
+      avatar: "",
+      assignedAgents: agentIds,
+    });
+  } catch (err) {
+    // Concurrent calls (callback + load) can race; return the winner's record.
+    if (err?.code === 11000) {
+      return HumanAgent.findOne({ userId, isClient: true });
+    }
+    throw err;
+  }
+}
+
 module.exports = {
   provisionNewMerchantUser,
+  ensureClientHumanAgent,
 };

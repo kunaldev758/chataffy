@@ -222,6 +222,24 @@ exports.createHumanAgent = async (req, res) => {
 exports.getAllHumanAgents = async (req, res) => {
   try {
     const userId = req.body.userId;
+
+    // Safety net: make sure the client "Admin" row (isClient: true) always exists.
+    try {
+      const hasClientRow = await HumanAgent.exists({ userId, isClient: true });
+      if (!hasClientRow) {
+        const User = require("../models/User");
+        const {
+          ensureClientHumanAgent,
+        } = require("../services/CommerceMerchantProvisionService");
+        const owner = await User.findById(userId).select("email").lean();
+        if (owner?.email) {
+          await ensureClientHumanAgent({ userId, email: owner.email });
+        }
+      }
+    } catch (ensureErr) {
+      console.error("Error ensuring client human agent:", ensureErr);
+    }
+
     const validAgentIds = await Agent.find({
       userId,
       isDeleted: { $ne: true },

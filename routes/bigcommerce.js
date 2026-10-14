@@ -5,7 +5,7 @@ const Store = require("../models/Store");
 const User = require("../models/User");
 const Client = require("../models/Client");
 const Agent = require("../models/Agent");
-const { provisionNewMerchantUser } = require("../services/CommerceMerchantProvisionService");
+const { provisionNewMerchantUser, ensureClientHumanAgent } = require("../services/CommerceMerchantProvisionService");
 const PlanService = require("../services/PlanService");
 const { getAuthCookieOptions } = require("../helpers/helper");
 const { sendWelcomeEmail } = require("../services/emailService");
@@ -142,6 +142,14 @@ router.get("/auth/callback", async (req, res) => {
     if (!resolvedUserId)
       throw new Error("Could not resolve user for store install");
 
+    // Existing users skip provisioning; make sure the client Admin HumanAgent exists.
+    await ensureClientHumanAgent({
+      userId: resolvedUserId,
+      email: user?.email || existingUser?.email,
+    }).catch((e) =>
+      console.error("[BigCommerce] ensureClientHumanAgent failed:", e),
+    );
+
     const storeUrl = await fetchBigcommerceStoreUrl(storeHash, access_token);
     const storeName = user?.name || user?.email || store?.name || `store-${storeHash}`;
 
@@ -221,6 +229,14 @@ router.get("/auth/load", async (req, res) => {
         .select("_id agentName isActive")
         .lean(),
     ]);
+
+    // Heal stores whose owner never got a client Admin HumanAgent.
+    await ensureClientHumanAgent({
+      userId: userData._id,
+      email: userData.email,
+    }).catch((e) =>
+      console.error("[BigCommerce] ensureClientHumanAgent failed:", e),
+    );
 
     let bigcommerceStoreUrl = store.storeUrl || '';
     if (!bigcommerceStoreUrl) {
