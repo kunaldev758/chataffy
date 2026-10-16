@@ -50,6 +50,18 @@ function shopAdminAppUrl(shopDomain) {
   return `https://${shopDomain}/admin/apps/${encodeURIComponent(SHOPIFY_CLIENT_ID)}`;
 }
 
+/** Shopify-hosted authorize URL. Invalid client_id is shown by Shopify itself. */
+function buildShopifyAuthorizeUrl(shop) {
+  const state = signOAuthState(shop);
+  const authUrl =
+    `https://${shop}/admin/oauth/authorize` +
+    `?client_id=${encodeURIComponent(SHOPIFY_CLIENT_ID)}` +
+    `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
+    `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}` +
+    `&state=${encodeURIComponent(state)}`;
+  return { state, authUrl };
+}
+
 /**
  * Verify a Shopify session token (id_token JWT) per the official spec:
  * HS256 signed with the app secret, `aud` = client id, and shop derived
@@ -499,20 +511,13 @@ router.get("/auth/install", (req, res) => {
   }
 
   // State is signed for this exact shop; the callback rejects any other shop.
-  const state = signOAuthState(shop);
+  const { state, authUrl } = buildShopifyAuthorizeUrl(shop);
   res.cookie("shopify_oauth_state", state, {
     ...getAuthCookieOptions(req),
     maxAge: OAUTH_STATE_TTL_MS,
     sameSite: "none",
     secure: true,
   });
-
-  const authUrl =
-    `https://${shop}/admin/oauth/authorize` +
-    `?client_id=${encodeURIComponent(SHOPIFY_CLIENT_ID)}` +
-    `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
-    `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}` +
-    `&state=${encodeURIComponent(state)}`;
   return res.redirect(authUrl);
 });
 
@@ -601,12 +606,13 @@ router.get("/auth/callback", async (req, res) => {
  * can show the real reason instead of an endless spinner. Messages are
  * user-safe: never include secrets, tokens or stack traces.
  */
-function loadError(res, httpStatus, code, message, shop = null) {
+function loadError(res, httpStatus, code, message, shop = null, extra = {}) {
   return res.status(httpStatus).json({
     status: false,
     code,
     message,
     ...(shop ? { shop } : {}),
+    ...extra,
   });
 }
 
@@ -636,12 +642,30 @@ router.get("/auth/load", async (req, res) => {
         e.name === "JsonWebTokenError" &&
         /invalid signature|audience invalid/i.test(e.message || "");
       if (wrongApp) {
+        const shop =
+          shopDomain || normalizeShopDomain(req.query.shop);
+        if (!shop) {
+          return loadError(
+            res,
+            403,
+            "APP_CREDENTIAL_MISMATCH",
+            "Shopify app credentials are invalid.",
+          );
+        }
+        const { state, authUrl } = buildShopifyAuthorizeUrl(shop);
+        res.cookie("shopify_oauth_state", state, {
+          ...getAuthCookieOptions(req),
+          maxAge: OAUTH_STATE_TTL_MS,
+          sameSite: "none",
+          secure: true,
+        });
         return loadError(
           res,
           403,
           "APP_CREDENTIAL_MISMATCH",
           "Shopify app credentials are invalid.",
-          shopDomain || normalizeShopDomain(req.query.shop),
+          shop,
+          { authorizeUrl: authUrl },
         );
       }
       res.set("X-Shopify-Retry-Invalid-Session-Request", "1");
