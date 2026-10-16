@@ -62,6 +62,27 @@ function buildShopifyAuthorizeUrl(shop) {
   return { state, authUrl };
 }
 
+function isInvalidShopifyClientError(err) {
+  const body = err?.response?.data;
+  const text =
+    typeof body === "string" ? body : JSON.stringify(body || err?.message || "");
+  return /invalid_client|invalid client_secret|application_cannot_be_found/i.test(
+    text,
+  );
+}
+
+/** Cookie + authorize URL. Never creates a store — Shopify decides if client_id exists. */
+function startShopifyAuthorize(req, res, shop) {
+  const { state, authUrl } = buildShopifyAuthorizeUrl(shop);
+  res.cookie("shopify_oauth_state", state, {
+    ...getAuthCookieOptions(req),
+    maxAge: OAUTH_STATE_TTL_MS,
+    sameSite: "none",
+    secure: true,
+  });
+  return authUrl;
+}
+
 /**
  * Verify a Shopify session token (id_token JWT) per the official spec:
  * HS256 signed with the app secret, `aud` = client id, and shop derived
@@ -585,6 +606,7 @@ router.get("/auth/callback", async (req, res) => {
       "[Shopify] Install error:",
       err.response?.data || err.message || err,
     );
+    // Token exchange failed (wrong secret, etc). Do not create a store.
     return sendInstallError(
       res,
       500,
@@ -616,6 +638,27 @@ function loadError(res, httpStatus, code, message, shop = null, extra = {}) {
   });
 }
 
+/** Wrong client id/secret: do not install. Hand the merchant to Shopify OAuth. */
+function loadCredentialMismatch(req, res, shop) {
+  if (!shop) {
+    return loadError(
+      res,
+      403,
+      "APP_CREDENTIAL_MISMATCH",
+      "Shopify app credentials are invalid.",
+    );
+  }
+  const authorizeUrl = startShopifyAuthorize(req, res, shop);
+  return loadError(
+    res,
+    403,
+    "APP_CREDENTIAL_MISMATCH",
+    "Shopify app credentials are invalid.",
+    shop,
+    { authorizeUrl },
+  );
+}
+
 router.get("/auth/load", async (req, res) => {
   if (!isShopifyConfigured()) {
     return loadError(
@@ -642,30 +685,10 @@ router.get("/auth/load", async (req, res) => {
         e.name === "JsonWebTokenError" &&
         /invalid signature|audience invalid/i.test(e.message || "");
       if (wrongApp) {
-        const shop =
-          shopDomain || normalizeShopDomain(req.query.shop);
-        if (!shop) {
-          return loadError(
-            res,
-            403,
-            "APP_CREDENTIAL_MISMATCH",
-            "Shopify app credentials are invalid.",
-          );
-        }
-        const { state, authUrl } = buildShopifyAuthorizeUrl(shop);
-        res.cookie("shopify_oauth_state", state, {
-          ...getAuthCookieOptions(req),
-          maxAge: OAUTH_STATE_TTL_MS,
-          sameSite: "none",
-          secure: true,
-        });
-        return loadError(
+        return loadCredentialMismatch(
+          req,
           res,
-          403,
-          "APP_CREDENTIAL_MISMATCH",
-          "Shopify app credentials are invalid.",
-          shop,
-          { authorizeUrl: authUrl },
+          shopDomain || normalizeShopDomain(req.query.shop),
         );
       }
       res.set("X-Shopify-Retry-Invalid-Session-Request", "1");
@@ -680,13 +703,18 @@ router.get("/auth/load", async (req, res) => {
           : "Invalid Shopify session. Please reload the page.",
       );
     }
-  } else if (
-    req.query.shop &&
-    req.query.hmac &&
-    verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)
-  ) {
-    // HMAC-signed load request (no App Bridge session token available yet).
-    shopDomain = normalizeShopDomain(req.query.shop);
+  } else if (req.query.shop && req.query.hmac) {
+    if (verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
+      // HMAC-signed load request (no App Bridge session token available yet).
+      shopDomain = normalizeShopDomain(req.query.shop);
+    } else {
+      // HMAC does not match our secret — do not install; let Shopify reject it.
+      return loadCredentialMismatch(
+        req,
+        res,
+        normalizeShopDomain(req.query.shop),
+      );
+    }
   }
 
   if (!shopDomain) {
@@ -764,6 +792,9 @@ router.get("/auth/load", async (req, res) => {
           "[Shopify] Token exchange failed:",
           exchangeErr.response?.data || exchangeErr.message,
         );
+        if (isInvalidShopifyClientError(exchangeErr)) {
+          return loadCredentialMismatch(req, res, shopDomain);
+        }
       }
     }
 
