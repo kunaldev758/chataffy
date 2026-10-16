@@ -640,7 +640,8 @@ router.get("/auth/load", async (req, res) => {
           res,
           403,
           "APP_CREDENTIAL_MISMATCH",
-          "This store is connected to a different Chataffy app. Please contact support.",
+          "Shopify app credentials are invalid.",
+          shopDomain || normalizeShopDomain(req.query.shop),
         );
       }
       res.set("X-Shopify-Retry-Invalid-Session-Request", "1");
