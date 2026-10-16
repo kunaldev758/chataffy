@@ -596,9 +596,28 @@ router.get("/auth/callback", async (req, res) => {
  *     X-Shopify-Retry-Invalid-Session-Request header so App Bridge fetches a
  *     fresh token and retries once.
  */
+/**
+ * Every /auth/load failure returns { status:false, code, message } so the UI
+ * can show the real reason instead of an endless spinner. Messages are
+ * user-safe: never include secrets, tokens or stack traces.
+ */
+function loadError(res, httpStatus, code, message, shop = null) {
+  return res.status(httpStatus).json({
+    status: false,
+    code,
+    message,
+    ...(shop ? { shop } : {}),
+  });
+}
+
 router.get("/auth/load", async (req, res) => {
   if (!isShopifyConfigured()) {
-    return res.status(500).json({ message: "Shopify is not configured" });
+    return loadError(
+      res,
+      500,
+      "SHOPIFY_NOT_CONFIGURED",
+      "Shopify integration is not configured on the server.",
+    );
   }
 
   const idToken = req.query.id_token;
@@ -611,11 +630,30 @@ router.get("/auth/load", async (req, res) => {
       hasValidSessionToken = true;
     } catch (e) {
       console.error("[Shopify] session token verify failed:", e.message);
+      // Signature / audience failures mean the token was issued by a different
+      // Shopify app than the credentials this server uses — retrying is useless.
+      const wrongApp =
+        e.name === "JsonWebTokenError" &&
+        /invalid signature|audience invalid/i.test(e.message || "");
+      if (wrongApp) {
+        return loadError(
+          res,
+          403,
+          "APP_CREDENTIAL_MISMATCH",
+          "This store is connected to a different Chataffy app. Please contact support.",
+        );
+      }
       res.set("X-Shopify-Retry-Invalid-Session-Request", "1");
-      return res.status(401).json({
-        status: false,
-        message: "Invalid or expired Shopify session token.",
-      });
+      const expired =
+        e.name === "TokenExpiredError" || e.name === "NotBeforeError";
+      return loadError(
+        res,
+        401,
+        expired ? "SESSION_EXPIRED" : "SESSION_INVALID",
+        expired
+          ? "Your session has expired. Please reload the page."
+          : "Invalid Shopify session. Please reload the page.",
+      );
     }
   } else if (
     req.query.shop &&
@@ -627,10 +665,12 @@ router.get("/auth/load", async (req, res) => {
   }
 
   if (!shopDomain) {
-    return res.status(400).json({
-      status: false,
-      message: "Missing or invalid Shopify session.",
-    });
+    return loadError(
+      res,
+      400,
+      "INVALID_REQUEST",
+      "Invalid link. Please open the app again from your Shopify admin.",
+    );
   }
 
   try {
@@ -683,6 +723,7 @@ router.get("/auth/load", async (req, res) => {
     }
 
     let exchanged = false;
+    let exchangeFailed = false;
     if (needsAccessToken && hasValidSessionToken) {
       try {
         const tokens = await exchangeSessionTokenForAccessToken(
@@ -693,6 +734,7 @@ router.get("/auth/load", async (req, res) => {
         store = await upsertInstalledShopifyStore({ shopDomain, ...tokens });
         exchanged = true;
       } catch (exchangeErr) {
+        exchangeFailed = true;
         console.error(
           "[Shopify] Token exchange failed:",
           exchangeErr.response?.data || exchangeErr.message,
@@ -706,10 +748,31 @@ router.get("/auth/load", async (req, res) => {
       !store.accessToken ||
       (tokenRejectedByShopify && !exchanged)
     ) {
-      return res.status(403).json({
-        status: false,
-        message: "App is not installed. Please install it from Shopify.",
-      });
+      if (tokenRejectedByShopify && !exchanged) {
+        return loadError(
+          res,
+          403,
+          "TOKEN_REVOKED",
+          "Shopify access was revoked. Please reinstall the app.",
+          shopDomain,
+        );
+      }
+      if (exchangeFailed) {
+        return loadError(
+          res,
+          502,
+          "EXCHANGE_FAILED",
+          "Could not connect your store. Please try again.",
+          shopDomain,
+        );
+      }
+      return loadError(
+        res,
+        403,
+        "NOT_INSTALLED",
+        "The app is not installed on this store.",
+        shopDomain,
+      );
     }
 
     // Agents created before per-store support are handed to the oldest store.
@@ -728,9 +791,13 @@ router.get("/auth/load", async (req, res) => {
     ]);
 
     if (!userData) {
-      return res
-        .status(403)
-        .json({ status: false, message: "User not found" });
+      return loadError(
+        res,
+        403,
+        "USER_NOT_FOUND",
+        "Your account was not found. Please contact support.",
+        shopDomain,
+      );
     }
 
     if (req.io) {
@@ -780,9 +847,13 @@ router.get("/auth/load", async (req, res) => {
     });
   } catch (err) {
     console.error("[Shopify] Load error:", err.message);
-    return res
-      .status(401)
-      .json({ status: false, message: "Unauthorized" });
+    return loadError(
+      res,
+      500,
+      "LOAD_FAILED",
+      "Something went wrong while loading the app. Please try again.",
+      shopDomain,
+    );
   }
 });
 
