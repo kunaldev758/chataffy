@@ -8,6 +8,7 @@ const Client = require("../models/Client");
 const Agent = require("../models/Agent");
 const {
   provisionNewMerchantUser,
+  provisionAgentForStore,
 } = require("../services/CommerceMerchantProvisionService");
 const PlanService = require("../services/PlanService");
 const { getAuthCookieOptions } = require("../helpers/helper");
@@ -66,6 +67,65 @@ function verifySessionToken(idToken) {
   return { payload, shop };
 }
 
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * OAuth `state` that is cryptographically bound to the shop the install was
+ * started for (nonce.timestamp.hmac(nonce|timestamp|shop)). The callback
+ * verifies it against the shop Shopify reports, so an install started for
+ * store A can never complete as store B (and vice versa).
+ */
+function signOAuthState(shop) {
+  const nonce = crypto.randomBytes(12).toString("hex");
+  const ts = Date.now().toString(36);
+  const sig = crypto
+    .createHmac("sha256", SHOPIFY_API_SECRET)
+    .update(`${nonce}|${ts}|${shop}`)
+    .digest("hex");
+  return `${nonce}.${ts}.${sig}`;
+}
+
+function verifyOAuthState(state, shop) {
+  const [nonce, ts, sig] = String(state || "").split(".");
+  if (!nonce || !ts || !sig) return { ok: false, reason: "malformed" };
+  const expected = crypto
+    .createHmac("sha256", SHOPIFY_API_SECRET)
+    .update(`${nonce}|${ts}|${shop}`)
+    .digest("hex");
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(sig, "utf8");
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { ok: false, reason: "shop_mismatch" };
+  }
+  const issuedAt = parseInt(ts, 36);
+  if (!issuedAt || Date.now() - issuedAt > OAUTH_STATE_TTL_MS) {
+    return { ok: false, reason: "expired" };
+  }
+  return { ok: true };
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Show a readable error instead of silently landing on some other store. */
+function sendInstallError(res, status, message) {
+  return res
+    .status(status)
+    .set("Content-Type", "text/html; charset=utf-8")
+    .send(
+      `<!doctype html><html><head><meta charset="utf-8"><title>Chataffy – Installation error</title></head>` +
+        `<body style="font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9f9f9">` +
+        `<div style="max-width:480px;text-align:center;padding:24px">` +
+        `<h1 style="color:#dc2626;font-size:22px">Installation failed</h1>` +
+        `<p style="color:#374151">${escapeHtml(message)}</p></div></body></html>`,
+    );
+}
+
 function verifyShopifyQueryHmac(query, secret) {
   if (!secret || !query?.hmac) return false;
   const params = { ...query };
@@ -108,10 +168,15 @@ function verifyShopifyWebhookHmac(rawBody, hmacHeader, secret) {
   }
 }
 
-async function findOrReuseUserSession(user, platform, req) {
+/**
+ * Sessions are bound to a single store so a token issued for one Shopify
+ * store can never be reused to open another store of the same user.
+ */
+async function findOrReuseUserSession(user, platform, req, storeHash = null) {
   const existing = await UserSession.findOne({
     userId: user._id,
     platform,
+    storeHash,
   }).lean();
   if (
     existing &&
@@ -120,10 +185,11 @@ async function findOrReuseUserSession(user, platform, req) {
     return existing.token;
   }
 
-  const token = user.generateAuthToken(platform);
+  const token = user.generateAuthToken(platform, { storeHash });
   await UserSession.create({
     userId: user._id,
     platform,
+    storeHash,
     token,
     ip:
       req.headers["x-client-ip"] ||
@@ -258,6 +324,23 @@ async function registerAppUninstalledWebhook(shopDomain, accessToken) {
 }
 
 /**
+ * Agents that predate per-store support have no `storeHash`. They are handed
+ * to the user's oldest Shopify store (the one they were created for), so
+ * every agent ends up belonging to exactly one store. Idempotent.
+ */
+async function claimLegacyAgentsForOldestStore(userId) {
+  const oldest = await Store.findOne({ userId, platform: "shopify" })
+    .sort({ createdAt: 1 })
+    .select("storeHash")
+    .lean();
+  if (!oldest) return;
+  await Agent.updateMany(
+    { userId, storeHash: null },
+    { $set: { storeHash: oldest.storeHash } },
+  );
+}
+
+/**
  * Resolve/create the merchant user and upsert the Store record after an
  * access token is obtained (via token exchange or authorization code grant).
  */
@@ -269,7 +352,13 @@ async function upsertInstalledShopifyStore({
   accessTokenExpiresAt,
   refreshTokenExpiresAt,
 }) {
+  // Verify the access token really belongs to this shop before trusting it.
   const shopRecord = await fetchShopRecord(shopDomain, accessToken);
+  if (normalizeShopDomain(shopRecord?.myshopify_domain) !== shopDomain) {
+    throw new Error(
+      `Shop verification failed: token does not belong to ${shopDomain}`,
+    );
+  }
   const emailFallback = `shop-${crypto
     .createHash("sha256")
     .update(shopDomain)
@@ -291,9 +380,13 @@ async function upsertInstalledShopifyStore({
   let newClient;
   let resolvedClient = null;
 
-  if (existingUser) {
+  // A store keeps its original owner on reinstall; otherwise the owner is the
+  // user with the shop email (same gmail => same user, multiple stores).
+  const ownerUserId = existingStore?.userId || existingUser?._id;
+
+  if (ownerUserId) {
     resolvedClient = await Client.findOne({
-      $or: [{ userId: existingUser._id }, { email }],
+      $or: [{ userId: ownerUserId }, { email }],
     }).lean();
   }
   if (!existingStore && !existingUser) {
@@ -301,23 +394,34 @@ async function upsertInstalledShopifyStore({
       email,
       name: displayName,
       provider: "shopify",
+      storeHash: shopDomain,
     });
     newUser = provisioned.newUser;
     newClient = provisioned.newClient;
   }
 
-  const resolvedUserId = newUser?._id || existingUser?._id;
+  const resolvedUserId = newUser?._id || ownerUserId;
   if (!resolvedUserId) {
     throw new Error("Could not resolve user for Shopify install");
   }
 
+  // Store.clientId is required: never save a store without one.
+  if (!newClient && !resolvedClient) {
+    const created = await Client.create({ userId: resolvedUserId, email });
+    resolvedClient = created.toObject();
+  }
+  const resolvedClientId = newClient?._id || resolvedClient?._id;
+
   const store = await Store.findOneAndUpdate(
     { storeHash: shopDomain },
     {
+      // Per-store onboarding: only set when the store is first created, so a
+      // reinstall never resets onboarding progress.
+      $setOnInsert: { isOnboarded: false },
       $set: {
         platform: "shopify",
         userId: resolvedUserId,
-        clientId: newClient?._id || resolvedClient?._id,
+        clientId: resolvedClientId,
         accessToken,
         refreshToken,
         accessTokenExpiresAt,
@@ -330,8 +434,32 @@ async function upsertInstalledShopifyStore({
         lastInstalledAt: new Date(),
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+      runValidators: true,
+      context: "query",
+    },
   ).lean();
+
+  // Agents created before per-store support belong to the user's oldest store.
+  await claimLegacyAgentsForOldestStore(resolvedUserId);
+
+  // Same gmail, additional store => this store gets its own agent + widget.
+  if (!newUser && !existingStore) {
+    const ownAgents = await Agent.countDocuments({
+      userId: resolvedUserId,
+      storeHash: shopDomain,
+      isDeleted: false,
+    });
+    if (ownAgents === 0) {
+      await provisionAgentForStore({
+        userId: resolvedUserId,
+        storeHash: shopDomain,
+      });
+    }
+  }
 
   Promise.resolve(
     sendWelcomeEmail(
@@ -370,10 +498,11 @@ router.get("/auth/install", (req, res) => {
     return res.status(403).send("Invalid HMAC");
   }
 
-  const state = crypto.randomBytes(16).toString("hex");
+  // State is signed for this exact shop; the callback rejects any other shop.
+  const state = signOAuthState(shop);
   res.cookie("shopify_oauth_state", state, {
     ...getAuthCookieOptions(req),
-    maxAge: 10 * 60 * 1000,
+    maxAge: OAUTH_STATE_TTL_MS,
     sameSite: "none",
     secure: true,
   });
@@ -400,12 +529,32 @@ router.get("/auth/callback", async (req, res) => {
   }
   const cookieState = req.cookies?.shopify_oauth_state;
   if (!state || (cookieState && state !== cookieState)) {
-    return res.status(403).send("Invalid OAuth state");
+    return sendInstallError(
+      res,
+      403,
+      "Invalid or expired installation request. Please start the installation again from your store.",
+    );
   }
 
   const shopDomain = normalizeShopDomain(shop);
   if (!shopDomain) {
-    return res.status(400).json({ message: "Invalid shop domain" });
+    return sendInstallError(res, 400, "Invalid shop domain.");
+  }
+
+  // The install must complete for the same store it was started for. If not,
+  // show an error instead of landing on a previously installed store.
+  const stateCheck = verifyOAuthState(state, shopDomain);
+  if (!stateCheck.ok) {
+    console.warn(
+      `[Shopify] OAuth state rejected for ${shopDomain}: ${stateCheck.reason}`,
+    );
+    return sendInstallError(
+      res,
+      403,
+      stateCheck.reason === "shop_mismatch"
+        ? `This installation was started for a different store than ${shopDomain}. Please install the app from the store you are logged in with.`
+        : "Installation request expired. Please start the installation again from your store.",
+    );
   }
 
   try {
@@ -431,9 +580,11 @@ router.get("/auth/callback", async (req, res) => {
       "[Shopify] Install error:",
       err.response?.data || err.message || err,
     );
-    return res
-      .status(500)
-      .json({ status: false, message: "Shopify installation failed" });
+    return sendInstallError(
+      res,
+      500,
+      `Shopify installation failed for ${shopDomain}. Please try again or contact support.`,
+    );
   }
 });
 
@@ -490,12 +641,48 @@ router.get("/auth/load", async (req, res) => {
 
     // A stored token without a refresh token is a legacy non-expiring token,
     // which the Admin API no longer accepts — exchange for an expiring one.
-    const needsAccessToken =
+    let needsAccessToken =
       !store ||
       store.status === "uninstalled" ||
       !store.accessToken ||
       !store.refreshToken;
 
+    // Verify the stored token against Shopify itself (not just "a token
+    // exists in the DB"): a revoked/invalid token means the app is no longer
+    // installed on this store.
+    let tokenRejectedByShopify = false;
+    if (!needsAccessToken) {
+      try {
+        const liveToken = await getValidShopifyAccessToken(store);
+        const shopRecord = await fetchShopRecord(shopDomain, liveToken);
+        if (normalizeShopDomain(shopRecord?.myshopify_domain) !== shopDomain) {
+          throw Object.assign(new Error("Shop domain mismatch"), {
+            shopifyRejected: true,
+          });
+        }
+      } catch (verifyErr) {
+        const status = verifyErr.response?.status;
+        if (
+          verifyErr.shopifyRejected ||
+          [400, 401, 403, 404].includes(status)
+        ) {
+          console.warn(
+            `[Shopify] Stored token rejected for ${shopDomain}:`,
+            verifyErr.response?.data || verifyErr.message,
+          );
+          needsAccessToken = true;
+          tokenRejectedByShopify = true;
+        } else {
+          // Network / 5xx: don't lock the merchant out because of a blip.
+          console.warn(
+            "[Shopify] Token verification skipped:",
+            verifyErr.message,
+          );
+        }
+      }
+    }
+
+    let exchanged = false;
     if (needsAccessToken && hasValidSessionToken) {
       try {
         const tokens = await exchangeSessionTokenForAccessToken(
@@ -504,6 +691,7 @@ router.get("/auth/load", async (req, res) => {
         );
         await registerAppUninstalledWebhook(shopDomain, tokens.accessToken);
         store = await upsertInstalledShopifyStore({ shopDomain, ...tokens });
+        exchanged = true;
       } catch (exchangeErr) {
         console.error(
           "[Shopify] Token exchange failed:",
@@ -512,16 +700,29 @@ router.get("/auth/load", async (req, res) => {
       }
     }
 
-    if (!store || store.status === "uninstalled" || !store.accessToken) {
+    if (
+      !store ||
+      store.status === "uninstalled" ||
+      !store.accessToken ||
+      (tokenRejectedByShopify && !exchanged)
+    ) {
       return res.status(403).json({
         status: false,
         message: "App is not installed. Please install it from Shopify.",
       });
     }
 
+    // Agents created before per-store support are handed to the oldest store.
+    await claimLegacyAgentsForOldestStore(store.userId);
+
     const [userData, agents] = await Promise.all([
       User.findById(store.userId).select("_id email isOnboarded"),
-      Agent.find({ userId: store.userId, isDeleted: false })
+      // Only this store's agents — other stores of the same user stay separate.
+      Agent.find({
+        userId: store.userId,
+        storeHash: shopDomain,
+        isDeleted: false,
+      })
         .select("_id agentName isActive")
         .lean(),
     ]);
@@ -540,15 +741,20 @@ router.get("/auth/load", async (req, res) => {
 
     // If the agent limit is exceeded and the user isn't onboarded yet, mark
     // them onboarded so the embedded app skips the onboarding wizard.
-    let isOnboarded = userData.getIsOnboarded("shopify");
+    // Onboarding is tracked per store. Legacy stores (no flag yet) fall back to
+    // the user-level flag, and only they get the agent-limit auto-onboard.
+    const isLegacyStore = typeof store.isOnboarded !== "boolean";
+    let isOnboarded = isLegacyStore
+      ? userData.getIsOnboarded("shopify")
+      : store.isOnboarded;
     const [agentLimitExceeded, token] = await Promise.all([
-      isOnboarded
+      isOnboarded || !isLegacyStore
         ? Promise.resolve(false)
         : PlanService.isAgentLimitExceeded(store.userId),
-      findOrReuseUserSession(userData, "shopify", req),
+      findOrReuseUserSession(userData, "shopify", req, shopDomain),
     ]);
 
-    if (!isOnboarded && agentLimitExceeded) {
+    if (!isOnboarded && isLegacyStore && agentLimitExceeded) {
       isOnboarded = true;
       userData.isOnboarded = userData.isOnboarded || {
         local: false,

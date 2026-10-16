@@ -16,6 +16,11 @@ const userSession = new Schema(
       enum: ['local', 'google', 'bigcommerce', 'shopify'],
       default: 'local',
     },
+    // Shopify store this session is bound to (null for other platforms)
+    storeHash: {
+      type: String,
+      default: null,
+    },
     ip:{
       type: String,
     },

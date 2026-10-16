@@ -89,13 +89,15 @@ userSchema.pre("save", async function (next) {
 
 // Generate an authentication token.
 // platform: 'local' | 'shopify' | 'bigcommerce' (defaults to 'local')
-userSchema.methods.generateAuthToken = function (platform = 'local') {
+// extra.storeHash binds a Shopify token to a single store.
+userSchema.methods.generateAuthToken = function (platform = 'local', extra = {}) {
   const token = jwt.sign(
     {
       _id: this._id,
       email: this.email,
       role: this.role,
       platform,
+      ...(extra && extra.storeHash ? { storeHash: extra.storeHash } : {}),
     },
     process.env.JWT_SECRET_KEY,
     {

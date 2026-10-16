@@ -15,7 +15,33 @@ const commonHelper = require('../helpers/commonHelper');
 const { isValidTimezone } = require('../helpers/timezoneHelper');
 const NotificationModel = require('../models/Notification');
 
+const Store = require('../models/Store');
+
 const AIAgentController = {};
+
+/** Shopify store a request is scoped to (null for local / BigCommerce). */
+function sessionStoreHash(req) {
+  return req.authSession?.platform === 'shopify'
+    ? req.authSession?.storeHash || null
+    : null;
+}
+
+/**
+ * Onboarding state: per store for Shopify (legacy stores without a flag fall
+ * back to the user-level flag), user-level for every other platform.
+ */
+async function resolveIsOnboarded(user, platform, storeHash) {
+  if (!user) return false;
+  if (platform === 'shopify' && storeHash) {
+    const store = await Store.findOne({ storeHash, platform: 'shopify' })
+      .select('isOnboarded')
+      .lean();
+    if (store && typeof store.isOnboarded === 'boolean') {
+      return store.isOnboarded;
+    }
+  }
+  return user.getIsOnboarded(platform);
+}
 
 // GET /ai-agents — return all AI agents for the authenticated user
 AIAgentController.getAgents = async (req, res) => {
@@ -25,7 +51,12 @@ AIAgentController.getAgents = async (req, res) => {
       return res.status(400).json({ status_code: 400, status: false, message: 'User ID is required' });
     }
 
-    const agents = await Agent.find({ userId, isDeleted: false }).select('_id website_name agentName onboardingWebsiteUrl onboardingExtractedUrls isActive lastTrained dataTrainingStatus pagesAdded filesAdded faqsAdded currentDataSize');
+    // Shopify sessions only see the agents of their own store.
+    const agentFilter = { userId, isDeleted: false };
+    const storeHash = sessionStoreHash(req);
+    if (storeHash) agentFilter.storeHash = storeHash;
+
+    const agents = await Agent.find(agentFilter).select('_id website_name agentName onboardingWebsiteUrl onboardingExtractedUrls isActive lastTrained dataTrainingStatus pagesAdded filesAdded faqsAdded currentDataSize');
 
     // Fetch widget isActive for each agent
     const agentIds = agents.map(a => a._id);
@@ -76,6 +107,7 @@ AIAgentController.createAgent = async (req, res) => {
     const agent = new Agent({
       _id: agentId,
       userId,
+      storeHash: sessionStoreHash(req),
       agentName: agentName || '',
       qdrantIndexName: `${userId}-${agentId}`,
       qdrantIndexNamePaid: `${crypto.randomBytes(16).toString('hex')}-${agentId}`,
@@ -97,7 +129,7 @@ AIAgentController.createAgent = async (req, res) => {
 
     const user = await User.findById(userId).select('isOnboarded');
     const platform = req.authSession?.platform || 'local';
-    const userIsOnboarded = user ? user.getIsOnboarded(platform) : false;
+    const userIsOnboarded = await resolveIsOnboarded(user, platform, sessionStoreHash(req));
     if (user && !userIsOnboarded) {
       const humanAgent = await HumanAgent.findOne({ userId, isClient: true });
       if (humanAgent) {
@@ -141,7 +173,7 @@ AIAgentController.getAgentSettings = async (req, res) => {
     }
     const owner = await User.findById(agent.userId).select('isOnboarded');
     const platform = req.authSession?.platform || 'local';
-    const isOnboarded = owner ? owner.getIsOnboarded(platform) : false;
+    const isOnboarded = await resolveIsOnboarded(owner, platform, sessionStoreHash(req) || agent.storeHash);
 
     return res.status(200).json({
       status_code: 200,
@@ -189,7 +221,7 @@ AIAgentController.updateAgentSettings = async (req, res) => {
 
     const owner = await User.findById(agent.userId).select('isOnboarded');
     // platform already resolved above
-    const ownerIsOnboarded = owner ? owner.getIsOnboarded(platform) : false;
+    const ownerIsOnboarded = await resolveIsOnboarded(owner, platform, sessionStoreHash(req) || agent.storeHash);
     if (owner && !ownerIsOnboarded) {
       const humanAgent = await HumanAgent.findOne({ userId: agent.userId, isClient: true });
       if (humanAgent) {
@@ -279,6 +311,15 @@ AIAgentController.completeOnboarding = async (req, res) => {
       user.isOnboarded.local = true;
     }
     await user.save();
+
+    // Shopify: onboarding is tracked per store, so mark only this store.
+    const storeHash = sessionStoreHash(req);
+    if (storeHash) {
+      await Store.updateOne(
+        { storeHash, platform: 'shopify', userId },
+        { $set: { isOnboarded: true } },
+      );
+    }
 
     return res.status(200).json({ status_code: 200, status: true, message: 'Onboarding completed' });
   } catch (error) {

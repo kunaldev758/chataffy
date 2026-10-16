@@ -74,6 +74,11 @@ async function authenticateDecoded(req, res, decoded, token, cookieName) {
       cookieName,
       token,
       platform,
+      // Shopify sessions are bound to a single store
+      storeHash:
+        platform === "shopify"
+          ? userSession.storeHash || decoded?.storeHash || null
+          : null,
       sessionId: userSession._id,
     };
     await maybeRefreshClientSessionExpiry(req, res, userSession);
@@ -119,7 +124,9 @@ async function maybeRefreshClientSessionExpiry(req, res, userSession) {
   ) {
     const user = await User.findById(userSession.userId);
     if (user) {
-      const refreshedToken = user.generateAuthToken(userSession.platform);
+      const refreshedToken = user.generateAuthToken(userSession.platform, {
+        storeHash: userSession.storeHash,
+      });
       userSession.token = refreshedToken;
       await userSession.save();
 

@@ -6,6 +6,13 @@ const agentSchema = new mongoose.Schema({
     required: true,
     ref: "User",
   },
+  // Shopify store (myshopify domain) this agent belongs to. Null for agents that
+  // are not bound to a specific store (local web / BigCommerce / legacy).
+  storeHash: {
+    type: String,
+    default: null,
+    index: true,
+  },
   website_name: {
     type: String,
     default: '',

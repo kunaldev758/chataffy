@@ -67,6 +67,12 @@ const storeSchema = new mongoose.Schema({
         enum: ['uninstalled', 'installed'],
         default: null,
     },
+    // Per-store onboarding state. Missing = legacy store (falls back to the
+    // user-level isOnboarded flag); true/false = tracked per store.
+    isOnboarded: {
+        type: Boolean,
+        default: undefined,
+    },
 }, {timestamps: true});
 
 const Store = mongoose.model('Store', storeSchema);
