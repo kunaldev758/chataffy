@@ -748,6 +748,7 @@ router.get("/auth/callback", async (req, res) => {
     );
   }
 
+  
   try {
     const { data: tokenData } = await axios.post(
       `https://${shopDomain}/admin/oauth/access_token`,
