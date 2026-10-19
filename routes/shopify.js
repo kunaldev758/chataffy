@@ -112,32 +112,52 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
-function shopAdminHandle(shop) {
-  return String(shop || "").replace(/\.myshopify\.com$/i, "");
-}
-
-/**
- * Shopify-hosted authorize URL. Invalid client_id is rendered by Shopify
- * itself (oauth_error application_cannot_be_found). No oauth state cookie —
- * even if a code comes back, the callback cannot complete an install.
- * admin.shopify.com so the error paints inside the admin iframe.
- */
-function buildCredentialMismatchAuthorizeUrl(shop) {
-  const apiKey = String(SHOPIFY_CLIENT_ID || "").trim();
-  const handle = shopAdminHandle(shop);
-  if (!apiKey || !handle) return null;
+function shopifyAppNotFoundMessage(apiKey) {
+  const key = String(apiKey || SHOPIFY_CLIENT_ID || "");
   return (
-    `https://admin.shopify.com/store/${encodeURIComponent(handle)}/oauth/authorize` +
-    `?client_id=${encodeURIComponent(apiKey)}` +
-    `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
-    `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}`
+    "oauth_error application_cannot_be_found Could not find Shopify API application with api_key " +
+    key
   );
 }
 
-function redirectToShopifyOauthError(res, shop) {
-  const url = buildCredentialMismatchAuthorizeUrl(shop);
-  if (!url) return res.status(403).send("Invalid Shopify app credentials.");
-  return res.redirect(302, url);
+/**
+ * Error page that matches Shopify's oauth not-found screen.
+ * Never starts OAuth — a real client_id in authorize would install that app.
+ */
+function sendShopifyApplicationNotFound(res, shop) {
+  const detail = escapeHtml(shopifyAppNotFoundMessage(SHOPIFY_CLIENT_ID));
+  const adminHref = shop
+    ? `https://${encodeURIComponent(shop)}/admin`
+    : "https://admin.shopify.com";
+  return res
+    .status(403)
+    .set("Content-Type", "text/html; charset=utf-8")
+    .set("Cache-Control", "no-store")
+    .send(
+      `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+        `<title>Oauth error</title>` +
+        `<style>
+          html,body{margin:0;padding:0;background:#fff;color:#202223;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+          .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:48px 24px}
+          .box{max-width:520px;width:100%;text-align:center}
+          .bag{width:88px;height:88px;margin:0 auto 28px;opacity:.55}
+          .oops{color:#8c9196;font-size:16px;margin:0 0 36px;display:flex;align-items:center;justify-content:center;gap:8px}
+          h2{font-size:14px;font-weight:600;margin:0 0 12px;color:#202223;text-align:left}
+          .detail{background:#eaf4ff;color:#2c6ecb;font-size:13px;line-height:1.5;padding:10px 12px;border-radius:4px;text-align:left;word-break:break-word}
+          .actions{margin-top:32px;text-align:left;color:#202223;font-size:14px}
+          .actions ul{margin:8px 0 0;padding-left:20px}
+          a{color:#2c6ecb}
+        </style></head><body><div class="wrap"><div class="box">` +
+        `<svg class="bag" viewBox="0 0 60 60" fill="none" stroke="#8c9196" stroke-width="1.2" stroke-dasharray="3 3" aria-hidden="true">` +
+        `<path d="M12 20h36l-3 28H15L12 20z"/><path d="M22 20c0-6 3.5-11 8-11s8 5 8 11"/></svg>` +
+        `<p class="oops"><span aria-hidden="true">⚠️</span> Oops, something went wrong.</p>` +
+        `<h2>What happened?</h2>` +
+        `<p class="detail">${detail}</p>` +
+        `<div class="actions"><h2>What can I do?</h2><ul>` +
+        `<li>Press the back button on your browser.</li>` +
+        `<li>Return to your <a href="${adminHref}">admin dashboard</a>.</li>` +
+        `</ul></div></div></div></body></html>`,
+    );
 }
 
 /** Show a readable error instead of silently landing on some other store. */
@@ -559,11 +579,10 @@ router.get("/auth/install", (req, res) => {
       .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
   }
   if (req.query.hmac && !verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
-    // Signed by a different Shopify app. Bounce to Shopify authorize so
-    // Shopify can show application_cannot_be_found. No oauth state cookie,
-    // so our callback cannot create a store.
-    console.warn("[Shopify] Install HMAC mismatch; sending to Shopify OAuth error");
-    return redirectToShopifyOauthError(res, shop);
+    // Signed by a different Shopify app. Do not start OAuth — a real
+    // client_id would install that app on the store.
+    console.warn("[Shopify] Install HMAC mismatch; refusing OAuth");
+    return sendShopifyApplicationNotFound(res, shop);
   }
 
   // State is signed for this exact shop; the callback rejects any other shop.
@@ -593,7 +612,7 @@ router.get("/auth/callback", async (req, res) => {
     return res.status(400).json({ message: "Missing code or shop" });
   }
   if (!verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
-    return redirectToShopifyOauthError(res, normalizeShopDomain(shop));
+    return sendShopifyApplicationNotFound(res, normalizeShopDomain(shop));
   }
   const cookieState = req.cookies?.shopify_oauth_state;
   if (!state || (cookieState && state !== cookieState)) {
@@ -649,7 +668,7 @@ router.get("/auth/callback", async (req, res) => {
       err.response?.data || err.message || err,
     );
     if (isInvalidShopifyClientError(err)) {
-      return redirectToShopifyOauthError(res, shopDomain);
+      return sendShopifyApplicationNotFound(res, shopDomain);
     }
     return sendInstallError(
       res,
@@ -684,17 +703,13 @@ function loadError(res, httpStatus, code, message, shop = null, extra = {}) {
 
 function credentialMismatchJson(res, shop) {
   const apiKey = SHOPIFY_CLIENT_ID || "";
-  const authorizeUrl = shop ? buildCredentialMismatchAuthorizeUrl(shop) : null;
   return loadError(
     res,
     403,
     "APP_CREDENTIAL_MISMATCH",
-    "Shopify app credentials are invalid.",
+    shopifyAppNotFoundMessage(apiKey),
     shop,
-    {
-      apiKey,
-      ...(authorizeUrl ? { authorizeUrl } : {}),
-    },
+    { apiKey },
   );
 }
 
