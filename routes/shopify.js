@@ -104,13 +104,20 @@ function verifyOAuthState(state, shop) {
   return { ok: true };
 }
 
+function shopAdminHandle(shop) {
+  return String(shop || "").replace(/\.myshopify\.com$/i, "");
+}
+
 /**
- * Shopify-hosted authorize URL for a real install of THIS app.
+ * Authorize URL on admin.shopify.com (same host as the merchant admin).
+ * A 302 from our iframe to this URL shows Shopify's own oauth error page
+ * when client_id is invalid. window.top navigation is blocked ("Redirect blocked").
  */
 function buildShopifyAuthorizeUrl(shop) {
   const state = signOAuthState(shop);
+  const handle = shopAdminHandle(shop);
   const authUrl =
-    `https://${shop}/admin/oauth/authorize` +
+    `https://admin.shopify.com/store/${encodeURIComponent(handle)}/oauth/authorize` +
     `?client_id=${encodeURIComponent(SHOPIFY_CLIENT_ID)}` +
     `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
     `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}` +
@@ -132,15 +139,9 @@ function startShopifyAuthorize(req, res, shop) {
 const SHOPIFY_GATE_COOKIE = "shopify_gate_ok";
 
 function sendTopLevelRedirect(res, url) {
-  return res
-    .status(200)
-    .set("Content-Type", "text/html; charset=utf-8")
-    .set("Cache-Control", "no-store")
-    .send(
-      `<!doctype html><html><head><meta charset="utf-8">` +
-        `<script>window.top.location.replace(${JSON.stringify(url)});</script>` +
-        `</head><body><p><a href="${escapeHtml(url)}" target="_top" rel="noopener">Continue to Shopify</a></p></body></html>`,
-    );
+  // 302 the iframe to Shopify oauth. JS window.top is blocked by Chrome
+  // ("Redirect blocked") and only showed our "Continue to Shopify" link.
+  return res.redirect(302, url);
 }
 
 function grantShopifyLoadGate(req, res, shopDomain) {
@@ -212,8 +213,9 @@ function clearShopifyLoadGate(req, res) {
 function buildCredentialMismatchAuthorizeUrl(shop) {
   const apiKey = String(SHOPIFY_CLIENT_ID || "").trim();
   if (!apiKey) return null;
+  const handle = shopAdminHandle(shop);
   return (
-    `https://${shop}/admin/oauth/authorize` +
+    `https://admin.shopify.com/store/${encodeURIComponent(handle)}/oauth/authorize` +
     `?client_id=${encodeURIComponent(apiKey)}` +
     `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
     `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}`
