@@ -47,7 +47,9 @@ function normalizeShopDomain(shop) {
 }
 
 function shopAdminAppUrl(shopDomain) {
-  return `https://${shopDomain}/admin/apps/${encodeURIComponent(SHOPIFY_CLIENT_ID)}`;
+  // Use the unified admin.shopify.com URL (new format) to avoid iframe issues.
+  const handle = shopAdminHandle(shopDomain);
+  return `https://admin.shopify.com/store/${encodeURIComponent(handle)}/apps/${encodeURIComponent(SHOPIFY_CLIENT_ID)}`;
 }
 
 /**
@@ -139,9 +141,29 @@ function startShopifyAuthorize(req, res, shop) {
 const SHOPIFY_GATE_COOKIE = "shopify_gate_ok";
 
 function sendTopLevelRedirect(res, url) {
-  // 302 the iframe to Shopify oauth. JS window.top is blocked by Chrome
-  // ("Redirect blocked") and only showed our "Continue to Shopify" link.
-  return res.redirect(302, url);
+  // Use a JS breakout page so the TOP-LEVEL frame navigates to Shopify OAuth/error.
+  // A plain 302 makes the IFRAME follow the redirect to admin.shopify.com, which
+  // refuses to be embedded (X-Frame-Options: DENY) → "refused to connect" blank screen.
+  const htmlUrl = escapeHtml(url);          // safe for HTML attributes
+  const jsUrl = JSON.stringify(url);        // safe for inline JS string literals
+  return res
+    .status(200)
+    .set("Content-Type", "text/html; charset=utf-8")
+    .send(
+      `<!doctype html><html><head><meta charset="utf-8">` +
+        `<title>Redirecting\u2026</title></head>` +
+        `<body style="font-family:system-ui,sans-serif;display:flex;align-items:center;` +
+        `justify-content:center;min-height:100vh;margin:0;background:#f9f9f9">` +
+        `<div style="text-align:center">` +
+        `<p style="color:#374151">Redirecting to Shopify\u2026</p>` +
+        `<a href="${htmlUrl}" style="color:#4b5563;font-size:13px">Click here if not redirected</a>` +
+        `</div>` +
+        `<script>` +
+        `(function(){var u=${jsUrl};try{if(window.top&&window.top!==window){window.top.location.href=u;return;}}catch(e){}` +
+        `window.location.href=u;})();` +
+        `</script>` +
+        `</body></html>`,
+    );
 }
 
 function grantShopifyLoadGate(req, res, shopDomain) {
@@ -891,6 +913,22 @@ router.get("/auth/load", async (req, res) => {
   let hasValidSessionToken = false;
 
   if (idToken) {
+    // --- Credential mismatch: check audience BEFORE signature verification ---
+    // peekSessionToken decodes without verifying — gives us the `aud` (client_id
+    // the token was issued for) without consuming the token.
+    const peeked = peekSessionToken(idToken);
+    if (peeked.aud && peeked.aud !== SHOPIFY_CLIENT_ID) {
+      // The session token was issued for a different Shopify app than the one
+      // configured in our .env.  Installing the app with wrong credentials must
+      // show Shopify's error page, not silently succeed.
+      console.warn(
+        `[Shopify] Session token aud (${peeked.aud}) does not match configured SHOPIFY_CLIENT_ID (${SHOPIFY_CLIENT_ID}). Credential mismatch.`,
+      );
+      const shop = normalizeShopDomain(req.query.shop) || peeked.shop;
+      await revokeInstallOnMismatch(shop);
+      return credentialMismatchError(res, shop);
+    }
+
     try {
       ({ shop: shopDomain } = verifySessionToken(idToken));
       hasValidSessionToken = true;
@@ -902,7 +940,6 @@ router.get("/auth/load", async (req, res) => {
         e.name === "JsonWebTokenError" &&
         /invalid signature|audience invalid/i.test(e.message || "");
       if (wrongApp) {
-        const peeked = peekSessionToken(idToken);
         const shop = normalizeShopDomain(req.query.shop) || peeked.shop;
         await revokeInstallOnMismatch(shop);
         return credentialMismatchError(res, shop);
