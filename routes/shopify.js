@@ -679,9 +679,13 @@ router.get("/auth/install", async (req, res) => {
       .status(400)
       .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
   }
-  if (req.query.hmac && !verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
-    // Wrong app secret. Do not OAuth with our real client_id (that installs).
-    console.warn("[Shopify] Install HMAC mismatch; exiting to Shopify oauth error");
+  if (
+    !req.query.hmac ||
+    !verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)
+  ) {
+    // No HMAC, or HMAC from another app. OAuth with our live client_id
+    // would install Chataffy on the store even when creds are wrong.
+    console.warn("[Shopify] Install HMAC missing/mismatch; refusing OAuth");
     return sendExitToShopifyOauthError(res, shop, req.query.id_token);
   }
 
