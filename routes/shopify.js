@@ -130,16 +130,14 @@ function startShopifyAuthorize(req, res, shop) {
 }
 
 /**
- * Client ID that is not a Shopify app. Used only after we already know the
- * env credentials do not match the app that issued the session/HMAC.
- * Sending a *valid* different client_id would install that other app.
+ * Bounce to Shopify authorize using the env client_id so Shopify's error
+ * names that key (application_cannot_be_found). Do not set OAuth state or
+ * create a store — this is only for a credential mismatch.
  */
-const SHOPIFY_UNKNOWN_CLIENT_ID = "00000000000000000000000000000000";
-
 function buildCredentialMismatchAuthorizeUrl(shop) {
   return (
     `https://${shop}/admin/oauth/authorize` +
-    `?client_id=${encodeURIComponent(SHOPIFY_UNKNOWN_CLIENT_ID)}` +
+    `?client_id=${encodeURIComponent(SHOPIFY_CLIENT_ID)}` +
     `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
     `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}`
   );
