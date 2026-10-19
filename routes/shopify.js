@@ -104,6 +104,55 @@ function verifyOAuthState(state, shop) {
   return { ok: true };
 }
 
+/**
+ * Shopify-hosted authorize URL. A client_id that is not a Shopify app is
+ * rejected by Shopify itself (application_cannot_be_found) — we never create
+ * a store in that case.
+ */
+function buildShopifyAuthorizeUrl(shop) {
+  const state = signOAuthState(shop);
+  const authUrl =
+    `https://${shop}/admin/oauth/authorize` +
+    `?client_id=${encodeURIComponent(SHOPIFY_CLIENT_ID)}` +
+    `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
+    `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}` +
+    `&state=${encodeURIComponent(state)}`;
+  return { state, authUrl };
+}
+
+function startShopifyAuthorize(req, res, shop) {
+  const { state, authUrl } = buildShopifyAuthorizeUrl(shop);
+  res.cookie("shopify_oauth_state", state, {
+    ...getAuthCookieOptions(req),
+    maxAge: OAUTH_STATE_TTL_MS,
+    sameSite: "none",
+    secure: true,
+  });
+  return authUrl;
+}
+
+/** Shop from an unverified session token (signature may be for another app). */
+function peekShopFromSessionToken(idToken) {
+  try {
+    const payload = jwt.decode(idToken);
+    if (payload?.dest) {
+      return normalizeShopDomain(new URL(payload.dest).hostname);
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function isInvalidShopifyClientError(err) {
+  const body = err?.response?.data;
+  const text =
+    typeof body === "string" ? body : JSON.stringify(body || err?.message || "");
+  return /invalid_client|invalid client_secret|application_cannot_be_found/i.test(
+    text,
+  );
+}
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -495,25 +544,14 @@ router.get("/auth/install", (req, res) => {
       .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
   }
   if (req.query.hmac && !verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
-    return res.status(403).send("Invalid HMAC");
+    // Wrong app secret: still send the merchant to Shopify authorize so
+    // Shopify can show application_cannot_be_found for a bad client_id.
+    console.warn(
+      "[Shopify] Install HMAC mismatch; continuing to Shopify authorize",
+    );
   }
 
-  // State is signed for this exact shop; the callback rejects any other shop.
-  const state = signOAuthState(shop);
-  res.cookie("shopify_oauth_state", state, {
-    ...getAuthCookieOptions(req),
-    maxAge: OAUTH_STATE_TTL_MS,
-    sameSite: "none",
-    secure: true,
-  });
-
-  const authUrl =
-    `https://${shop}/admin/oauth/authorize` +
-    `?client_id=${encodeURIComponent(SHOPIFY_CLIENT_ID)}` +
-    `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
-    `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}` +
-    `&state=${encodeURIComponent(state)}`;
-  return res.redirect(authUrl);
+  return res.redirect(startShopifyAuthorize(req, res, shop));
 });
 
 router.get("/auth/callback", async (req, res) => {
@@ -636,11 +674,15 @@ router.get("/auth/load", async (req, res) => {
         e.name === "JsonWebTokenError" &&
         /invalid signature|audience invalid/i.test(e.message || "");
       if (wrongApp) {
+        const shop =
+          normalizeShopDomain(req.query.shop) ||
+          peekShopFromSessionToken(idToken);
         return loadError(
           res,
           403,
           "APP_CREDENTIAL_MISMATCH",
-          "This store is connected to a different Chataffy app. Please contact support.",
+          "Shopify app credentials are invalid.",
+          shop,
         );
       }
       res.set("X-Shopify-Retry-Invalid-Session-Request", "1");
@@ -655,13 +697,19 @@ router.get("/auth/load", async (req, res) => {
           : "Invalid Shopify session. Please reload the page.",
       );
     }
-  } else if (
-    req.query.shop &&
-    req.query.hmac &&
-    verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)
-  ) {
-    // HMAC-signed load request (no App Bridge session token available yet).
-    shopDomain = normalizeShopDomain(req.query.shop);
+  } else if (req.query.shop && req.query.hmac) {
+    if (verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
+      // HMAC-signed load request (no App Bridge session token available yet).
+      shopDomain = normalizeShopDomain(req.query.shop);
+    } else {
+      return loadError(
+        res,
+        403,
+        "APP_CREDENTIAL_MISMATCH",
+        "Shopify app credentials are invalid.",
+        normalizeShopDomain(req.query.shop),
+      );
+    }
   }
 
   if (!shopDomain) {
@@ -739,6 +787,15 @@ router.get("/auth/load", async (req, res) => {
           "[Shopify] Token exchange failed:",
           exchangeErr.response?.data || exchangeErr.message,
         );
+        if (isInvalidShopifyClientError(exchangeErr)) {
+          return loadError(
+            res,
+            403,
+            "APP_CREDENTIAL_MISMATCH",
+            "Shopify app credentials are invalid.",
+            shopDomain,
+          );
+        }
       }
     }
 
