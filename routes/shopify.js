@@ -636,11 +636,21 @@ router.get("/auth/load", async (req, res) => {
         e.name === "JsonWebTokenError" &&
         /invalid signature|audience invalid/i.test(e.message || "");
       if (wrongApp) {
+        let tokenShop = null;
+        try {
+          const unverified = jwt.decode(idToken);
+          if (unverified && typeof unverified === "object" && unverified.dest) {
+            tokenShop = normalizeShopDomain(new URL(unverified.dest).hostname);
+          }
+        } catch (_) {}
+        const resolvedShop =
+          tokenShop || normalizeShopDomain(req.query.shop);
         return loadError(
           res,
           403,
           "APP_CREDENTIAL_MISMATCH",
-          "This store is connected to a different Chataffy app. Please contact support.",
+          "This store is connected to a different Chataffy app. Redirecting to installation...",
+          resolvedShop,
         );
       }
       res.set("X-Shopify-Retry-Invalid-Session-Request", "1");
