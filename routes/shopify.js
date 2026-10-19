@@ -130,37 +130,88 @@ function startShopifyAuthorize(req, res, shop) {
 }
 
 /**
- * Env SHOPIFY_CLIENT_ID as-is would start that app's Install screen whenever
- * the id is a real Shopify app (even if it is the *wrong* app). Shopify only
- * shows application_cannot_be_found for a client_id it cannot resolve.
- * Keep the env id in the error (dynamic) but make it unresolvable.
+ * Shopify OAuth URL for the app Shopify actually opened (`aud` from the
+ * session token). Never invent a fake client_id — that shows a random
+ * api_key on Shopify's error page while the real app stays Installed.
  */
-function mismatchAuthorizeClientId() {
-  const envId = String(SHOPIFY_CLIENT_ID || "").trim();
-  if (!envId) return "00000000000000000000000000000000";
-  return envId.endsWith("g") ? `${envId}x` : `${envId}g`;
-}
-
-function buildCredentialMismatchAuthorizeUrl(shop) {
+function buildCredentialMismatchAuthorizeUrl(shop, clientId) {
+  const apiKey = String(clientId || SHOPIFY_CLIENT_ID || "").trim();
+  if (!apiKey) return null;
   return (
     `https://${shop}/admin/oauth/authorize` +
-    `?client_id=${encodeURIComponent(mismatchAuthorizeClientId())}` +
+    `?client_id=${encodeURIComponent(apiKey)}` +
     `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
     `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}`
   );
 }
 
-/** Shop from an unverified session token (signature may be for another app). */
-function peekShopFromSessionToken(idToken) {
+/** Claims from an unverified session token (signature may be for another app). */
+function peekSessionToken(idToken) {
   try {
     const payload = jwt.decode(idToken);
-    if (payload?.dest) {
-      return normalizeShopDomain(new URL(payload.dest).hostname);
+    if (!payload || typeof payload !== "object") {
+      return { shop: null, aud: null };
     }
+    const shop = payload.dest
+      ? normalizeShopDomain(new URL(payload.dest).hostname)
+      : null;
+    const aud = typeof payload.aud === "string" && payload.aud ? payload.aud : null;
+    return { shop, aud };
   } catch {
-    // ignore
+    return { shop: null, aud: null };
   }
-  return null;
+}
+
+async function uninstallShopifyApp(shopDomain, accessToken) {
+  const { data } = await axios.post(
+    `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+    { query: "mutation { appUninstall { userErrors { field message } } }" },
+    {
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json",
+      },
+    },
+  );
+  const errors = data?.data?.appUninstall?.userErrors;
+  if (errors?.length) {
+    throw new Error(errors.map((e) => e.message).join("; "));
+  }
+}
+
+/** Drop our DB install and, when we have a token, uninstall from Shopify too. */
+async function revokeInstallOnMismatch(shopDomain) {
+  if (!shopDomain) return false;
+  let uninstalledOnShopify = false;
+  try {
+    const store = await Store.findOne({
+      storeHash: shopDomain,
+      platform: "shopify",
+    });
+    if (store?.accessToken) {
+      try {
+        await uninstallShopifyApp(shopDomain, store.accessToken);
+        uninstalledOnShopify = true;
+      } catch (err) {
+        console.warn(
+          "[Shopify] appUninstall on credential mismatch failed:",
+          err.response?.data || err.message,
+        );
+      }
+    }
+    if (store) {
+      store.status = "uninstalled";
+      store.lastUninstalledAt = new Date();
+      store.accessToken = null;
+      store.refreshToken = null;
+      store.accessTokenExpiresAt = null;
+      store.refreshTokenExpiresAt = null;
+      await store.save();
+    }
+  } catch (err) {
+    console.warn("[Shopify] revokeInstallOnMismatch:", err.message);
+  }
+  return uninstalledOnShopify;
 }
 
 function isInvalidShopifyClientError(err) {
@@ -563,23 +614,29 @@ router.get("/auth/install", (req, res) => {
       .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
   }
   if (req.query.hmac && !verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
-    // Signed by a different app secret — do not start OAuth for our client_id
-    // (that would install a different valid app). Show Shopify's own error.
+    // Signed by a different app secret — do not start OAuth as a different app.
     console.warn("[Shopify] Install HMAC mismatch; rejecting at Shopify");
-    return res.redirect(buildCredentialMismatchAuthorizeUrl(shop));
+    const url = buildCredentialMismatchAuthorizeUrl(shop);
+    if (!url) return res.status(403).send("Invalid HMAC");
+    return res.redirect(url);
   }
 
   return res.redirect(startShopifyAuthorize(req, res, shop));
 });
 
-router.get("/auth/mismatch", (req, res) => {
+router.get("/auth/mismatch", async (req, res) => {
   const shop = normalizeShopDomain(req.query.shop);
   if (!shop) {
     return res
       .status(400)
       .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
   }
-  return res.redirect(buildCredentialMismatchAuthorizeUrl(shop));
+  await revokeInstallOnMismatch(shop);
+  const url = buildCredentialMismatchAuthorizeUrl(shop);
+  if (!url) {
+    return res.status(400).send("Shopify is not configured");
+  }
+  return res.redirect(url);
 });
 
 router.get("/auth/callback", async (req, res) => {
@@ -677,9 +734,11 @@ function loadError(res, httpStatus, code, message, shop = null, extra = {}) {
   });
 }
 
-/** Never create a store. Send the merchant to Shopify's own not-found page. */
-function credentialMismatchError(res, shop) {
-  const authorizeUrl = shop ? buildCredentialMismatchAuthorizeUrl(shop) : null;
+/** Never create a store. Hand Shopify the real app client id (`aud`). */
+function credentialMismatchError(res, shop, clientId) {
+  const authorizeUrl = shop
+    ? buildCredentialMismatchAuthorizeUrl(shop, clientId)
+    : null;
   return loadError(
     res,
     403,
@@ -716,10 +775,10 @@ router.get("/auth/load", async (req, res) => {
         e.name === "JsonWebTokenError" &&
         /invalid signature|audience invalid/i.test(e.message || "");
       if (wrongApp) {
-        const shop =
-          normalizeShopDomain(req.query.shop) ||
-          peekShopFromSessionToken(idToken);
-        return credentialMismatchError(res, shop);
+        const peeked = peekSessionToken(idToken);
+        const shop = normalizeShopDomain(req.query.shop) || peeked.shop;
+        await revokeInstallOnMismatch(shop);
+        return credentialMismatchError(res, shop, peeked.aud);
       }
       res.set("X-Shopify-Retry-Invalid-Session-Request", "1");
       const expired =
@@ -738,7 +797,9 @@ router.get("/auth/load", async (req, res) => {
       // HMAC-signed load request (no App Bridge session token available yet).
       shopDomain = normalizeShopDomain(req.query.shop);
     } else {
-      return credentialMismatchError(res, normalizeShopDomain(req.query.shop));
+      const shop = normalizeShopDomain(req.query.shop);
+      await revokeInstallOnMismatch(shop);
+      return credentialMismatchError(res, shop);
     }
   }
 
@@ -818,7 +879,9 @@ router.get("/auth/load", async (req, res) => {
           exchangeErr.response?.data || exchangeErr.message,
         );
         if (isInvalidShopifyClientError(exchangeErr)) {
-          return credentialMismatchError(res, shopDomain);
+          const peeked = idToken ? peekSessionToken(idToken) : { aud: null };
+          await revokeInstallOnMismatch(shopDomain);
+          return credentialMismatchError(res, shopDomain, peeked.aud);
         }
       }
     }
