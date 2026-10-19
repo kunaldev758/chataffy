@@ -130,14 +130,21 @@ function startShopifyAuthorize(req, res, shop) {
 }
 
 /**
- * Bounce to Shopify authorize using the env client_id so Shopify's error
- * names that key (application_cannot_be_found). Do not set OAuth state or
- * create a store — this is only for a credential mismatch.
+ * Env SHOPIFY_CLIENT_ID as-is would start that app's Install screen whenever
+ * the id is a real Shopify app (even if it is the *wrong* app). Shopify only
+ * shows application_cannot_be_found for a client_id it cannot resolve.
+ * Keep the env id in the error (dynamic) but make it unresolvable.
  */
+function mismatchAuthorizeClientId() {
+  const envId = String(SHOPIFY_CLIENT_ID || "").trim();
+  if (!envId) return "00000000000000000000000000000000";
+  return envId.endsWith("g") ? `${envId}x` : `${envId}g`;
+}
+
 function buildCredentialMismatchAuthorizeUrl(shop) {
   return (
     `https://${shop}/admin/oauth/authorize` +
-    `?client_id=${encodeURIComponent(SHOPIFY_CLIENT_ID)}` +
+    `?client_id=${encodeURIComponent(mismatchAuthorizeClientId())}` +
     `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
     `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}`
   );
