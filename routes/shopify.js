@@ -129,6 +129,79 @@ function startShopifyAuthorize(req, res, shop) {
   return authUrl;
 }
 
+const SHOPIFY_GATE_COOKIE = "shopify_gate_ok";
+
+function sendTopLevelRedirect(res, url) {
+  return res
+    .status(200)
+    .set("Content-Type", "text/html; charset=utf-8")
+    .set("Cache-Control", "no-store")
+    .send(
+      `<!doctype html><html><head><meta charset="utf-8">` +
+        `<script>window.top.location.replace(${JSON.stringify(url)});</script>` +
+        `</head><body><p><a href="${escapeHtml(url)}" target="_top" rel="noopener">Continue to Shopify</a></p></body></html>`,
+    );
+}
+
+function grantShopifyLoadGate(req, res, shopDomain) {
+  const opts = {
+    ...getAuthCookieOptions(req),
+    maxAge: 60 * 60 * 1000,
+    sameSite: "none",
+    secure: true,
+  };
+  if (!opts.domain) {
+    try {
+      const host = new URL(process.env.CLIENT_URL || process.env.BASE_URL || "").hostname;
+      const bits = String(host || "")
+        .split(".")
+        .filter(Boolean);
+      if (bits.length >= 2 && host !== "localhost") {
+        opts.domain = `.${bits.slice(-2).join(".")}`;
+      }
+    } catch {
+      // host-only cookie
+    }
+  }
+  res.cookie(SHOPIFY_GATE_COOKIE, shopDomain, opts);
+}
+
+function signLoadGate(shop) {
+  const exp = Date.now() + 5 * 60 * 1000;
+  const payload = `${shop}|${exp}`;
+  const sig = crypto
+    .createHmac("sha256", SHOPIFY_API_SECRET)
+    .update(payload)
+    .digest("hex");
+  return Buffer.from(`${payload}|${sig}`).toString("base64url");
+}
+
+function verifyLoadGate(ticket) {
+  try {
+    const decoded = Buffer.from(String(ticket || ""), "base64url").toString("utf8");
+    const [shop, exp, sig] = decoded.split("|");
+    if (!shop || !exp || !sig) return null;
+    if (Date.now() > Number(exp)) return null;
+    const expected = crypto
+      .createHmac("sha256", SHOPIFY_API_SECRET)
+      .update(`${shop}|${exp}`)
+      .digest("hex");
+    const a = Buffer.from(expected, "utf8");
+    const b = Buffer.from(sig, "utf8");
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    return normalizeShopDomain(shop);
+  } catch {
+    return null;
+  }
+}
+
+function clearShopifyLoadGate(req, res) {
+  res.clearCookie(SHOPIFY_GATE_COOKIE, {
+    ...getAuthCookieOptions(req),
+    maxAge: 0,
+  });
+}
+
 /**
  * Bounce to Shopify authorize using ONLY our env client_id.
  * Using the session token `aud` (the already-installed Shopify app) lets
@@ -147,12 +220,13 @@ function buildCredentialMismatchAuthorizeUrl(shop) {
   );
 }
 
-async function redirectToShopifyCredentialError(res, shop) {
+async function redirectToShopifyCredentialError(req, res, shop) {
   const shopDomain = normalizeShopDomain(shop);
   if (shopDomain) {
+    clearShopifyLoadGate(req, res);
     await revokeInstallOnMismatch(shopDomain);
     const url = buildCredentialMismatchAuthorizeUrl(shopDomain);
-    if (url) return res.redirect(url);
+    if (url) return sendTopLevelRedirect(res, url);
   }
   return sendInstallError(res, 403, "Shopify app credentials are invalid.");
 }
@@ -615,6 +689,37 @@ async function upsertInstalledShopifyStore({
  * install flow), merchants normally never hit this route.
  * https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens/authorization-code-grant
  */
+/**
+ * First hop from Shopify admin. Uses SHOPIFY_CLIENT_ID from .env (dynamic).
+ * Never renders /load or App Bridge. Invalid client_id → Shopify's
+ * application_cannot_be_found. Valid id → OAuth callback then /load.
+ */
+router.get("/auth/verify-gate", (req, res) => {
+  const shop = verifyLoadGate(req.query.ticket);
+  if (!shop) {
+    return res.status(403).json({ ok: false });
+  }
+  return res.json({
+    ok: true,
+    shop,
+    clientId: SHOPIFY_CLIENT_ID,
+  });
+});
+
+router.get("/auth/gate", (req, res) => {
+  if (!isShopifyConfigured()) {
+    return res.status(500).send("Shopify is not configured");
+  }
+  const shop = normalizeShopDomain(req.query.shop);
+  if (!shop) {
+    return res
+      .status(400)
+      .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
+  }
+  const authUrl = startShopifyAuthorize(req, res, shop);
+  return sendTopLevelRedirect(res, authUrl);
+});
+
 router.get("/auth/install", async (req, res) => {
   if (!isShopifyConfigured()) {
     return res.status(500).send("Shopify is not configured");
@@ -626,13 +731,12 @@ router.get("/auth/install", async (req, res) => {
       .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
   }
   if (req.query.hmac && !verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
-    // Signed by a different app secret — do not complete install.
     console.warn("[Shopify] Install HMAC mismatch; sending to Shopify OAuth");
-    return redirectToShopifyCredentialError(res, shop);
+    return redirectToShopifyCredentialError(req, res, shop);
   }
 
-  // Env client_id that does not exist → Shopify shows application_cannot_be_found.
-  return res.redirect(startShopifyAuthorize(req, res, shop));
+  const authUrl = startShopifyAuthorize(req, res, shop);
+  return sendTopLevelRedirect(res, authUrl);
 });
 
 router.get("/auth/mismatch", async (req, res) => {
@@ -642,12 +746,7 @@ router.get("/auth/mismatch", async (req, res) => {
       .status(400)
       .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
   }
-  await revokeInstallOnMismatch(shop);
-  const url = buildCredentialMismatchAuthorizeUrl(shop);
-  if (!url) {
-    return res.status(400).send("Shopify is not configured");
-  }
-  return res.redirect(url);
+  return redirectToShopifyCredentialError(req, res, shop);
 });
 
 router.get("/auth/callback", async (req, res) => {
@@ -663,7 +762,7 @@ router.get("/auth/callback", async (req, res) => {
     // create a store. Bounce to env client_id OAuth so Shopify can show
     // application_cannot_be_found when that id does not exist.
     console.warn("[Shopify] Callback HMAC mismatch; not installing");
-    return redirectToShopifyCredentialError(res, shop);
+    return redirectToShopifyCredentialError(req, res, shop);
   }
   const cookieState = req.cookies?.shopify_oauth_state;
   if (!state || (cookieState && state !== cookieState)) {
@@ -711,7 +810,17 @@ router.get("/auth/callback", async (req, res) => {
     await registerAppUninstalledWebhook(shopDomain, tokens.accessToken);
     await upsertInstalledShopifyStore({ shopDomain, ...tokens });
 
+    grantShopifyLoadGate(req, res, shopDomain);
     res.clearCookie("shopify_oauth_state", { path: "/" });
+    const clientUrl = String(process.env.CLIENT_URL || "")
+      .trim()
+      .replace(/\/$/, "");
+    if (clientUrl) {
+      const enter = new URL(`${clientUrl}/shopify-enter`);
+      enter.searchParams.set("ticket", signLoadGate(shopDomain));
+      if (req.query.host) enter.searchParams.set("host", String(req.query.host));
+      return res.redirect(enter.toString());
+    }
     return res.redirect(shopAdminAppUrl(shopDomain));
   } catch (err) {
     console.error(
@@ -719,7 +828,7 @@ router.get("/auth/callback", async (req, res) => {
       err.response?.data || err.message || err,
     );
     if (isInvalidShopifyClientError(err)) {
-      return redirectToShopifyCredentialError(res, shopDomain);
+      return redirectToShopifyCredentialError(req, res, shopDomain);
     }
     return sendInstallError(
       res,
@@ -995,6 +1104,7 @@ router.get("/auth/load", async (req, res) => {
     const cookieOptions = getAuthCookieOptions(req);
     res.cookie("sf_token", token, cookieOptions);
     res.cookie("platform", "shopify", cookieOptions);
+    grantShopifyLoadGate(req, res, shopDomain);
 
     return res.status(200).json({
       status: true,
