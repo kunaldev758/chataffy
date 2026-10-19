@@ -105,9 +105,7 @@ function verifyOAuthState(state, shop) {
 }
 
 /**
- * Shopify-hosted authorize URL. A client_id that is not a Shopify app is
- * rejected by Shopify itself (application_cannot_be_found) — we never create
- * a store in that case.
+ * Shopify-hosted authorize URL for a real install of THIS app.
  */
 function buildShopifyAuthorizeUrl(shop) {
   const state = signOAuthState(shop);
@@ -129,6 +127,22 @@ function startShopifyAuthorize(req, res, shop) {
     secure: true,
   });
   return authUrl;
+}
+
+/**
+ * Client ID that is not a Shopify app. Used only after we already know the
+ * env credentials do not match the app that issued the session/HMAC.
+ * Sending a *valid* different client_id would install that other app.
+ */
+const SHOPIFY_UNKNOWN_CLIENT_ID = "00000000000000000000000000000000";
+
+function buildCredentialMismatchAuthorizeUrl(shop) {
+  return (
+    `https://${shop}/admin/oauth/authorize` +
+    `?client_id=${encodeURIComponent(SHOPIFY_UNKNOWN_CLIENT_ID)}` +
+    `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
+    `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}`
+  );
 }
 
 /** Shop from an unverified session token (signature may be for another app). */
@@ -544,14 +558,23 @@ router.get("/auth/install", (req, res) => {
       .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
   }
   if (req.query.hmac && !verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
-    // Wrong app secret: still send the merchant to Shopify authorize so
-    // Shopify can show application_cannot_be_found for a bad client_id.
-    console.warn(
-      "[Shopify] Install HMAC mismatch; continuing to Shopify authorize",
-    );
+    // Signed by a different app secret — do not start OAuth for our client_id
+    // (that would install a different valid app). Show Shopify's own error.
+    console.warn("[Shopify] Install HMAC mismatch; rejecting at Shopify");
+    return res.redirect(buildCredentialMismatchAuthorizeUrl(shop));
   }
 
   return res.redirect(startShopifyAuthorize(req, res, shop));
+});
+
+router.get("/auth/mismatch", (req, res) => {
+  const shop = normalizeShopDomain(req.query.shop);
+  if (!shop) {
+    return res
+      .status(400)
+      .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
+  }
+  return res.redirect(buildCredentialMismatchAuthorizeUrl(shop));
 });
 
 router.get("/auth/callback", async (req, res) => {
@@ -639,13 +662,27 @@ router.get("/auth/callback", async (req, res) => {
  * can show the real reason instead of an endless spinner. Messages are
  * user-safe: never include secrets, tokens or stack traces.
  */
-function loadError(res, httpStatus, code, message, shop = null) {
+function loadError(res, httpStatus, code, message, shop = null, extra = {}) {
   return res.status(httpStatus).json({
     status: false,
     code,
     message,
     ...(shop ? { shop } : {}),
+    ...extra,
   });
+}
+
+/** Never create a store. Send the merchant to Shopify's own not-found page. */
+function credentialMismatchError(res, shop) {
+  const authorizeUrl = shop ? buildCredentialMismatchAuthorizeUrl(shop) : null;
+  return loadError(
+    res,
+    403,
+    "APP_CREDENTIAL_MISMATCH",
+    "Shopify app credentials are invalid.",
+    shop,
+    authorizeUrl ? { authorizeUrl } : {},
+  );
 }
 
 router.get("/auth/load", async (req, res) => {
@@ -677,13 +714,7 @@ router.get("/auth/load", async (req, res) => {
         const shop =
           normalizeShopDomain(req.query.shop) ||
           peekShopFromSessionToken(idToken);
-        return loadError(
-          res,
-          403,
-          "APP_CREDENTIAL_MISMATCH",
-          "Shopify app credentials are invalid.",
-          shop,
-        );
+        return credentialMismatchError(res, shop);
       }
       res.set("X-Shopify-Retry-Invalid-Session-Request", "1");
       const expired =
@@ -702,13 +733,7 @@ router.get("/auth/load", async (req, res) => {
       // HMAC-signed load request (no App Bridge session token available yet).
       shopDomain = normalizeShopDomain(req.query.shop);
     } else {
-      return loadError(
-        res,
-        403,
-        "APP_CREDENTIAL_MISMATCH",
-        "Shopify app credentials are invalid.",
-        normalizeShopDomain(req.query.shop),
-      );
+      return credentialMismatchError(res, normalizeShopDomain(req.query.shop));
     }
   }
 
@@ -788,13 +813,7 @@ router.get("/auth/load", async (req, res) => {
           exchangeErr.response?.data || exchangeErr.message,
         );
         if (isInvalidShopifyClientError(exchangeErr)) {
-          return loadError(
-            res,
-            403,
-            "APP_CREDENTIAL_MISMATCH",
-            "Shopify app credentials are invalid.",
-            shopDomain,
-          );
+          return credentialMismatchError(res, shopDomain);
         }
       }
     }
