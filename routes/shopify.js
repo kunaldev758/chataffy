@@ -116,45 +116,89 @@ function shopAdminHandle(shop) {
   return String(shop || "").replace(/\.myshopify\.com$/i, "");
 }
 
-/**
- * Client id used only for Shopify's not-found page. A live app id in
- * /oauth/authorize installs that app — so never send SHOPIFY_CLIENT_ID as-is.
- */
-function oauthErrorClientId() {
-  const id = String(SHOPIFY_CLIENT_ID || "").trim();
-  if (/^[0-9a-f]{32}$/i.test(id)) {
-    const last = id[id.length - 1];
-    return id.slice(0, -1) + (last === "0" ? "1" : "0");
-  }
-  return id ? `${id}0` : "00000000000000000000000000000000";
+function sanitizeShopifyClientId(value) {
+  const id = String(value || "").trim();
+  return /^[0-9a-f]{32}$/i.test(id) ? id : null;
 }
 
-/**
- * Shopify-hosted authorize URL. Unknown client_id → application_cannot_be_found.
- * No oauth state cookie, so our callback cannot create a store.
- */
-function buildShopifyNotFoundAuthorizeUrl(shop) {
-  const handle = shopAdminHandle(shop);
-  const apiKey = oauthErrorClientId();
-  if (!handle || !apiKey) return null;
+function clientIdFromIdToken(idToken) {
+  return sanitizeShopifyClientId(readUnverifiedSessionToken(idToken)?.aud);
+}
+
+function resolveIncomingClientId(req, fallbackIdToken) {
+  const ids = [
+    sanitizeShopifyClientId(req?.query?.client_id),
+    clientIdFromIdToken(req?.query?.id_token),
+    clientIdFromIdToken(req?.query?.session_token),
+    clientIdFromIdToken(fallbackIdToken),
+  ].filter(Boolean);
+  // Prefer the client_id of the app the merchant actually opened, not ours.
+  return ids.find((id) => id !== SHOPIFY_CLIENT_ID) || ids[0] || null;
+}
+
+function shopifyAppNotFoundMessage(apiKey) {
+  const key = String(apiKey || "").trim();
   return (
-    `https://admin.shopify.com/store/${encodeURIComponent(handle)}/oauth/authorize` +
-    `?client_id=${encodeURIComponent(apiKey)}` +
-    `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
-    `&redirect_uri=${encodeURIComponent(SHOPIFY_CALLBACK_URL)}`
+    "Oauth error application_cannot_be_found: Could not find Shopify API application with api_key " +
+    key
   );
 }
 
+function credentialErrorUrl(shop, clientId) {
+  const base = String(process.env.BASE_URL || "").replace(/\/?$/, "/");
+  const params = new URLSearchParams();
+  if (shop) params.set("shop", shop);
+  const id = sanitizeShopifyClientId(clientId);
+  if (id) params.set("client_id", id);
+  return `${base}api/shopify/auth/credential-error?${params.toString()}`;
+}
+
 /**
- * Leave the app iframe and open Shopify's own oauth error (top window).
- * A 302 of the iframe to admin.shopify.com is blocked (red prohibition icon).
+ * Shopify-style not-found page using the client_id of the app the merchant
+ * actually opened. Never hits /oauth/authorize — a live client_id there
+ * would install that app even when our env credentials do not match.
  */
-async function sendExitToShopifyOauthError(res, shop, idToken) {
+function sendShopifyApplicationNotFound(res, shop, apiKey) {
+  const key =
+    sanitizeShopifyClientId(apiKey) ||
+    sanitizeShopifyClientId(SHOPIFY_CLIENT_ID) ||
+    "";
+  const detail = escapeHtml(shopifyAppNotFoundMessage(key));
+  const handle = shopAdminHandle(shop);
+  const adminHref = handle
+    ? `https://admin.shopify.com/store/${encodeURIComponent(handle)}`
+    : "https://admin.shopify.com";
+  return res
+    .status(403)
+    .set("Content-Type", "text/html; charset=utf-8")
+    .set("Cache-Control", "no-store")
+    .send(
+      `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+        `<title>Oauth error application_cannot_be_found</title>` +
+        `<style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#fff;color:#202223;display:flex;align-items:center;justify-content:center;min-height:100vh}main{max-width:520px;padding:48px 24px;text-align:center}h1{font-size:20px;font-weight:600;margin:16px 0 32px}h2{font-size:14px;font-weight:600;margin:0 0 8px;text-align:left}p,ul{font-size:14px;line-height:1.5;color:#6d7175;text-align:left}ul{padding-left:18px}a{color:#2c6ecb}</style></head>` +
+        `<body><main>` +
+        `<div style="font-size:40px">⚠️</div>` +
+        `<h1>Oops, something went wrong.</h1>` +
+        `<h2>What happened?</h2>` +
+        `<p>${detail}</p>` +
+        `<h2>What can I do?</h2>` +
+        `<ul><li>Press the back button on your browser</li>` +
+        `<li>Return to your <a href="${escapeHtml(adminHref)}">admin dashboard</a></li></ul>` +
+        `</main></body></html>`,
+    );
+}
+
+/**
+ * Leave the app iframe, then show the not-found page with the same client_id
+ * the merchant installed from. Do not start OAuth.
+ */
+async function sendExitToShopifyOauthError(res, shop, idToken, incomingClientId) {
   await uninstallOnCredentialMismatch(shop, idToken);
-  const url = buildShopifyNotFoundAuthorizeUrl(shop);
-  if (!url) return res.status(403).send("Invalid Shopify app credentials.");
+  const clientId =
+    sanitizeShopifyClientId(incomingClientId) || clientIdFromIdToken(idToken);
+  const url = credentialErrorUrl(shop, clientId);
   const safeUrl = JSON.stringify(url);
-  const apiKey = escapeHtml(String(SHOPIFY_CLIENT_ID || ""));
+  const apiKey = escapeHtml(clientId || SHOPIFY_CLIENT_ID || "");
   return res
     .status(200)
     .set("Content-Type", "text/html; charset=utf-8")
@@ -225,6 +269,8 @@ function verifyShopifyQueryHmac(query, secret) {
   const params = { ...query };
   delete params.hmac;
   delete params.signature;
+  // Added by our embedded load after Shopify signed the URL.
+  delete params.session_token;
   const message = Object.keys(params)
     .sort()
     .map((k) => `${k}=${params[k]}`)
@@ -377,33 +423,23 @@ async function clearShopifyStoreInstall(shopDomain) {
 }
 
 /**
- * Credential mismatch: never keep/create an install. If we have (or can
- * exchange) an access token for this shop, uninstall from Shopify so the
- * app does not stay in the merchant's Installed list.
+ * Credential mismatch: never keep/create an install. Only uninstall if this
+ * request's session token belongs to OUR app (token exchange succeeds).
+ * Never use a previously stored token — that would uninstall a valid
+ * Chataffy install just because a different app was opened on the same shop.
  */
 async function uninstallOnCredentialMismatch(shopDomain, idToken) {
-  if (!shopDomain) return;
+  if (!shopDomain || !idToken) return;
   let accessToken = null;
 
-  const store = await Store.findOne({
-    storeHash: shopDomain,
-    platform: "shopify",
-    accessToken: { $ne: null },
-  })
-    .select("accessToken")
-    .lean();
-  if (store?.accessToken) accessToken = store.accessToken;
-
-  if (!accessToken && idToken) {
-    try {
-      const tokens = await exchangeSessionTokenForAccessToken(
-        shopDomain,
-        idToken,
-      );
-      accessToken = tokens?.accessToken || null;
-    } catch {
-      // Session was issued by a different app than env credentials.
-    }
+  try {
+    const tokens = await exchangeSessionTokenForAccessToken(
+      shopDomain,
+      idToken,
+    );
+    accessToken = tokens?.accessToken || null;
+  } catch {
+    // Session was issued by a different app than env credentials.
   }
 
   if (!accessToken) return;
@@ -666,7 +702,9 @@ async function upsertInstalledShopifyStore({
 router.get("/auth/credential-error", async (req, res) => {
   const shop = normalizeShopDomain(req.query.shop);
   if (!shop) return res.status(400).send("Missing shop");
-  return sendExitToShopifyOauthError(res, shop, req.query.id_token);
+  const incomingId = resolveIncomingClientId(req);
+  await uninstallOnCredentialMismatch(shop, req.query.id_token);
+  return sendShopifyApplicationNotFound(res, shop, incomingId);
 });
 
 router.get("/auth/install", async (req, res) => {
@@ -679,14 +717,31 @@ router.get("/auth/install", async (req, res) => {
       .status(400)
       .send("Provide a valid shop query, e.g. ?shop=your-store.myshopify.com");
   }
+  const incomingId = resolveIncomingClientId(req);
   if (
     !req.query.hmac ||
     !verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)
   ) {
-    // No HMAC, or HMAC from another app. OAuth with our live client_id
-    // would install Chataffy on the store even when creds are wrong.
+    // No HMAC, or HMAC from another app. OAuth with any live client_id
+    // would install that app on the store even when creds are wrong.
     console.warn("[Shopify] Install HMAC missing/mismatch; refusing OAuth");
-    return sendExitToShopifyOauthError(res, shop, req.query.id_token);
+    return sendExitToShopifyOauthError(
+      res,
+      shop,
+      req.query.id_token,
+      incomingId,
+    );
+  }
+  if (incomingId && incomingId !== SHOPIFY_CLIENT_ID) {
+    console.warn(
+      "[Shopify] Install client_id does not match SHOPIFY_CLIENT_ID; refusing OAuth",
+    );
+    return sendExitToShopifyOauthError(
+      res,
+      shop,
+      req.query.id_token,
+      incomingId,
+    );
   }
 
   // State is signed for this exact shop; the callback rejects any other shop.
@@ -720,6 +775,7 @@ router.get("/auth/callback", async (req, res) => {
       res,
       normalizeShopDomain(shop),
       req.query.id_token,
+      resolveIncomingClientId(req),
     );
   }
   const cookieState = req.cookies?.shopify_oauth_state;
@@ -781,6 +837,7 @@ router.get("/auth/callback", async (req, res) => {
         res,
         shopDomain,
         req.query.id_token,
+        resolveIncomingClientId(req),
       );
     }
     return sendInstallError(
@@ -814,9 +871,10 @@ function loadError(res, httpStatus, code, message, shop = null, extra = {}) {
   });
 }
 
-async function credentialMismatchJson(res, shop, idToken) {
+async function credentialMismatchJson(res, shop, idToken, incomingClientId) {
   await uninstallOnCredentialMismatch(shop, idToken);
-  const authorizeUrl = shop ? buildShopifyNotFoundAuthorizeUrl(shop) : null;
+  const apiKey =
+    sanitizeShopifyClientId(incomingClientId) || clientIdFromIdToken(idToken);
   return loadError(
     res,
     403,
@@ -824,8 +882,7 @@ async function credentialMismatchJson(res, shop, idToken) {
     "Shopify app credentials are invalid.",
     shop,
     {
-      apiKey: oauthErrorClientId(),
-      ...(authorizeUrl ? { authorizeUrl } : {}),
+      ...(apiKey ? { apiKey } : {}),
     },
   );
 }
@@ -840,20 +897,31 @@ router.get("/auth/load", async (req, res) => {
     );
   }
 
-  const idToken = req.query.id_token;
+  const idToken = req.query.session_token || req.query.id_token;
+  const incomingId = resolveIncomingClientId(req, idToken);
+  const claimedShop =
+    normalizeShopDomain(req.query.shop) ||
+    readUnverifiedSessionToken(idToken)?.shop ||
+    readUnverifiedSessionToken(req.query.id_token)?.shop;
   let shopDomain = null;
   let hasValidSessionToken = false;
 
+  // HMAC is signed by the app that opened admin. Check it before trusting
+  // App Bridge: the frontend api key can mint a valid token for OUR app
+  // even when the merchant installed a different one.
+  if (req.query.hmac && !verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
+    console.warn("[Shopify] Load HMAC mismatch; refusing install");
+    return credentialMismatchJson(res, claimedShop, idToken, incomingId);
+  }
+
+  if (incomingId && SHOPIFY_CLIENT_ID && incomingId !== SHOPIFY_CLIENT_ID) {
+    console.warn(
+      "[Shopify] session token aud does not match SHOPIFY_CLIENT_ID; refusing install",
+    );
+    return credentialMismatchJson(res, claimedShop, idToken, incomingId);
+  }
+
   if (idToken) {
-    const claims = readUnverifiedSessionToken(idToken);
-    const claimedShop =
-      claims?.shop || normalizeShopDomain(req.query.shop);
-    if (claims?.aud && SHOPIFY_CLIENT_ID && claims.aud !== SHOPIFY_CLIENT_ID) {
-      console.warn(
-        "[Shopify] session token aud does not match SHOPIFY_CLIENT_ID; refusing install",
-      );
-      return credentialMismatchJson(res, claimedShop, idToken);
-    }
     try {
       ({ shop: shopDomain } = verifySessionToken(idToken));
       hasValidSessionToken = true;
@@ -862,7 +930,12 @@ router.get("/auth/load", async (req, res) => {
       // Signature / audience failures mean the token was issued by a different
       // Shopify app than the credentials this server uses — retrying is useless.
       if (isCredentialMismatchJwtError(e)) {
-        return credentialMismatchJson(res, claimedShop, idToken);
+        return credentialMismatchJson(
+          res,
+          claimedShop,
+          idToken,
+          incomingId,
+        );
       }
       res.set("X-Shopify-Retry-Invalid-Session-Request", "1");
       const expired =
@@ -877,15 +950,6 @@ router.get("/auth/load", async (req, res) => {
       );
     }
   } else if (req.query.shop && req.query.hmac) {
-    if (!verifyShopifyQueryHmac(req.query, SHOPIFY_API_SECRET)) {
-      // HMAC from a different Shopify app — do not fall through to install.
-      console.warn("[Shopify] Load HMAC mismatch; refusing install");
-      return credentialMismatchJson(
-        res,
-        normalizeShopDomain(req.query.shop),
-        idToken,
-      );
-    }
     shopDomain = normalizeShopDomain(req.query.shop);
   }
 
