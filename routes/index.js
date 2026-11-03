@@ -99,6 +99,9 @@ const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
 const ChatTranscriptController = require('../controllers/ChatTranscriptController');
 const VisitorController = require('../controllers/VisitorController');
+const BlogController = require('../controllers/BlogController');
+const BlogPublisherController = require('../controllers/BlogPublisherController');
+const { requireInternalSecret } = require('../services/blogPublishingService');
 
 /* Public routes (no authentication required) */
 router.get('/test', (req, res) => {
@@ -292,6 +295,52 @@ router.post('/leaveMessage', VisitorController.leaveMessage);
 
 // generate short lived token for platform redirection login
 router.post('/generate-short-lived-token', middleware, UserController.generateShortLivedToken);
+
+// AI blog publisher (Shopify). Specific paths are registered before :id.
+router.get('/blogs', middleware, BlogController.listBlogs);
+router.post('/blogs/generate', middleware, BlogController.generateBlog);
+router.post('/blogs', middleware, BlogController.saveBlog);
+router.get('/blogs/:id/status', middleware, BlogController.getBlogStatus);
+router.get('/shopify/blogs', middleware, BlogController.listShopifyBlogs);
+router.post('/shopify/blogs/publish', middleware, BlogController.publishBlog);
+
+const blogPublishLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    status_code: 429,
+    status: false,
+    message: 'Too many blog publish requests. Please try again later.',
+  },
+});
+
+router.get('/blog-publisher', middleware, BlogPublisherController.getPublisherHome);
+router.post(
+  '/blog-publisher/generate-publish',
+  blogPublishLimiter,
+  middleware,
+  BlogPublisherController.generateAndPublish,
+);
+router.get('/blog-publisher/jobs/:id', middleware, BlogPublisherController.getJob);
+router.get('/blog-publisher/shopify/blogs', middleware, BlogPublisherController.listShopifyBlogs);
+
+router.get(
+  '/internal/blog-publishing/jobs/:id',
+  requireInternalSecret,
+  BlogPublisherController.getInternalJob,
+);
+router.post(
+  '/internal/blog-publishing/publish',
+  requireInternalSecret,
+  BlogPublisherController.publishInternal,
+);
+router.post(
+  '/internal/blog-publishing/callback',
+  requireInternalSecret,
+  BlogPublisherController.callbackInternal,
+);
 
 // Error handling middleware for multer errors
 router.use((error, req, res, next) => {

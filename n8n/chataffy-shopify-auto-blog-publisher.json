@@ -1,0 +1,196 @@
+{
+  "name": "Chataffy - Shopify Auto Blog Publisher",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chataffy-blog-publish",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "8f0c1a10-6b1e-4a7d-9c11-0a0b0c0d0e01",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "chataffy-blog-publish"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=http://localhost:9000/api/internal/blog-publishing/jobs/{{ $json.body.jobId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer REPLACE_WITH_N8N_INTERNAL_API_SECRET"
+            }
+          ]
+        },
+        "options": { "timeout": 20000 }
+      },
+      "id": "8f0c1a10-6b1e-4a7d-9c11-0a0b0c0d0e02",
+      "name": "Get Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "job-queued",
+              "leftValue": "={{ $json.job.status }}",
+              "rightValue": "queued",
+              "operator": { "type": "string", "operation": "equals" }
+            },
+            {
+              "id": "job-failed",
+              "leftValue": "={{ $json.job.status }}",
+              "rightValue": "failed",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "or"
+        }
+      },
+      "id": "8f0c1a10-6b1e-4a7d-9c11-0a0b0c0d0e03",
+      "name": "Validate Job",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:9000/api/internal/blog-publishing/publish",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer REPLACE_WITH_N8N_INTERNAL_API_SECRET"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jobId: $('Webhook').item.json.body.jobId }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "8f0c1a10-6b1e-4a7d-9c11-0a0b0c0d0e04",
+      "name": "Publish",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "publish-ok",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "8f0c1a10-6b1e-4a7d-9c11-0a0b0c0d0e05",
+      "name": "Check Result",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1200, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:9000/api/internal/blog-publishing/callback",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer REPLACE_WITH_N8N_INTERNAL_API_SECRET"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jobId: $('Webhook').item.json.body.jobId, n8nExecutionId: $execution.id, status: 'published' }) }}",
+        "options": {}
+      },
+      "id": "8f0c1a10-6b1e-4a7d-9c11-0a0b0c0d0e06",
+      "name": "Callback Success",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:9000/api/internal/blog-publishing/callback",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer REPLACE_WITH_N8N_INTERNAL_API_SECRET"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jobId: $('Webhook').item.json.body.jobId, n8nExecutionId: $execution.id, status: 'failed', errorMessage: 'n8n publishing workflow did not complete' }) }}",
+        "options": {}
+      },
+      "id": "8f0c1a10-6b1e-4a7d-9c11-0a0b0c0d0e07",
+      "name": "Callback Failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 360]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Get Job", "type": "main", "index": 0 }]]
+    },
+    "Get Job": {
+      "main": [[{ "node": "Validate Job", "type": "main", "index": 0 }]]
+    },
+    "Validate Job": {
+      "main": [
+        [{ "node": "Publish", "type": "main", "index": 0 }],
+        [{ "node": "Callback Failed", "type": "main", "index": 0 }]
+      ]
+    },
+    "Publish": {
+      "main": [[{ "node": "Check Result", "type": "main", "index": 0 }]]
+    },
+    "Check Result": {
+      "main": [
+        [{ "node": "Callback Success", "type": "main", "index": 0 }],
+        [{ "node": "Callback Failed", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false }
+}

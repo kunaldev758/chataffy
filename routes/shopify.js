@@ -20,7 +20,7 @@ const router = express.Router();
 const SHOPIFY_CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 const SHOPIFY_SCOPES =
-  process.env.SHOPIFY_SCOPES || "read_products,read_content";
+  process.env.SHOPIFY_SCOPES || "read_products,read_content,write_content";
 const SHOPIFY_CALLBACK_URL = `${process.env.BASE_URL}api/shopify/auth/callback`;
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-04";
 const APP_UNINSTALLED_WEBHOOK_URL = `${process.env.BASE_URL}api/shopify/webhooks/app-uninstalled`;
@@ -324,6 +324,7 @@ async function getValidShopifyAccessToken(store) {
     return store.accessToken;
   }
   if (!store.refreshToken) {
+    if (store.accessToken) return store.accessToken;
     throw new Error("No Shopify refresh token stored; merchant must reopen the app");
   }
 
@@ -346,6 +347,7 @@ async function getValidShopifyAccessToken(store) {
         refreshToken: tokens.refreshToken,
         accessTokenExpiresAt: tokens.accessTokenExpiresAt,
         refreshTokenExpiresAt: tokens.refreshTokenExpiresAt,
+        ...(tokens.scope ? { scope: tokens.scope } : {}),
       },
     },
   );

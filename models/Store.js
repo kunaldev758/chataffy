@@ -73,6 +73,14 @@ const storeSchema = new mongoose.Schema({
         type: Boolean,
         default: undefined,
     },
+    defaultShopifyBlogId: {
+        type: String,
+        default: null,
+    },
+    defaultShopifyBlogTitle: {
+        type: String,
+        default: null,
+    },
 }, {timestamps: true});
 
 const Store = mongoose.model('Store', storeSchema);
