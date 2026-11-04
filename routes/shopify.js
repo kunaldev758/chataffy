@@ -773,11 +773,18 @@ router.get("/auth/load", async (req, res) => {
 
     // A stored token without a refresh token is a legacy non-expiring token,
     // which the Admin API no longer accepts — exchange for an expiring one.
+    // Also re-auth when write_content is missing so blog publish can work after
+    // SHOPIFY_SCOPES was expanded (existing merchants keep old granted scopes).
+    const hasWriteContent = String(store?.scope || "")
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .includes("write_content");
     let needsAccessToken =
       !store ||
       store.status === "uninstalled" ||
       !store.accessToken ||
-      !store.refreshToken;
+      !store.refreshToken ||
+      !hasWriteContent;
 
     // Verify the stored token against Shopify itself (not just "a token
     // exists in the DB"): a revoked/invalid token means the app is no longer
