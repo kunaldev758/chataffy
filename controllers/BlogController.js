@@ -389,6 +389,7 @@ async function publishBlog(req, res) {
     const payload = {
       platform: store.platform,
       storeHash: store.storeHash,
+      storeUrl: store.storeUrl || null,
       accessToken,
       apiVersion: SHOPIFY_API_VERSION,
       blog: {
