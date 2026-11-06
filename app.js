@@ -11,6 +11,7 @@ const cron = require('node-cron');
 const { downgradeExpiredPlans } = require('./services/planCronService');
 const bigcommerceRoutes = require("./routes/bigcommerce");
 const shopifyRoutes = require("./routes/shopify");
+const wordpressRoutes = require("./routes/wordpress");
 const blogRoutes = require("./routes/blog");
 const { initializeSocketController } = require("./socket");
 
@@ -121,6 +122,7 @@ app.use("/api", apiRoutes);
 app.use('/api/paypal', paymentsRouter);
 app.use('/api/bigcommerce', bigcommerceRoutes);
 app.use("/api/shopify", shopifyRoutes);
+app.use("/api/wordpress", wordpressRoutes);
 app.use("/api/blog", blogRoutes);
 
 // check ip address ---> 

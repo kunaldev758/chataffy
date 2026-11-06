@@ -23,7 +23,7 @@ const storeSchema = new mongoose.Schema({
     },
     platform: {
         type: String,
-        enum: ['bigcommerce', 'shopify'],
+        enum: ['bigcommerce', 'shopify', 'wordpress'],
         default: 'bigcommerce',
     },
     accessToken: {
@@ -40,6 +40,11 @@ const storeSchema = new mongoose.Schema({
     },
     refreshTokenExpiresAt: {
         type: Date,
+        default: null,
+    },
+    // WordPress Application Password auth (username only; password in accessToken).
+    wpUsername: {
+        type: String,
         default: null,
     },
     email: {

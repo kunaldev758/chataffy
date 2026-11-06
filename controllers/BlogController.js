@@ -8,9 +8,11 @@ const { getResolvedModelConfig } = require("../services/aiModelService");
 const {
   getValidShopifyAccessToken,
 } = require("../routes/shopify");
+const { decryptSecret } = require("../utils/secretCrypto");
 
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-04";
 const SHOPIFY_WRITE_CONTENT_SCOPE = "write_content";
+const WP_SCOPE = "wp_rest";
 const BC_CONTENT_MODIFY_HINTS = [
   "store_v2_content",
   "content_modify",
@@ -56,6 +58,35 @@ function hasBigCommerceContentModify(scope) {
       (hint) => s.includes(hint) && !s.includes("read_only"),
     ),
   );
+}
+
+function hasWordPressPublishCapability(store) {
+  if (store?.platform !== "wordpress") return false;
+  if (!store.wpUsername) return false;
+  if (!parseScopeList(store.scope).includes(WP_SCOPE)) return false;
+  // listStores omits accessToken from the projection; the DB query already
+  // requires a non-null token. Only treat missing creds when the field is loaded.
+  if (Object.prototype.hasOwnProperty.call(store, "accessToken") && !store.accessToken) {
+    return false;
+  }
+  return true;
+}
+
+function storeCanPublish(store) {
+  if (store.platform === "shopify") return hasShopifyWriteContent(store.scope);
+  if (store.platform === "bigcommerce") {
+    return hasBigCommerceContentModify(store.scope);
+  }
+  if (store.platform === "wordpress") return hasWordPressPublishCapability(store);
+  return false;
+}
+
+function storeMissingScope(store, canPublish) {
+  if (canPublish) return null;
+  if (store.platform === "shopify") return SHOPIFY_WRITE_CONTENT_SCOPE;
+  if (store.platform === "bigcommerce") return "Content: modify";
+  if (store.platform === "wordpress") return WP_SCOPE;
+  return "unknown";
 }
 
 function sessionUserId(req) {
@@ -125,6 +156,8 @@ async function listStores(req, res) {
 
     const boundStoreHash = sessionStoreHash(req);
     const sessionPlatform = req.authSession?.platform;
+    // Embedded Shopify/BC sessions stay scoped to that marketplace.
+    // Local/Google dashboard sessions see commerce stores + WordPress sites.
     if (boundStoreHash) {
       filter.storeHash = boundStoreHash;
       filter.platform = "shopify";
@@ -135,30 +168,24 @@ async function listStores(req, res) {
     }
 
     const stores = await Store.find(filter)
-      .select("storeHash storeUrl platform name email scope status createdAt")
+      .select(
+        "storeHash storeUrl platform name email scope status wpUsername createdAt",
+      )
       .sort({ createdAt: 1 })
       .lean();
 
     const mapped = stores.map((store) => {
-      const canPublish =
-        store.platform === "shopify"
-          ? hasShopifyWriteContent(store.scope)
-          : hasBigCommerceContentModify(store.scope);
+      const canPublish = storeCanPublish(store);
       return {
         storeHash: store.storeHash,
         storeUrl: store.storeUrl,
         platform: store.platform,
         name: store.name,
         email: store.email,
+        wpUsername:
+          store.platform === "wordpress" ? store.wpUsername || null : undefined,
         canPublish,
-        missingScope:
-          store.platform === "shopify"
-            ? canPublish
-              ? null
-              : SHOPIFY_WRITE_CONTENT_SCOPE
-            : canPublish
-              ? null
-              : "Content: modify",
+        missingScope: storeMissingScope(store, canPublish),
       };
     });
 
@@ -306,7 +333,26 @@ async function resolvePublishStore(req, storeHash) {
     );
   }
 
+  if (store.platform === "wordpress" && !hasWordPressPublishCapability(store)) {
+    throw Object.assign(
+      new Error(
+        "WordPress site is missing credentials. Reconnect the site with a valid Application Password.",
+      ),
+      { status: 403, code: "MISSING_WP_CREDENTIALS" },
+    );
+  }
+
   return store;
+}
+
+async function resolvePublishAccessToken(store) {
+  if (store.platform === "shopify") {
+    return getValidShopifyAccessToken(store);
+  }
+  if (store.platform === "wordpress") {
+    return decryptSecret(store.accessToken);
+  }
+  return store.accessToken;
 }
 
 /**
@@ -361,10 +407,7 @@ async function publishBlog(req, res) {
       ? tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 12)
       : [];
 
-    const accessToken =
-      store.platform === "shopify"
-        ? await getValidShopifyAccessToken(store)
-        : store.accessToken;
+    const accessToken = await resolvePublishAccessToken(store);
 
     const requestId = `${store.storeHash}-${Date.now()}-${Math.random()
       .toString(36)
@@ -386,11 +429,14 @@ async function publishBlog(req, res) {
       status: "publishing",
     });
 
+    // Shared n8n contract for all platforms. WordPress adds wpUsername;
+    // n8n maps blog.html → content and publishNow → status publish|draft.
     const payload = {
       platform: store.platform,
       storeHash: store.storeHash,
       storeUrl: store.storeUrl || null,
       accessToken,
+      // Shopify uses this; BigCommerce ignores it. Kept for existing n8n nodes.
       apiVersion: SHOPIFY_API_VERSION,
       blog: {
         title: blogPost.title,
@@ -402,6 +448,11 @@ async function publishBlog(req, res) {
       callbackUrl: `${baseUrl}api/blog/n8n-callback`,
       requestId,
     };
+
+    if (store.platform === "wordpress") {
+      payload.wpUsername = store.wpUsername;
+      payload.siteUrl = store.storeUrl || null;
+    }
 
     try {
       await axios.post(webhookUrl, payload, {

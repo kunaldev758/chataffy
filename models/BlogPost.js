@@ -15,7 +15,7 @@ const blogPostSchema = new mongoose.Schema(
     },
     platform: {
       type: String,
-      enum: ["shopify", "bigcommerce"],
+      enum: ["shopify", "bigcommerce", "wordpress"],
       required: true,
     },
     requestId: {
