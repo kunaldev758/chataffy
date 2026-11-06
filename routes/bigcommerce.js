@@ -39,7 +39,12 @@ const router = express.Router();
 
 const CLIENT_ID = process.env.BC_CLIENT_ID;
 const CLIENT_SECRET = process.env.BC_CLIENT_SECRET;
-const CALLBACK_URL = `${process.env.BASE_URL}api/bigcommerce/auth/callback`;
+// BigCommerce rejects the token exchange unless redirect_uri is identical to
+// the Auth callback saved on the app. Do not derive this from BASE_URL: that
+// value still uses the legacy /chataffy/chataffy prefix.
+const CALLBACK_URL =
+  process.env.BC_CALLBACK_URL ||
+  "https://chataffy.com/api/bigcommerce/auth/callback";
 
 function bigcommerceStoreQuery(storeHash) {
   return {
