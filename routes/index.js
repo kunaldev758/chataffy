@@ -99,6 +99,7 @@ const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
 const ChatTranscriptController = require('../controllers/ChatTranscriptController');
 const VisitorController = require('../controllers/VisitorController');
+const WordPressController = require('../controllers/WordPressController');
 
 /* Public routes (no authentication required) */
 router.get('/test', (req, res) => {
@@ -292,6 +293,17 @@ router.post('/leaveMessage', VisitorController.leaveMessage);
 
 // generate short lived token for platform redirection login
 router.post('/generate-short-lived-token', middleware, UserController.generateShortLivedToken);
+
+// WordPress blog publishing (direct REST API — no n8n)
+router.post('/wordpress/connect', middleware, WordPressController.connect);
+router.post('/wordpress/status', middleware, WordPressController.status);
+router.post('/wordpress/test', middleware, WordPressController.testConnection);
+router.post('/wordpress/disconnect', middleware, WordPressController.disconnect);
+router.post('/wordpress/publish', middleware, WordPressController.publish);
+router.post('/wordpress/posts', middleware, WordPressController.listPosts);
+router.post('/blogs/generate', middleware, WordPressController.generateBlog);
+router.post('/blogs/update', middleware, WordPressController.updateBlog);
+router.post('/blogs/get', middleware, WordPressController.getBlog);
 
 // Error handling middleware for multer errors
 router.use((error, req, res, next) => {
