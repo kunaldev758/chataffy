@@ -99,6 +99,7 @@ const {verifySuperAdminToken} = require('../middleware/verifySuperAdminToken');
 const middleware = require('../middleware/authMiddleware');
 const ChatTranscriptController = require('../controllers/ChatTranscriptController');
 const VisitorController = require('../controllers/VisitorController');
+const BlogController = require('../controllers/BlogController');
 
 /* Public routes (no authentication required) */
 router.get('/test', (req, res) => {
@@ -292,6 +293,12 @@ router.post('/leaveMessage', VisitorController.leaveMessage);
 
 // generate short lived token for platform redirection login
 router.post('/generate-short-lived-token', middleware, UserController.generateShortLivedToken);
+
+// AI blog generate / edit / history (publish goes to Wix via /api/wix/publish)
+router.post('/blogs/generate', middleware, BlogController.generateBlog);
+router.post('/blogs/update', middleware, BlogController.updateBlog);
+router.post('/blogs/get', middleware, BlogController.getBlog);
+router.post('/blogs/list', middleware, BlogController.listPosts);
 
 // Error handling middleware for multer errors
 router.use((error, req, res, next) => {
