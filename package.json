@@ -48,6 +48,7 @@
     "pdf-parse": "^1.1.1",
     "playwright": "^1.61.1",
     "puppeteer": "^24.2.0",
+    "razorpay": "^2.9.8",
     "redis": "^4.7.0",
     "robots-parser": "^3.0.1",
     "socket.io": "^4.7.3",

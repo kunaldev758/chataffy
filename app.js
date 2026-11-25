@@ -7,6 +7,7 @@ const path = require("path");
 const fs = require("fs");
 const apiRoutes = require("./routes/");
 const paymentsRouter = require('./routes/payments');
+const razorpayRouter = require('./routes/razorpay');
 const cron = require('node-cron');
 const { downgradeExpiredPlans } = require('./services/planCronService');
 const bigcommerceRoutes = require("./routes/bigcommerce");
@@ -109,7 +110,10 @@ app.use(
   express.json({
     limit: "10mb",
     verify: (req, res, buf) => {
-      if (req.originalUrl?.startsWith("/api/shopify/webhooks")) {
+      if (
+        req.originalUrl?.startsWith("/api/shopify/webhooks") ||
+        req.originalUrl?.startsWith("/api/razorpay/webhook")
+      ) {
         req.rawBody = buf;
       }
     },
@@ -118,6 +122,7 @@ app.use(
 app.use("/uploads", express.static(uploadsDir));
 app.use("/api", apiRoutes);
 app.use('/api/paypal', paymentsRouter);
+app.use('/api/razorpay', razorpayRouter);
 app.use('/api/bigcommerce', bigcommerceRoutes);
 app.use("/api/shopify", shopifyRoutes);
 

@@ -43,7 +43,8 @@ const sendAgentApprovalEmail = async (agent,acceptUrl,password) => {
   }
 };
 
-const sendPlanUpgradeEmail = async (user, planName, amount, billingCycle) => {
+const sendPlanUpgradeEmail = async (user, planName, amount, billingCycle, currency = "USD") => {
+  const symbol = String(currency).toUpperCase() === "INR" ? "₹" : "$";
   const mailOptions = {
     from: process.env.SMTP_FROM,
     to: user.email,
@@ -54,7 +55,7 @@ const sendPlanUpgradeEmail = async (user, planName, amount, billingCycle) => {
       <ul>
         <li>Plan: ${planName}</li>
         <li>Billing Cycle: ${billingCycle}</li>
-        <li>Amount Paid: $${amount}</li>
+        <li>Amount Paid: ${symbol}${amount}</li>
       </ul>
       <p>Your account has been successfully updated with the new plan.</p>
       <p>If you have any questions, feel free to contact our support.</p>

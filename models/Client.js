@@ -69,6 +69,10 @@ const clientSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    totalAmountPaidInr: {
+      type: Number,
+      default: 0,
+    },
     customLimits: {
       isCustomLimits: { type: Boolean, default: false },
       maxQueries: { type: Number, default: null },
